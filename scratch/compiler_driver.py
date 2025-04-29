@@ -1,13 +1,22 @@
 import ast
+from enum import Enum
 from dataclasses import dataclass
 from typing import Dict, Optional, Set, List
 import sys
 
+class EntityType(Enum):
+    VARIABLE = 1
+    FUNCTION = 2
+    CLASS = 3
+    CLASS_MEMBER = 4
+    CLASS_METHOD = 5
+    UNRESOLVED = 6
+
 
 @dataclass
 class SymbolInfo:
-    """Placeholder for symbol information. Will be expanded later."""
-    pass
+    """Symbol Information"""
+    entity_type: EntityType = EntityType.UNRESOLVED
 
 
 class SymbolTableBuilder(ast.NodeVisitor):
@@ -18,20 +27,27 @@ class SymbolTableBuilder(ast.NodeVisitor):
         self.scopes = [{}]  # Stack of scopes, with global scope at index 0
         self.current_scope = self.scopes[0]
 
+    def in_global_scope(self):
+        return len(self.scopes) == 1
+
     def visit_Name(self, node):
         """Process name nodes to track variable references and definitions."""
         if isinstance(node.ctx, ast.Store):
             # This is a definition or assignment
-            self.current_scope[node.id] = SymbolInfo()
-            # Also add to global symbol table with fully qualified name
-            self.symbols[node.id] = SymbolInfo()
+            symbol_info = SymbolInfo(EntityType.VARIABLE)
+            self.current_scope[node.id] = symbol_info
+            # Also add to global symbol table, if in global scope
+            if self.in_global_scope():
+                self.symbols[node.id] = symbol_info
         self.generic_visit(node)
 
     def visit_FunctionDef(self, node):
         """Process function definitions."""
         # Register the function name in the current scope
-        self.current_scope[node.name] = SymbolInfo()
-        self.symbols[node.name] = SymbolInfo()
+        symbol_info = SymbolInfo(EntityType.FUNCTION)
+        self.current_scope[node.name] = symbol_info
+        if self.in_global_scope():
+            self.symbols[node.name] = symbol_info
 
         # Create a new scope for this function
         function_scope = {}
@@ -39,12 +55,12 @@ class SymbolTableBuilder(ast.NodeVisitor):
         old_scope = self.current_scope
         self.current_scope = function_scope
 
-        # Add parameters to the function's scope
-        for arg in node.args.args:
-            self.current_scope[arg.arg] = SymbolInfo()
-            # Use qualified name for global table
-            qualified_name = f"{node.name}.{arg.arg}"
-            self.symbols[qualified_name] = SymbolInfo()
+        ## Add parameters to the function's scope
+        #for arg in node.args.args:
+        #    self.current_scope[arg.arg] = SymbolInfo()
+        #    # Use qualified name for global table
+        #    qualified_name = f"{node.name}.{arg.arg}"
+        #    self.symbols[qualified_name] = SymbolInfo()
 
         # Visit the function body
         for statement in node.body:
@@ -57,8 +73,12 @@ class SymbolTableBuilder(ast.NodeVisitor):
     def visit_ClassDef(self, node):
         """Process class definitions."""
         # Register the class in the current scope
-        self.current_scope[node.name] = SymbolInfo()
-        self.symbols[node.name] = SymbolInfo()
+        symbol_info = SymbolInfo(EntityType.CLASS)
+        self.current_scope[node.name] = symbol_info
+        if self.in_global_scope():
+            self.symbols[node.name] = symbol_info
+        else:
+            raise NotImplementedError("nested classes not supported")
 
         # Create a scope for this class
         class_scope = {}
@@ -71,9 +91,13 @@ class SymbolTableBuilder(ast.NodeVisitor):
             self.visit(statement)
 
         # Process class members for the symbol table
-        for name, _ in class_scope.items():
+        for name, symbol_info in class_scope.items():
             qualified_name = f"{node.name}.{name}"
-            self.symbols[qualified_name] = SymbolInfo()
+            if symbol_info.entity_type == EntityType.VARIABLE:
+                symbol_info = SymbolInfo(EntityType.CLASS_MEMBER)
+            elif symbol_info.entity_type == EntityType.FUNCTION:
+                symbol_info = SymbolInfo(EntityType.CLASS_METHOD)
+            self.symbols[qualified_name] = symbol_info
 
         # Restore the previous scope
         self.scopes.pop()
