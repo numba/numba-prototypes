@@ -1,13 +1,14 @@
-# gloabl
+# global
 global_variable = 1
 
+# function
 def function():
     pass
 
 # class with member and methods
 class ClassDefinition:
 
-    # class variable
+    # class member
     class_member = 0
 
     # method
