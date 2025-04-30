@@ -4,19 +4,48 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Set, List
 import sys
 
-class EntityType(Enum):
-    VARIABLE = 1
-    FUNCTION = 2
-    CLASS = 3
-    CLASS_MEMBER = 4
-    CLASS_METHOD = 5
-    UNRESOLVED = 6
+
+class EntityType:
+    pass
+
+class Variable(EntityType):
+    pass
+
+class Class(EntityType):
+    pass
+
+class Member(Variable):
+    pass
+
+class Function(EntityType):
+    pass
+
+class Closure(EntityType):
+    pass
+
+class Method(Function):
+    pass
+
+class ClassMethod(Function):
+    pass
+
+class StaticMethod(Function):
+    pass
 
 
 @dataclass
 class SymbolInfo:
     """Symbol Information"""
-    entity_type: EntityType = EntityType.UNRESOLVED
+
+    entity_type: EntityType 
+
+
+class Scope(dict):
+    """Current Scope"""
+
+    def __init__(self, namespace="", entity_type=EntityType):
+        self.namespace = namespace
+        self.entity_type = entity_type
 
 
 class SymbolTableBuilder(ast.NodeVisitor):
@@ -24,17 +53,25 @@ class SymbolTableBuilder(ast.NodeVisitor):
 
     def __init__(self):
         self.symbols = {}  # Global symbol table
-        self.scopes = [{}]  # Stack of scopes, with global scope at index 0
-        self.current_scope = self.scopes[0]
+        self.scopes = [Scope()]  # Stack of scopes, with global scope at index 0
+
+    @property
+    def current_scope(self):
+        return self.scopes[-1]
 
     def in_global_scope(self):
-        return len(self.scopes) == 1
+        return len(self.scopes) == 1 and self.scopes[0].namespace == ""
+
+    def new_scope(self, namespace, entity_type):
+        prefix = "" if self.current_scope.namespace == "" else f"{self.current_scope.namespace}."
+        new_namespace = f"{prefix}{namespace}"
+        return Scope(new_namespace, entity_type)
 
     def visit_Name(self, node):
         """Process name nodes to track variable references and definitions."""
         if isinstance(node.ctx, ast.Store):
             # This is a definition or assignment
-            symbol_info = SymbolInfo(EntityType.VARIABLE)
+            symbol_info = SymbolInfo(Variable)
             self.current_scope[node.id] = symbol_info
             # Also add to global symbol table, if in global scope
             if self.in_global_scope():
@@ -43,17 +80,34 @@ class SymbolTableBuilder(ast.NodeVisitor):
 
     def visit_FunctionDef(self, node):
         """Process function definitions."""
-        # Register the function name in the current scope
-        symbol_info = SymbolInfo(EntityType.FUNCTION)
-        self.current_scope[node.name] = symbol_info
-        if self.in_global_scope():
-            self.symbols[node.name] = symbol_info
+        # Based on the current scope, determine the EntityType
+        if issubclass(self.current_scope.entity_type, Function):
+            # this is a function in a function, must be a closure
+            symbol_info = SymbolInfo(Closure)
+        elif issubclass(self.current_scope.entity_type, Class):
+            # must be some kind of method
+            # check for decorator
+            dl = [n.id for n in node.decorator_list]
+            if "classmethod" in dl and "staticmethod" in dl:
+                raise NotImplementedError(
+                    "can't decorate a method with both classmethod and staticmethod")
+            elif "classmethod" in dl:
+                symbol_info = SymbolInfo(ClassMethod)
+            elif "staticmethod" in dl:
+                symbol_info = SymbolInfo(StaticMethod)
+            else:
+                symbol_info = SymbolInfo(Method)
+        else:
+            # must be in global scope
+            assert self.in_global_scope()
+            symbol_info = SymbolInfo(Function)
 
         # Create a new scope for this function
-        function_scope = {}
-        self.scopes.append(function_scope)
-        old_scope = self.current_scope
-        self.current_scope = function_scope
+        scope = self.new_scope(node.name, Function)
+        # Add the symbol info to the current scope
+        self.current_scope[node.name] = symbol_info
+        # Add a fully qualified name to the global symbol table
+        self.symbols[scope.namespace] = symbol_info
 
         ## Add parameters to the function's scope
         #for arg in node.args.args:
@@ -62,46 +116,43 @@ class SymbolTableBuilder(ast.NodeVisitor):
         #    qualified_name = f"{node.name}.{arg.arg}"
         #    self.symbols[qualified_name] = SymbolInfo()
 
+        # Place the functions scope on the scope stack
+        self.scopes.append(scope)
         # Visit the function body
         for statement in node.body:
             self.visit(statement)
 
-        # Restore the previous scope
+        # Pop the function's scope from the scope stack
         self.scopes.pop()
-        self.current_scope = old_scope
 
     def visit_ClassDef(self, node):
         """Process class definitions."""
-        # Register the class in the current scope
-        symbol_info = SymbolInfo(EntityType.CLASS)
-        self.current_scope[node.name] = symbol_info
-        if self.in_global_scope():
-            self.symbols[node.name] = symbol_info
+
+        # Based on the current scope, determine the EntityType
+        if issubclass(self.current_scope.entity_type, (Function, Class)):
+            # this is a function in a function, must be a closure
+            symbol_info = SymbolInfo(Closure)
         else:
-            raise NotImplementedError("nested classes not supported")
+            # must be in global scope
+            assert self.in_global_scope()
+            symbol_info = SymbolInfo(Class)
 
-        # Create a scope for this class
-        class_scope = {}
-        self.scopes.append(class_scope)
-        old_scope = self.current_scope
-        self.current_scope = class_scope
+        # Create a new scope for this Class
+        scope = self.new_scope(node.name, Class)
+        # Add the symbol info to the current scope
+        self.current_scope[node.name] = symbol_info
+        # Add a fully qualified name to the global symbol table
+        self.symbols[scope.namespace] = symbol_info
 
+
+        # Place the functions scope on the scope stack
+        self.scopes.append(scope)
         # Visit the class body
         for statement in node.body:
             self.visit(statement)
 
-        # Process class members for the symbol table
-        for name, symbol_info in class_scope.items():
-            qualified_name = f"{node.name}.{name}"
-            if symbol_info.entity_type == EntityType.VARIABLE:
-                symbol_info = SymbolInfo(EntityType.CLASS_MEMBER)
-            elif symbol_info.entity_type == EntityType.FUNCTION:
-                symbol_info = SymbolInfo(EntityType.CLASS_METHOD)
-            self.symbols[qualified_name] = symbol_info
-
-        # Restore the previous scope
+        # Pop the classes scope from the scope stack
         self.scopes.pop()
-        self.current_scope = old_scope
 
 
 class CompilerDriver:
