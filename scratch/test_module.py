@@ -3,7 +3,7 @@ global_variable = 1
 
 # function
 def function():
-    pass
+    local_variable = 2
 
 # closure
 def outer():
@@ -24,7 +24,7 @@ class ClassDef:
 
     # method
     def method(self):
-        pass
+        local_variable = 3
 
     # classmethod
     @classmethod

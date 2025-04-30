@@ -11,6 +11,9 @@ class EntityType:
 class Variable(EntityType):
     pass
 
+class LocalVariable(Variable):
+    pass
+
 class Class(EntityType):
     pass
 
@@ -62,20 +65,28 @@ class SymbolTableBuilder(ast.NodeVisitor):
     def in_global_scope(self):
         return len(self.scopes) == 1 and self.scopes[0].namespace == ""
 
-    def new_scope(self, namespace, entity_type):
+    def create_namespace(self, name):
         prefix = "" if self.current_scope.namespace == "" else f"{self.current_scope.namespace}."
-        new_namespace = f"{prefix}{namespace}"
-        return Scope(new_namespace, entity_type)
+        new_namespace = f"{prefix}{name}"
+        return new_namespace
+
+    def new_scope(self, name, entity_type):
+        return Scope(self.create_namespace(name), entity_type)
 
     def visit_Name(self, node):
         """Process name nodes to track variable references and definitions."""
         if isinstance(node.ctx, ast.Store):
             # This is a definition or assignment
-            symbol_info = SymbolInfo(Variable)
+            if issubclass(self.current_scope.entity_type, Class):
+                symbol_info = SymbolInfo(Member)
+            elif issubclass(self.current_scope.entity_type, Function):
+                symbol_info = SymbolInfo(LocalVariable)
+            else:
+                assert self.in_global_scope()
+                symbol_info = SymbolInfo(Variable)
+            namespace = self.create_namespace(node.id)
             self.current_scope[node.id] = symbol_info
-            # Also add to global symbol table, if in global scope
-            if self.in_global_scope():
-                self.symbols[node.id] = symbol_info
+            self.symbols[namespace] = symbol_info
         self.generic_visit(node)
 
     def visit_FunctionDef(self, node):
