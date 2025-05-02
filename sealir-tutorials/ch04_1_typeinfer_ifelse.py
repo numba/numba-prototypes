@@ -535,7 +535,10 @@ def compiler_pipeline(
             cost_model=cost_model,
         )
     except ExtractionError as e:
-        raise CompilationError("extraction failed") from e
+        first_failed_node = e.list_unextractables()[-1]
+        raise CompilationError(
+            f"extraction failed: {first_failed_node}"
+        ) from e
 
     print("Extracted from EGraph".center(80, "="))
     print("cost =", cost)
