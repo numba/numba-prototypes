@@ -26,6 +26,9 @@ class Function(EntityType):
 class Closure(EntityType):
     pass
 
+class Constructor(Function):
+    pass
+
 class Method(Function):
     pass
 
@@ -107,7 +110,10 @@ class SymbolTableBuilder(ast.NodeVisitor):
             elif "staticmethod" in dl:
                 symbol_info = SymbolInfo(StaticMethod)
             else:
-                symbol_info = SymbolInfo(Method)
+                if node.name == "__init__":
+                    symbol_info = SymbolInfo(Constructor)
+                else:
+                    symbol_info = SymbolInfo(Method)
         else:
             # must be in global scope
             assert self.in_global_scope()
