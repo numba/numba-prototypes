@@ -1,11 +1,16 @@
 from typing import List, Union
+
 from egglog import EGraph
+from IPython.display import HTML, Math
+
+from utils import display
 
 
 def tokenize(egglog_str: str) -> List[str]:
     """
-    Splits an Egglog S-expression string into a flat list of tokens.
-    Tokens are either "(" or ")", or atoms (any sequence of non-whitespace, non-parenthesis chars).
+    Splits an Egglog S-expression string into a flat list of tokens. Tokens are
+    either "(" or ")", or atoms (any sequence of non-whitespace,
+    non-parenthesis chars).
     """
     tokens = []
     i = 0
@@ -19,7 +24,11 @@ def tokenize(egglog_str: str) -> List[str]:
             i += 1
         else:
             j = i
-            while j < len(egglog_str) and not egglog_str[j].isspace() and egglog_str[j] not in ("(", ")"):
+            while (
+                j < len(egglog_str)
+                and not egglog_str[j].isspace()
+                and egglog_str[j] not in ("(", ")")
+            ):
                 j += 1
             tokens.append(egglog_str[i:j])
             i = j
@@ -28,8 +37,8 @@ def tokenize(egglog_str: str) -> List[str]:
 
 def parse_sexps(tokens: List[str]) -> List[Union[str, list]]:
     """
-    Parses a flat list of tokens into a nested list of S-expression forms.
-    Each form is either an atom (string) or a list whose first element is the head.
+    Parses a flat list of tokens into a nested list of S-expression forms. Each
+    form is either an atom (string) or a list whose first element is the head.
     Returns a flat list of top-level S-expressions (each itself a nested list).
     """
     stack: List[List] = []
@@ -55,29 +64,31 @@ def sexp_to_string(sexp):
     if isinstance(sexp, str):
         return sexp
     elif isinstance(sexp, list):
-        inner = ' '.join(sexp_to_string(item) for item in sexp)
+        inner = " ".join(sexp_to_string(item) for item in sexp)
         return f"({inner})"
     else:
         return str(sexp)
 
 
-LATEX_ESCAPE = str.maketrans({
-    "_": r"\_",
-    "#": r"\#",
-    "$": r"\$",
-    "%": r"\%",
-    "&": r"\&",
-    "{": r"\{",
-    "}": r"\}",
-    "~": r"\textasciitilde{}",
-    "^": r"\^{}",
-    "\\": r"\\",
-})
+LATEX_ESCAPE = str.maketrans(
+    {
+        "_": r"\_",
+        "#": r"\#",
+        "$": r"\$",
+        "%": r"\%",
+        "&": r"\&",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\^{}",
+        "\\": r"\\",
+    }
+)
 
 
 def _atom_tex(a: str) -> str:
     try:
-        float(a)        # leave numerics bare
+        float(a)  # leave numerics bare
         return a
     except ValueError:
         return r"\text{" + a.translate(LATEX_ESCAPE) + "}"
@@ -97,8 +108,12 @@ def _sexp_tex(x) -> str:
         return f"{_sexp_tex(args[0])} {head} {_sexp_tex(args[1])}"
 
     return (
-        r"\text{" + head.translate(LATEX_ESCAPE) + "}"
-        + "(" + ", ".join(_sexp_tex(a) for a in args) + ")"
+        r"\text{"
+        + head.translate(LATEX_ESCAPE)
+        + "}"
+        + "("
+        + ", ".join(_sexp_tex(a) for a in args)
+        + ")"
     )
 
 
@@ -130,9 +145,9 @@ def to_latex(sexp):
         i = 3
         while i < len(sexp):
             if sexp[i] == ":when" and i + 1 < len(sexp):
-                when_conds = sexp[i + 1]          # list of cond S-exps
+                when_conds = sexp[i + 1]  # list of cond S-exps
                 break
-            i += 1                                # <- step only ONE token
+            i += 1  # <- step only ONE token
 
         lhs_tex = _sexp_tex(lhs)
         rhs_tex = _sexp_tex(rhs)
@@ -160,7 +175,7 @@ def to_latex(sexp):
                     lines.append(_sexp_tex(e))
             return r"\\ ".join(lines)
 
-        prem_tex  = render_stack(premises)
+        prem_tex = render_stack(premises)
         concl_tex = render_stack(conclusions)
 
         num = rf"\begin{{array}}{{c}}{prem_tex}\end{{array}}"
@@ -171,27 +186,18 @@ def to_latex(sexp):
     return None
 
 
-def visualize_ruleset_latex(ruleset, verbose=True):
+def visualize_ruleset_latex(ruleset, verbose=False):
     """
-    Visualize an egglog ruleset by converting it to LaTeX representation.
-    Only works in notebook environments.
+    Visualize an egglog ruleset by converting it to LaTeX representation. Only
+    works in notebook environments.
 
     Args:
-        ruleset: The egglog ruleset to visualize
-        verbose: If True, prints the original S-expression before LaTeX display
+        ruleset: The egglog ruleset to visualize verbose: If True, prints the
+        original S-expression before LaTeX display
 
     Returns:
         None, but displays LaTeX representation if in notebook environment
     """
-    try:
-        shell = get_ipython().__class__.__name__
-        is_notebook = shell == "ZMQInteractiveShell"
-    except NameError:
-        is_notebook = False
-
-    if not is_notebook:
-        return
-
     # Create demo egraph and run ruleset
     demo_egraph = EGraph(save_egglog_string=True)
     demo_egraph.run(ruleset)
@@ -201,13 +207,13 @@ def visualize_ruleset_latex(ruleset, verbose=True):
     tokens = tokenize(egglog_str)
     sexps = parse_sexps(tokens)
 
-    from IPython.display import display, Math
-
+    i = 1
     for sexp in sexps:
         tex = to_latex(sexp)
         if tex:
+            display(HTML(f"<p>Rule #{i}</p>"))
             if verbose:
                 print(sexp_to_string(sexp))
             display(Math(tex))
-            if verbose:
-                print()
+            display(HTML("<br /><br />"))
+            i += 1

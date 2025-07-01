@@ -78,6 +78,7 @@ from ch05_typeinfer_array import (
     setup_argtypes,
 )
 from utils import Pipeline, Report, display, visualize_expr_tree
+from utils.egglog_to_latex import visualize_ruleset_latex
 
 # -
 
@@ -236,6 +237,10 @@ def ruleset_optimize_matmul(
     )
 
 
+if __name__ == "__main__":
+    visualize_ruleset_latex(ruleset_optimize_matmul)
+
+
 @ruleset
 def ruleset_matmul_op(io: Term, lhs: Term, rhs: Term, res: Term):
     yield rule(res == Py_MatMultIO(io, lhs, rhs)).then(
@@ -243,6 +248,9 @@ def ruleset_matmul_op(io: Term, lhs: Term, rhs: Term, res: Term):
         union(res.getPort(0)).with_(io),
     )
 
+
+if __name__ == "__main__":
+    visualize_ruleset_latex(ruleset_matmul_op)
 
 # ## Compile E-Graph to Extractable Representation
 #

@@ -95,6 +95,7 @@ from demo03_0_matmul_assoc import (
     ruleset_optimize_matmul,
 )
 from utils import Pipeline, Report, display, visualize_expr_tree
+from utils.egglog_to_latex import visualize_ruleset_latex
 
 # ## Original and Optimized Matrix Multiplication Functions
 #
@@ -180,6 +181,34 @@ def facts_numpy_module(io: Term, name: String, op: Term, args: Vec[Term]):
     )
 
 
+# +
+@function
+def Npy_Add(lhs: Term, rhs: Term) -> Term: ...
+
+
+@function
+def Npy_Add_KnownShape(lhs: Term, rhs: Term, size: i64) -> Term: ...
+
+
+@function
+def Npy_HStack(lhs: Term, rhs: Term) -> Term: ...
+
+
+@function
+def Npy_HStack_KnownShape(lhs: Term, rhs: Term, m: i64, n: i64) -> Term: ...
+
+
+@function
+def Npy_VStack(lhs: Term, rhs: Term) -> Term: ...
+
+
+@function
+def Npy_VStack_KnownShape(lhs: Term, rhs: Term, m: i64, n: i64) -> Term: ...
+
+
+# -
+
+
 @ruleset
 def ruleset_numpy_add(
     io: Term,
@@ -234,6 +263,10 @@ def ruleset_tensat(ary1: Term, ary2: Term, ary3: Term, ary4: Term):
     yield rewrite(matmul(ewadd(ary2, ary3), ary1)).to(
         ewadd(matmul(ary2, ary1), matmul(ary3, ary1)),
     )
+
+
+if __name__ == "__main__":
+    visualize_ruleset_latex(ruleset_tensat)
 
 
 @ruleset
@@ -308,32 +341,8 @@ def ruleset_specialize_numpy(
     )
 
 
-# +
-@function
-def Npy_Add(lhs: Term, rhs: Term) -> Term: ...
-
-
-@function
-def Npy_Add_KnownShape(lhs: Term, rhs: Term, size: i64) -> Term: ...
-
-
-@function
-def Npy_HStack(lhs: Term, rhs: Term) -> Term: ...
-
-
-@function
-def Npy_HStack_KnownShape(lhs: Term, rhs: Term, m: i64, n: i64) -> Term: ...
-
-
-@function
-def Npy_VStack(lhs: Term, rhs: Term) -> Term: ...
-
-
-@function
-def Npy_VStack_KnownShape(lhs: Term, rhs: Term, m: i64, n: i64) -> Term: ...
-
-
-# -
+if __name__ == "__main__":
+    visualize_ruleset_latex(ruleset_specialize_numpy)
 
 # ## Cost Model
 #

@@ -34,8 +34,6 @@ from egglog import EGraph, Ruleset, Unit, function, i64, rewrite, rule, ruleset
 from sealir import rvsdg
 from sealir.eqsat import rvsdg_eqsat
 from sealir.eqsat.rvsdg_eqsat import GraphRoot, Term, TermList
-from utils import IN_NOTEBOOK
-from egglog_to_latex import visualize_ruleset_latex
 
 # We'll be extending from chapter 2.
 from ch02_egraph_basic import (
@@ -46,6 +44,7 @@ from ch02_egraph_basic import (
     run_test,
 )
 from utils import IN_NOTEBOOK, Report, display
+from utils.egglog_to_latex import visualize_ruleset_latex
 
 # Next, we'll explore a new compiler pipeline designed with customizable
 # rulesets. To enable this flexibility, we've introduced a `ruleset` argument,
@@ -128,8 +127,8 @@ def ruleset_const_propagate(a: Term, ival: i64):
         IsConstantFalse(a)
     )
 
-if IN_NOTEBOOK:
-    # Visualize the constant propagation ruleset
+
+if __name__ == "__main__":
     visualize_ruleset_latex(ruleset_const_propagate)
 
 # Now, we'll test our newly defined ruleset. This complete ruleset combines a
@@ -192,7 +191,8 @@ def ruleset_const_fold_if_else(a: Term, b: Term, c: Term, operands: TermList):
         IsConstantFalse(a),
     )
 
-if IN_NOTEBOOK:
+
+if __name__ == "__main__":
     # Visualize the if-else folding ruleset
     visualize_ruleset_latex(ruleset_const_fold_if_else)
 
