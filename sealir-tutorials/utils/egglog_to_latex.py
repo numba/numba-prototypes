@@ -97,22 +97,21 @@ def _atom_tex(a: str) -> str:
 INFIX_OPS = {"=", "!=", "<", "<=", ">", ">=", "+", "-", "*", "/", "%", "**"}
 
 
-def _sexp_tex(x) -> str:
+def _sexp_tex(x, substitutions=None) -> str:
     if isinstance(x, str):
         return _atom_tex(x)
 
     head, *args = x
+    head_tex = substitutions[head] if substitutions and head in substitutions else head
 
     # infix pretty-printing for common binary ops
     if head in INFIX_OPS and len(args) == 2:
-        return f"{_sexp_tex(args[0])} {head} {_sexp_tex(args[1])}"
+        return f"{_sexp_tex(args[0], substitutions=substitutions)} {head_tex} {_sexp_tex(args[1], substitutions=substitutions)}"
 
     return (
-        r"\text{"
-        + head.translate(LATEX_ESCAPE)
-        + "}"
+        r"\text{" + head_tex.translate(LATEX_ESCAPE) + "}"
         + "("
-        + ", ".join(_sexp_tex(a) for a in args)
+        + ", ".join(_sexp_tex(a, substitutions=substitutions) for a in args)
         + ")"
     )
 
@@ -122,19 +121,22 @@ def _is_set_expr(x):
     return isinstance(x, list) and len(x) == 3 and x[0] == "set"
 
 
-def _set_tex(x):
+def _set_tex(x, substitutions=None):
     # Renders set(lhs, rhs) as lhs \to rhs
-    return f"{_sexp_tex(x[1])} \\to {_sexp_tex(x[2])}"
+    return f"{_sexp_tex(x[1], substitutions=substitutions)} \\to {_sexp_tex(x[2], substitutions=substitutions)}"
 
 
-def to_latex(sexp):
+def to_latex(sexp, substitutions=None):
     """
     Render (rewrite …) or (rule …) as KaTeX-safe LaTeX.
+    substitutions: dict mapping original token names to replacements
     """
     if not (isinstance(sexp, list) and sexp):
         return None
 
     tag = sexp[0]
+    if substitutions and tag in substitutions:
+        tag = substitutions[tag]
 
     # ───────────────  REWRITE  ────────────────
     if tag == "rewrite" and len(sexp) >= 3:
@@ -149,12 +151,12 @@ def to_latex(sexp):
                 break
             i += 1  # <- step only ONE token
 
-        lhs_tex = _sexp_tex(lhs)
-        rhs_tex = _sexp_tex(rhs)
+        lhs_tex = _sexp_tex(lhs, substitutions=substitutions)
+        rhs_tex = _sexp_tex(rhs, substitutions=substitutions)
 
         cond_tex = ""
         if when_conds:
-            joined = r",\; ".join(_sexp_tex(c) for c in when_conds)
+            joined = r",\; ".join(_sexp_tex(c, substitutions=substitutions) for c in when_conds)
             cond_tex = rf",\; {joined}"
 
         num = rf"\text{{expr}} = {lhs_tex}{cond_tex}"
@@ -170,9 +172,9 @@ def to_latex(sexp):
             lines = []
             for e in exprs:
                 if _is_set_expr(e):
-                    lines.append(_set_tex(e))
+                    lines.append(_set_tex(e, substitutions=substitutions))
                 else:
-                    lines.append(_sexp_tex(e))
+                    lines.append(_sexp_tex(e, substitutions=substitutions))
             return r"\\ ".join(lines)
 
         prem_tex = render_stack(premises)
@@ -186,7 +188,7 @@ def to_latex(sexp):
     return None
 
 
-def visualize_ruleset_latex(ruleset, verbose=False):
+def visualize_ruleset_latex(ruleset, verbose=False, substitutions=None):
     """
     Visualize an egglog ruleset by converting it to LaTeX representation. Only
     works in notebook environments.
@@ -194,6 +196,7 @@ def visualize_ruleset_latex(ruleset, verbose=False):
     Args:
         ruleset: The egglog ruleset to visualize verbose: If True, prints the
         original S-expression before LaTeX display
+        substitutions: dict mapping original token names to replacements
 
     Returns:
         None, but displays LaTeX representation if in notebook environment
@@ -209,7 +212,7 @@ def visualize_ruleset_latex(ruleset, verbose=False):
 
     i = 1
     for sexp in sexps:
-        tex = to_latex(sexp)
+        tex = to_latex(sexp, substitutions=substitutions)
         if tex:
             display(HTML(f"<p>Rule #{i}</p>"))
             if verbose:
