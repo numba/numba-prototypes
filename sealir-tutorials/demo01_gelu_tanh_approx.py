@@ -469,7 +469,6 @@ compiler_config = dict(
     converter_class=ExtendEGraphToRVSDG,
     backend=Backend(),
     cost_model=MyCostModel(),
-    verbose=True,
 )
 
 if __name__ == "__main__":
@@ -611,3 +610,16 @@ if __name__ == "__main__":
         equal=relclose,
         verbose=True,
     )
+
+# ## Benchmark
+
+if __name__ == "__main__":
+    input_val = np.random.random(300000).astype(np.float32)
+    out = np.zeros_like(input_val)
+
+    print("original")
+    # %timeit gelu_tanh_forward(input_val)
+    print("superoptimized")
+    # %timeit vectorized_gelu(input_val, out=out)
+
+
