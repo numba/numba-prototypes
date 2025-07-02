@@ -61,7 +61,7 @@ cuda_vectorized_gelu = ufunc_vectorize(
     input_type=Float32,
     ndim=1,
     compiler_config={**gpu_compiler_config, "pipeline_report": report},
-    extra_ruleset=additional_rules,
+    extra_ruleset=additional_rules | optimize_rules,
 )(gelu_tanh_forward)
 
 

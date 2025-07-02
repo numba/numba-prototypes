@@ -598,7 +598,7 @@ if __name__ == "__main__":
         input_type=Float32,
         ndim=1,
         compiler_config={**compiler_config, "pipeline_report": report},
-        extra_ruleset=additional_rules,
+        extra_ruleset=additional_rules | optimize_rules,
     )(gelu_tanh_forward)
     report.display()
     relclose = lambda x, y: np.allclose(x, y, rtol=1e-6)

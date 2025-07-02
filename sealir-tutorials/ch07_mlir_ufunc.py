@@ -196,6 +196,7 @@ def ufunc_compiler(
             output_types=(memref_ty,),
             function_name="ufunc",
             is_ufunc=True,
+            opt_level=3,
         )
         return dict(jit_func=jit_func, memref_ty=memref_ty)
 
