@@ -447,6 +447,7 @@ class Report(ReportInterface):
             padding: 16px;
             width: auto;
             max-width: 100%;
+            position: relative;
         }}
 
         .report-title-{self.report_id} {{
@@ -466,12 +467,23 @@ class Report(ReportInterface):
             border: 1px solid #404040;
             border-radius: 8px;
             background-color: #232323;
-            min-width: 400px;
-            max-width: 800px;
-            flex: 1 1 400px;
+            min-width: 300px;
+            max-width: 600px;
+            flex: 1 1 300px;
             display: flex;
             flex-direction: column;
             margin-bottom: 0;
+            transition: max-width 0.3s, width 0.3s, flex 0.3s, box-shadow 0.3s;
+            position: relative;
+            z-index: 1;
+        }}
+
+        .pane-{self.report_id}.expanded-fullwidth {{
+            max-width: 100% !important;
+            width: 100% !important;
+            flex: 1 1 100%;
+            z-index: 2;
+            box-shadow: 0 0 0 3px #007cba, 0 2px 8px rgba(0,0,0,0.4);
         }}
 
         .pane-header-{self.report_id} {{
@@ -514,6 +526,21 @@ class Report(ReportInterface):
         .pane-toggle-{self.report_id}.expanded {{
             transform: rotate(90deg);
         }}
+
+        .expand-btn-{self.report_id} {{
+            margin-left: 10px;
+            padding: 2px 10px;
+            background: #007cba;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.95em;
+            transition: background 0.2s;
+        }}
+        .expand-btn-{self.report_id}:hover {{
+            background: #005f8a;
+        }}
         </style>
         """
 
@@ -532,6 +559,23 @@ class Report(ReportInterface):
                 toggle.classList.add('expanded');
             }}
         }}
+
+        function expandPaneFullWidth_{self.report_id}(paneId) {{
+            const allPanes = document.querySelectorAll('.pane-{self.report_id}');
+            const thisPane = document.getElementById(paneId);
+            const expandBtn = document.getElementById(paneId + '_expandbtn');
+            const isExpanded = thisPane.classList.contains('expanded-fullwidth');
+            if (!isExpanded) {{
+                allPanes.forEach(pane => {{
+                    pane.classList.remove('expanded-fullwidth');
+                }});
+                thisPane.classList.add('expanded-fullwidth');
+                expandBtn.textContent = 'Collapse';
+            }} else {{
+                thisPane.classList.remove('expanded-fullwidth');
+                expandBtn.textContent = 'Expand';
+            }}
+        }}
         </script>
         """
 
@@ -540,13 +584,17 @@ class Report(ReportInterface):
         for idx, pane in enumerate(self.panes, 1):
             expanded_class = "expanded" if self.default_expanded else ""
             pane_number = f"{idx}. "
+            pane_id = pane['id']
             panes_html += f"""
-            <div class="pane-{self.report_id}">
-                <div class="pane-header-{self.report_id}" onclick="togglePane_{self.report_id}('{pane['id']}')">
+            <div class="pane-{self.report_id}" id="{pane_id}">
+                <div class="pane-header-{self.report_id}" onclick="togglePane_{self.report_id}('{pane_id}')">
                     <span>{pane_number}{pane['title']}</span>
-                    <span id="{pane['id']}_toggle" class="pane-toggle-{self.report_id} {expanded_class}">▶</span>
+                    <span>
+                        <button type=\"button\" class=\"expand-btn-{self.report_id}\" id=\"{pane_id}_expandbtn\" onclick=\"event.stopPropagation();expandPaneFullWidth_{self.report_id}('{pane_id}')\">Expand</button>
+                        <span id="{pane_id}_toggle" class="pane-toggle-{self.report_id} {expanded_class}">▶</span>
+                    </span>
                 </div>
-                <div id="{pane['id']}_content" class="pane-content-{self.report_id} {expanded_class}">
+                <div id="{pane_id}_content" class="pane-content-{self.report_id} {expanded_class}">
                     {pane['content']}
                 </div>
             </div>
@@ -555,7 +603,7 @@ class Report(ReportInterface):
         # Complete HTML
         html = f"""
         {css}
-        <div class="report-container-{self.report_id}">
+        <div class="report-container-{self.report_id}" id="report_container_{self.report_id}">
             <p class="report-title-{self.report_id}">{self.title}</p>
             {panes_html}
         </div>
