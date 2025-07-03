@@ -53,12 +53,7 @@ from sealir.eqsat.py_eqsat import (
     Py_Call,
     Py_LoadGlobal,
 )
-from sealir.eqsat.rvsdg_convert import egraph_conversion
-from sealir.eqsat.rvsdg_eqsat import GraphRoot, Term, TermList
-from sealir.eqsat.rvsdg_extract import (
-    egraph_extraction,
-)
-from sealir.rvsdg import format_rvsdg
+from sealir.eqsat.rvsdg_eqsat import Term, TermList
 
 from ch04_1_typeinfer_ifelse import TypeFloat64
 from ch05_typeinfer_array import (
@@ -73,9 +68,7 @@ from ch05_typeinfer_array import (
     NbOp_Base,
     TypeVar,
     array_desc_rules,
-    base_ruleset,
     ruleset_broadcasting,
-    setup_argtypes,
 )
 from demo01_gelu_tanh_approx import (
     Module,
@@ -84,11 +77,9 @@ from demo01_gelu_tanh_approx import (
 )
 from demo03_0_matmul_assoc import (
     ArrayDescOp,
-    ExtractedOutput,
 )
 from demo03_0_matmul_assoc import MatMul as Npy_MatMul
 from demo03_0_matmul_assoc import (
-    MatMul_KnownShape,
     NbOp_Base,
     NbOp_MatMulKnownShape,
     SExpr,
@@ -96,14 +87,19 @@ from demo03_0_matmul_assoc import (
 from demo03_0_matmul_assoc import SourceMaker as _demo03_0_SourceMaker
 from demo03_0_matmul_assoc import (
     compiler,
-    pipeline_to_egraph,
     ruleset_matmul_op,
     ruleset_optimize_matmul,
 )
-from utils import Pipeline, Report, display, visualize_expr_tree
+from utils import (
+    Report,
+    display,
+    timeit,
+    visualize_benchmark,
+    visualize_expr_tree,
+)
 from utils.egglog_to_latex import visualize_ruleset_latex
 
-# ## > 
+# ## >
 # <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
 # <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
 #
@@ -117,16 +113,21 @@ from utils.egglog_to_latex import visualize_ruleset_latex
 # Two separate matmuls followed by elementwise add
 
 
+# <img src="img/matmul_add.svg" />
+
+
 def original_mma(input_1, input_2, input_3, input_4):
     return input_1 @ (input_2 + input_3) @ input_4
 
 
 # ### Optimized version
 # Concatenate inputs along feature dimensions
+#
+# <img src="img/hstack_vstack.svg" />
 
 
 def optimized_mma(input_1, input_2, input_3, input_4):
-    #    input_1 @ (input_2, input_3)
+    #    input_1 @ (input_2 + input_3)
     # => input_1 @ input_2 + input_1 @ input_3
     # => hstack(input_1, input_1) @ vstack(input_2, input_3)
     concat_input = np.hstack([input_1, input_1])
@@ -157,7 +158,7 @@ if __name__ == "__main__":
     print("Max absolute difference:", np.max(np.abs(original - optimized)))
     print("Are they close?", np.allclose(original, optimized, atol=1e-6))
 
-# ## > 
+# ## >
 # <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
 # <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
 #
@@ -172,6 +173,7 @@ if __name__ == "__main__":
 # + [markdown] jp-MarkdownHeadingCollapsed=true
 # ### Details
 # -
+
 
 @ruleset
 def facts_numpy_module(io: Term, name: String, op: Term, args: Vec[Term]):
@@ -269,7 +271,7 @@ def ruleset_tensat(ary1: Term, ary2: Term, ary3: Term, ary4: Term):
     hstack = Npy_HStack
     vstack = Npy_VStack
     # taso/tensat rule
-    # (A @ B) + (C @ D) => (A, C) @ (B, D)
+    # (A @ B) + (C @ D) => hstack(A, C) @ vstack(B, D)
     yield rewrite(
         ewadd(matmul(ary1, ary3), matmul(ary2, ary4)),
     ).to(matmul(hstack(ary1, ary2), vstack(ary3, ary4)))
@@ -286,16 +288,20 @@ def ruleset_tensat(ary1: Term, ary2: Term, ary3: Term, ary4: Term):
 
 
 if __name__ == "__main__":
-    visualize_ruleset_latex(ruleset_tensat, substitutions={
-        "Npy_Add": "Add",
-        "Npy_VStack": "VStack",
-        "Npy_HStack": "HStack",
-    })
+    visualize_ruleset_latex(
+        ruleset_tensat,
+        substitutions={
+            "Npy_Add": "Add",
+            "Npy_VStack": "VStack",
+            "Npy_HStack": "HStack",
+        },
+    )
 
 
 # + [markdown] jp-MarkdownHeadingCollapsed=true
 # ### Details
 # -
+
 
 @ruleset
 def ruleset_specialize_numpy(
@@ -578,8 +584,10 @@ class SourceMaker(_demo03_0_SourceMaker):
 # Run the e-graph pipeline, extract the optimized computation, and compare the
 # result to the original and hand-optimized versions.
 
+compiler.visualize()
+
+
 # +
-display(compiler.visualize())
 report = Report("Pipeline execution report", default_expanded=True)
 cres = compiler(
     fn=original_mma,
@@ -595,9 +603,7 @@ cres = compiler(
     sourcemaker_class=SourceMaker,
 )
 report.display()
-report = Report(
-    "Expression tree of different versions", default_expanded=True
-)
+report = Report("Expression tree of different versions", default_expanded=True)
 report.append("Original", visualize_expr_tree(original_mma))
 report.append("Hand-optimized", visualize_expr_tree(optimized_mma))
 report.append("Optimized", visualize_expr_tree(cres.extracted))
@@ -609,16 +615,18 @@ got = extracted(input_1, input_2, input_3, input_4)
 np.testing.assert_allclose(original, got)
 
 print("original")
-# t_original = %timeit -o original_mma(input_1, input_2, input_3, input_4)
+t_original = timeit(lambda: original_mma(input_1, input_2, input_3, input_4))
 
 print("hand-optimzed")
-# t_handopt = %timeit -o optimized_mma(input_1, input_2, input_3, input_4)
+t_handopt = timeit(lambda: optimized_mma(input_1, input_2, input_3, input_4))
 
 print("superoptimized")
-# t_superopt = %timeit -o extracted(input_1, input_2, input_3, input_4)
+t_superopt = timeit(lambda: extracted(input_1, input_2, input_3, input_4))
 
-print("t_original / t_superopt", t_original.best / t_superopt.best)
-print("t_handopt / t_superopt", t_handopt.best / t_superopt.best)
-# -
-
-
+visualize_benchmark(
+    t_original,
+    t_handopt,
+    t_superopt,
+    labels=["original", "hand-optimized", "superoptimized"],
+    title="Tensor Algebra Optimization",
+)

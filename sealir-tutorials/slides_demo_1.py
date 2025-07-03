@@ -46,25 +46,18 @@ from egglog import (
     rule,
     ruleset,
     set_,
-    subsume,
     union,
 )
 from sealir import ase
 from sealir.eqsat.py_eqsat import (
     Py_MatMultIO,
 )
-from sealir.eqsat.rvsdg_convert import egraph_conversion
 from sealir.eqsat.rvsdg_eqsat import (
     GraphRoot,
     Term,
 )
-from sealir.eqsat.rvsdg_extract import (
-    egraph_extraction,
-)
-from sealir.rvsdg import format_rvsdg
 from sealir.rvsdg import grammar as rg
 
-from ch01_basic_compiler import pipeline_frontend
 from ch04_0_typeinfer_prelude import (
     pipeline_new_extract as _ch04_0_pipeline_new_extract,
 )
@@ -83,7 +76,13 @@ from ch05_typeinfer_array import (
     base_ruleset,
     setup_argtypes,
 )
-from utils import Pipeline, Report, display, visualize_expr_tree
+from utils import (
+    Report,
+    display,
+    timeit,
+    visualize_benchmark,
+    visualize_expr_tree,
+)
 from utils.egglog_to_latex import visualize_ruleset_latex
 
 # -
@@ -112,6 +111,10 @@ K = 200
 f0_3m = lambda arr0, arr1, arr2: (arr0 @ arr1) @ arr2
 f1_3m = lambda arr0, arr1, arr2: arr0 @ (arr1 @ arr2)
 
+# <img src="img/matmul_assoc.svg" width="80%" />
+
+# compute cost as FLOPS
+
 print(" left associative cost =", (2 * M * N * K) * (2 * M * K * K))
 print("right associative cost =", (2 * N * K * N) * (2 * M * N * N))
 
@@ -120,6 +123,7 @@ report.append("f0_3m", visualize_expr_tree(f0_3m))
 report.append("f1_3m", visualize_expr_tree(f1_3m))
 report.display()
 
+# +
 arr0 = np.random.random((M, N))
 arr1 = np.random.random((N, K))
 arr2 = np.random.random((K, N))
@@ -128,10 +132,18 @@ res0 = f0_3m(arr0, arr1, arr2)
 res1 = f1_3m(arr0, arr1, arr2)
 np.testing.assert_allclose(res0, res1)
 # unoptimized
-# left_time = %timeit -o f0_3m(arr0, arr1, arr2)
+left_time = timeit(lambda: f0_3m(arr0, arr1, arr2))
 # optimized
-# right_time = %timeit -o f1_3m(arr0, arr1, arr2)
-print("Speedup", left_time.best / right_time.best)
+right_time = timeit(lambda: f1_3m(arr0, arr1, arr2))
+
+visualize_benchmark(
+    left_time,
+    right_time,
+    labels=["Left-associative", "Right-associative"],
+    title="Matrix Multiplication Optimization",
+    figsize=(8, 5),
+)
+# -
 
 # <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
 # <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
@@ -168,10 +180,16 @@ res0 = f0(arr0, arr1, arr2, arr3)
 res1 = f1(arr0, arr1, arr2, arr3)
 np.testing.assert_allclose(res0, res1)
 # unoptimized
-# f0_time = %timeit -o f0(arr0, arr1, arr2, arr3)
+f0_time = timeit(lambda: f0(arr0, arr1, arr2, arr3))
 # optimized
-# f1_time = %timeit -o f1(arr0, arr1, arr2, arr3)
-print("Speedup", f0_time.best / f1_time.best)
+f1_time = timeit(lambda: f1(arr0, arr1, arr2, arr3))
+visualize_benchmark(
+    f0_time,
+    f1_time,
+    labels=["original", "hand-optimized"],
+    title="Matrix Multiplication Optimization",
+    figsize=(8, 5),
+)
 
 # <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
 # <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
@@ -249,6 +267,7 @@ def ArrayDescOp(term: Term) -> ArrayDesc: ...
 
 # ### Matrix Multiplication Associativity
 
+
 @ruleset
 def ruleset_matmul_associativity(
     ary0: Term,
@@ -271,6 +290,7 @@ if __name__ == "__main__":
 # + [markdown] jp-MarkdownHeadingCollapsed=true
 # ### Details
 # -
+
 
 @ruleset
 def ruleset_optimize_matmul(
@@ -330,6 +350,7 @@ def ruleset_matmul_op(io: Term, lhs: Term, rhs: Term, res: Term):
         union(res.getPort(0)).with_(io),
     )
 
+
 # + [markdown] jp-MarkdownHeadingCollapsed=true
 # ## Compile E-Graph to Extractable Representation
 #
@@ -386,7 +407,9 @@ pipeline_middle_end = _ch04_0_pipeline_new_extract.trunc(
 ).replace("egraph_saturation", egraph_saturation)
 pipeline_to_egraph = pipeline_middle_end.trunc("pipeline_egraph_extraction")
 
-extra_ruleset = ruleset_matmul_op | ruleset_optimize_matmul | ruleset_matmul_associativity
+extra_ruleset = (
+    ruleset_matmul_op | ruleset_optimize_matmul | ruleset_matmul_associativity
+)
 
 
 if __name__ == "__main__":
@@ -440,6 +463,7 @@ class MyEGraphToRVSDG(ExtendEGraphToRVSDG):
                 )
         return super().handle_Term(op, children, grm)
 
+
 # + [markdown] editable=true slideshow={"slide_type": ""} jp-MarkdownHeadingCollapsed=true
 # ## >
 # <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
@@ -457,12 +481,16 @@ class MyCostModel(_ch05_CostModel):
         match op, tuple(children):
             case "MatMul_KnownShape", (_lhs, _rhs, m, n, k):
                 return self.get_equation(
-                    lambda lhs, rhs, *_, m, n, k: 2 * m * n * k,  # 2 * m * n * k
+                    lambda lhs, rhs, *_, m, n, k: 2
+                    * m
+                    * n
+                    * k,  # 2 * m * n * k
                     constants=dict(m=m, n=n, k=k),
                 )
             case "MatMul", _:
                 return self.get_simple(float("inf"))
         return super().get_cost_function(nodename, op, ty, cost, children)
+
 
 # + [markdown] editable=true slideshow={"slide_type": ""}
 # <br /><br /><br /><br /><br /><br /><br /><br /><br /><br /><br />
@@ -585,22 +613,23 @@ report = Report(
 )
 report.append("original version", visualize_expr_tree(f0))
 report.append("hand-optimized version", visualize_expr_tree(f1))
-report.append(
-    "superoptimized version", visualize_expr_tree(cres.extracted)
-)
+report.append("superoptimized version", visualize_expr_tree(cres.extracted))
 report.display()
 
 # original
-# f0_time = %timeit -o f0(arr0, arr1, arr2, arr3)
+f0_time = timeit(lambda: f0(arr0, arr1, arr2, arr3))
 
 # manual optimized
-# f1_time = %timeit -o f1(arr0, arr1, arr2, arr3)
+f1_time = timeit(lambda: f1(arr0, arr1, arr2, arr3))
 
 # cost-based extraction
-# superopt_time = %timeit -o extracted(arr0, arr1, arr2, arr3)
+superopt_time = timeit(lambda: extracted(arr0, arr1, arr2, arr3))
 
-print("f0_time / superopt_time", f0_time.best / superopt_time.best)
-print("f1_time / superopt_time", f1_time.best / superopt_time.best)
-# -
-
-
+visualize_benchmark(
+    f0_time,
+    f1_time,
+    superopt_time,
+    labels=["original", "hand-optimized", "superoptimized"],
+    title="Matrix Multiplication Optimization",
+    figsize=(8, 5),
+)

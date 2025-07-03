@@ -102,14 +102,20 @@ def _sexp_tex(x, substitutions=None) -> str:
         return _atom_tex(x)
 
     head, *args = x
-    head_tex = substitutions[head] if substitutions and head in substitutions else head
+    head_tex = (
+        substitutions[head]
+        if substitutions and head in substitutions
+        else head
+    )
 
     # infix pretty-printing for common binary ops
     if head in INFIX_OPS and len(args) == 2:
         return f"{_sexp_tex(args[0], substitutions=substitutions)} {head_tex} {_sexp_tex(args[1], substitutions=substitutions)}"
 
     return (
-        r"\text{" + head_tex.translate(LATEX_ESCAPE) + "}"
+        r"\text{"
+        + head_tex.translate(LATEX_ESCAPE)
+        + "}"
         + "("
         + ", ".join(_sexp_tex(a, substitutions=substitutions) for a in args)
         + ")"
@@ -156,7 +162,9 @@ def to_latex(sexp, substitutions=None):
 
         cond_tex = ""
         if when_conds:
-            joined = r",\; ".join(_sexp_tex(c, substitutions=substitutions) for c in when_conds)
+            joined = r",\; ".join(
+                _sexp_tex(c, substitutions=substitutions) for c in when_conds
+            )
             cond_tex = rf",\; {joined}"
 
         num = rf"\text{{expr}} = {lhs_tex}{cond_tex}"

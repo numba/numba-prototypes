@@ -97,10 +97,9 @@ from ch07_mlir_ufunc import Backend as UfuncBackend
 from ch07_mlir_ufunc import (
     Float32,
     TypeFloat32,
-    ufunc_compiler,
     ufunc_vectorize,
 )
-from utils.report import Report
+from utils import Report, timeit, visualize_benchmark
 from utils.egglog_to_latex import visualize_ruleset_latex
 
 # ## >
@@ -128,6 +127,7 @@ def gelu_tanh_forward(a):
 
 
 from utils import visualize_expr_tree
+
 visualize_expr_tree(gelu_tanh_forward)
 
 # ## >
@@ -555,16 +555,19 @@ def pade44_tanh_expansion(x: Term):
     )
 
 
-visualize_ruleset_latex(pade44_tanh_expansion, substitutions={
-    "Nb_Pow_Float32_Int64": "pow",
-    "Nb_Mul_Float32": "mul",
-    "Nb_Add_Float32": "add",
-    "Nb_Div_Float32": "div",
-    "Npy_tanh_float32": "tanh",
-    "Npy_float32": "f32",
-    "Term_LiteralF64": "lit_f64",
-    "Term_LiteralI64": "lit_i64",
-})
+visualize_ruleset_latex(
+    pade44_tanh_expansion,
+    substitutions={
+        "Nb_Pow_Float32_Int64": "pow",
+        "Nb_Mul_Float32": "mul",
+        "Nb_Add_Float32": "add",
+        "Nb_Div_Float32": "div",
+        "Npy_tanh_float32": "tanh",
+        "Npy_float32": "f32",
+        "Term_LiteralF64": "lit_f64",
+        "Term_LiteralI64": "lit_i64",
+    },
+)
 
 # Define expansion of power operations (e.g., x^N) to a sequence of multiplications
 # This converts expensive power operations into more efficient multiplication chains
@@ -588,13 +591,16 @@ def pow_expansion(x: Term, ival: i64):
     )
 
 
-visualize_ruleset_latex(pow_expansion, substitutions={
-    "Nb_Pow_Float32_Int64": "pow",
-    "Term_LiteralI64": "lit_i64",
-    "Nb_Mul_Float32": "mul",
-    "Npy_float32": "f32",
-    "Term_LiteralF64": "lit_f64",
-})
+visualize_ruleset_latex(
+    pow_expansion,
+    substitutions={
+        "Nb_Pow_Float32_Int64": "pow",
+        "Term_LiteralI64": "lit_i64",
+        "Nb_Mul_Float32": "mul",
+        "Npy_float32": "f32",
+        "Term_LiteralF64": "lit_f64",
+    },
+)
 
 # Combine the rules. Rules are composable.
 
@@ -672,10 +678,13 @@ input_val = np.random.random(300000).astype(np.float32)
 out = np.zeros_like(input_val)
 
 print("original")
-# t_original = %timeit -o gelu_tanh_forward(input_val)
+t_original = timeit(lambda: gelu_tanh_forward(input_val))
 print("superoptimized")
-# t_superopt = %timeit -o vectorized_gelu(input_val, out=out)
-print("t_original / t_superopt", t_original.best / t_superopt.best)
-# -
-
-
+t_superopt = timeit(lambda: vectorized_gelu(input_val, out=out))
+visualize_benchmark(
+    t_original,
+    t_superopt,
+    title="GELU",
+    labels=["original", "superoptimized"],
+    figsize=(8, 5),
+)

@@ -491,7 +491,7 @@ class Pipeline:
             title: Title for the graph
 
         Returns:
-            graphviz.Digraph: Graphviz graph object
+            An object with _repr_svg_() and _repr_image_svg_xml() for Jupyter display
 
         Raises:
             ImportError: If graphviz package is not installed
@@ -713,7 +713,18 @@ class Pipeline:
             legend.edge("legend_optional", "legend_stage", style="invisible")
             legend.edge("legend_stage", "legend_output", style="invisible")
 
-        return dot
+        class _IPythonWrapper:
+            def __init__(self, dot):
+                self._dot = dot
+
+            def _repr_html_(self):
+                svg_str = self._repr_svg_()
+                return f'<div style="width: 100%;">{svg_str}</div>'
+
+            def _repr_svg_(self):
+                return self._dot._repr_image_svg_xml()
+
+        return _IPythonWrapper(dot)
 
     def _find_producing_stage(self, field_name: str, max_stage: int) -> int:
         """
