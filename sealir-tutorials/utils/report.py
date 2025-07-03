@@ -584,7 +584,7 @@ class Report(ReportInterface):
         for idx, pane in enumerate(self.panes, 1):
             expanded_class = "expanded" if self.default_expanded else ""
             pane_number = f"{idx}. "
-            pane_id = pane['id']
+            pane_id = pane["id"]
             panes_html += f"""
             <div class="pane-{self.report_id}" id="{pane_id}">
                 <div class="pane-header-{self.report_id}" onclick="togglePane_{self.report_id}('{pane_id}')">

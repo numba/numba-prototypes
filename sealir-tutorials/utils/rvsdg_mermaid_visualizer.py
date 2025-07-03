@@ -523,4 +523,3 @@ def render_mermaid_popup(
     """
 
     return HTML(button_html)
-

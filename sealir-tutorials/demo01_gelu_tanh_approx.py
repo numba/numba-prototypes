@@ -621,5 +621,3 @@ if __name__ == "__main__":
     # %timeit gelu_tanh_forward(input_val)
     print("superoptimized")
     # %timeit vectorized_gelu(input_val, out=out)
-
-
