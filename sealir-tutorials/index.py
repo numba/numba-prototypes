@@ -12,7 +12,10 @@
 #     name: python3
 # ---
 
+# <img src="./img/book_cover_baby_dragon.jpeg" width="400px" alt="Baby Dragon Book Cover" />
+#
 # # Numba v2 Compiler Design <img src="https://numba.pydata.org/_static/numba-blue-icon-rgb.svg" width="80" style="float:right;"/>
+#
 #
 # This book describes the compiler design of the next generation Numba compiler.  This compiler and its components are *extremely experimental* and under rapid development.  If you have questions, [raise an issue](https://github.com/numba/numba-prototypes/issues) on the GitHub repository.
 #
