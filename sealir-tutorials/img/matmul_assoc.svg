@@ -21,14 +21,14 @@
      inkscape:pagecheckerboard="0"
      inkscape:deskcolor="#d1d1d1"
      inkscape:zoom="2.2515346"
-     inkscape:cx="362.41948"
-     inkscape:cy="280.2533"
-     inkscape:window-width="1840"
-     inkscape:window-height="1211"
-     inkscape:window-x="728"
-     inkscape:window-y="25"
+     inkscape:cx="362.64155"
+     inkscape:cy="280.47537"
+     inkscape:window-width="1728"
+     inkscape:window-height="966"
+     inkscape:window-x="0"
+     inkscape:window-y="38"
      inkscape:window-maximized="0"
-     inkscape:current-layer="svg42" />
+     inkscape:current-layer="g18" />
   <!-- Background -->
   <rect
      width="800"
@@ -115,7 +115,7 @@
        fill="#2c3e50"
        id="text6">×</text>
     <text
-       x="176.33594"
+       x="186.33594"
        y="75.882812"
        font-family="Times, serif"
        font-size="16px"
@@ -231,7 +231,7 @@
          id="text14">K × N</text>
     </g>
     <g
-       transform="translate(201,51)"
+       transform="translate(211,51)"
        id="g14-9">
       <rect
          x="0"
@@ -307,7 +307,7 @@
        fill="none"
        id="path17" />
     <path
-       d="m 267,45 q 10,0 10,25 0,25 -10,25"
+       d="m 165,45 q 10,0 10,25 0,25 -10,25"
        stroke="#666666"
        stroke-width="2"
        fill="none"

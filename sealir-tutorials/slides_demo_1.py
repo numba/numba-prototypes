@@ -150,7 +150,7 @@ visualize_benchmark(
 
 # ## NumPy Example: Five Matrix Multiplications
 #
-# Here we define two different ways to multiply five matrices and compare their
+# Here we define two different ways to do five matrix multiplications and compare their
 # results and performance.
 
 # <code>
@@ -481,10 +481,7 @@ class MyCostModel(_ch05_CostModel):
         match op, tuple(children):
             case "MatMul_KnownShape", (_lhs, _rhs, m, n, k):
                 return self.get_equation(
-                    lambda lhs, rhs, *_, m, n, k: 2
-                    * m
-                    * n
-                    * k,  # 2 * m * n * k
+                    lambda lhs, rhs, *_, m, n, k: 2 * m * n * k,  # 2 * m * n * k
                     constants=dict(m=m, n=n, k=k),
                 )
             case "MatMul", _:
@@ -633,3 +630,6 @@ visualize_benchmark(
     title="Matrix Multiplication Optimization",
     figsize=(8, 5),
 )
+# -
+
+
