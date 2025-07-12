@@ -184,30 +184,44 @@ class Report(ReportInterface):
         """Compute metadata as a dict for timing breakdown."""
         last_time = self._start_time
         timing = []
+        total_overhead_ms = 0
         for pane_info in self.panes:
             title = pane_info["title"]
             end_time = pane_info["end_time"]
+            overhead_time = pane_info["overhead_time"]
             timing.append(
                 {
                     "title": title,
                     "elapsed_ms": (end_time - last_time) * 1000,
+                    "overhead_ms": overhead_time * 1000,
                 }
             )
             last_time = end_time
+            total_overhead_ms += overhead_time
         total_elapsed = (last_time - self._start_time) * 1000
         return {
             "total_elapsed_ms": total_elapsed,
+            "total_overhead_ms": total_overhead_ms * 1000,
             "timing": timing,
         }
 
     def _format_metadata(self, metadata_dict):
         """Format the metadata dict as a string."""
+        elapsed = metadata_dict["total_elapsed_ms"]
+        overhead = metadata_dict["total_overhead_ms"]
         buf = [
-            f"time elapsed {metadata_dict['total_elapsed_ms']:.2f}ms",
-            "timing breakdown:",
+            f"time elapsed {elapsed:.2f}ms",
+            f"overhead {overhead:.2f}ms",
+            f"elapsed - overhead {elapsed - overhead:.2f}ms",
+            "timing breakdown (+ overhead):",
         ]
         for entry in metadata_dict["timing"]:
-            buf.append(f"  {entry['elapsed_ms']:.2f}ms: {entry['title']:20}")
+            elapsed = entry["elapsed_ms"]
+            overhead = entry["overhead_ms"]
+            diff = elapsed - overhead
+            buf.append(
+                f"  {diff:.2f}ms (+ {overhead:.2f}ms): {entry['title']:20}"
+            )
         return "\n".join(buf)
 
     @contextmanager
@@ -219,13 +233,16 @@ class Report(ReportInterface):
             if self.enable_nested_metadata or metadata:
                 meta = report._compute_metadata()
                 elapsed = meta["total_elapsed_ms"]
+                overhead_ms = meta["total_overhead_ms"]
                 report.append("[metadata]", report._format_metadata(meta))
-                title = f"{report.title} ({elapsed:.2f}ms)"
+                elapsed_discounted = elapsed - overhead_ms
+                title = f"{report.title} ({elapsed_discounted:.2f}ms)"
             else:
                 title = report.title
             self.append(title, report)
 
     def append(self, title, content):
+        ts_overhead = timer()
         pane_id = f"pane_{uuid.uuid4().hex[:8]}"
 
         # Store original content for terminal display
@@ -282,6 +299,7 @@ class Report(ReportInterface):
             html_content = f'<pre style="white-space: pre-wrap; font-family: monospace; background-color: #2a2a2a; color: #e0e0e0; padding: 10px; border-radius: 4px; overflow-x: auto; border: 1px solid #404040;">{escaped_content}</pre>'
             is_nested_report = False
 
+        ts_current = timer()
         self.panes.append(
             {
                 "id": pane_id,
@@ -289,7 +307,8 @@ class Report(ReportInterface):
                 "content": html_content,
                 "is_nested_report": is_nested_report,
                 "fallback_content": str(content),
-                "end_time": timer(),
+                "end_time": ts_current,
+                "overhead_time": ts_current - ts_overhead,
             }
         )
 
