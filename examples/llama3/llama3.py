@@ -70,7 +70,7 @@ def feed_forward(x, up_weight, gate_weight, down_weight):
 
 
 def rmsnorm(x, weight, eps):
-    z_float = (x**2).mean(-1, keepdims=True) + eps
+    z_float = np.mean(x**2, -1, keepdims=True) + eps
     z = x / np.sqrt(z_float)
     result = z * weight
     return result
@@ -268,7 +268,7 @@ def llama_generate(model, input_ids, max_new_tokens):
             current_input_ids = next_id
             pos = current_pos - 1
         logits = llama_forward(model, current_input_ids, pos)
-        next_id = logits[:, -1, :].argmax(-1, keepdims=True).astype(np.int32)
+        next_id = np.argmax(logits[:, -1, :], axis=-1, keepdims=True).astype(np.int32)
         yield next_id
         current_len += 1
         if current_len >= model["args"].max_seq_len:
