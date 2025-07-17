@@ -62,9 +62,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 
-import IPython
-
-from utils import IN_NOTEBOOK
+from utils import IN_NOTEBOOK, display
 
 # ### Symbol Information class
 
@@ -272,6 +270,7 @@ def attribute_to_qualified_name(node):
         # Node type not supported for qualified name conversion
         return None
 
+
 def to_graphviz(cgv):
     # Convert the call graph in a CallGraphVisitor to a graphviz style graph
     # that Jupyter can render natively.
@@ -359,4 +358,5 @@ if __name__ == "__main__":
 # must assume that these will be resolved at a later stage.
 
 if __name__ == "__main__":
-    IPython.display.display(to_graphviz(cgv))
+    if IN_NOTEBOOK:
+        display(to_graphviz(cgv))
