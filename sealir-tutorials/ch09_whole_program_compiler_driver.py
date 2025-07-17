@@ -120,6 +120,10 @@ class CallGraphVisitor(ast.NodeVisitor):
         self.functions = {}
         # List of all global ast.Call nodes
         self.global_calls = []
+        # Mapping of imported Python modules in the global namespace
+        # Key is global name of the imported Module.
+        # Value is the fully-qualified import path.
+        self.imported = {}
 
     def get_call_graph(self) -> dict[str : tuple[str]]:
         """Obtain a call graph suitable for processing with networkx.
@@ -191,6 +195,29 @@ class CallGraphVisitor(ast.NodeVisitor):
     def visit_all(self):
         """Visit all nodes in the AST."""
         self.visit(self.tree)
+
+    def visit_Import(self, node):
+        # Add globals that are imported into self.imported
+        for alias in node.names:
+            # The name used in the global namespace
+            global_name = alias.asname if alias.asname else alias.name
+            # The fully-qualified import path
+            import_path = alias.name
+            self.imported[global_name] = import_path
+
+    def visit_ImportFrom(self, node):
+        # Add globals that are imported into self.imported
+        module_name = node.module if node.module else ""
+        for alias in node.names:
+            # The name used in the global namespace
+            global_name = alias.asname if alias.asname else alias.name
+            # The fully-qualified import path
+            if module_name:
+                import_path = f"{module_name}.{alias.name}"
+            else:
+                # Handle relative imports (from . import name)
+                import_path = alias.name
+            self.imported[global_name] = import_path
 
     def visit_FunctionDef(self, node):
         """Visit a function definition."""

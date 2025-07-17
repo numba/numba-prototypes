@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import base64
 import html
+import os
 import re
 import uuid
+import webbrowser
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
 from pprint import pformat
+from tempfile import NamedTemporaryFile
 from timeit import default_timer as timer
 
 from egglog import EGraph
@@ -612,11 +615,19 @@ class Report(ReportInterface):
 
         return html
 
-    def display(self):
+    def display(self, view_html=False):
         """Display the report in the Jupyter notebook."""
         if IN_NOTEBOOK:
             html_content = self._generate_html()
             return display(HTML(html_content))
+        elif view_html:
+            html_content = self._generate_html()
+            with NamedTemporaryFile(
+                mode="w", suffix=".html", delete=False
+            ) as f:
+                f.write(html_content)
+                temp_file = os.path.abspath(f.name)
+                webbrowser.open(f"file://{temp_file}")
         else:
             self._display_terminal()
 

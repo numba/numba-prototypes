@@ -1,7 +1,7 @@
 import numpy as np
 
 
-def softmax(x, axis=-1):
+def softmax(x, axis):
     """Compute softmax values for each sets of scores in x."""
     e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))
     return e_x / np.sum(e_x, axis=axis, keepdims=True)
