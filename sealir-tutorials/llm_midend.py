@@ -1,26 +1,35 @@
 import operator
+from functools import reduce
 from pprint import pprint
 from types import FunctionType
-from functools import reduce
 
 from egglog import (
+    Bool,
+    BoolLike,
     Expr,
     String,
     StringLike,
     Vec,
     function,
+    i64,
+    i64Like,
     rewrite,
     rule,
     ruleset,
     set_,
     union,
+    var,
 )
 from sealir.eqsat.py_eqsat import (
     Py_AttrIO,
+    Py_CallKwargs,
     Py_LoadGlobal,
 )
+from sealir.eqsat.py_eqsat import make_rules as py_eqsat_rules
 from sealir.eqsat.rvsdg_eqsat import (
     Term,
+    TermDict,
+    TermList,
 )
 
 from ch04_1_typeinfer_ifelse import Type, TypeVar
@@ -115,6 +124,10 @@ module_rules = ruleset(*make_module_fact_ruleset(cgv.imported))
 # Install numpy function rules
 
 
+@function
+def NpyOp_Sum(operand: Term, axis: i64Like, keepdims: BoolLike) -> Term: ...
+
+
 class NumPyRules:
     module_name = "numpy"
 
@@ -130,9 +143,28 @@ class NumPyRules:
     def sum(orig: Term):
         yield rewrite(orig, subsume=True).to(npy_reduce("sum"))
 
+        io = var("io", Term)
+        args = var("args", TermList)
+        kwargs = var("kwargs", TermDict)
+        callee = Py_CallKwargs(
+            func=npy_reduce("sum"), io=io, args=args, kwargs=kwargs
+        )
+        keepdims_val = var("keepdims_val", Bool)
+        axis_val = var("axis_val", i64)
+        yield rule(callee).then(
+            kwargs.lookup("keepdims"), kwargs.lookup("axis")
+        )
+        yield rewrite(callee.getPort(1)).to(
+            NpyOp_Sum(args[0], axis=axis_val, keepdims=keepdims_val),
+            # conditions
+            Term.LiteralI64(axis_val) == kwargs.get("axis"),
+            Term.LiteralBool(keepdims_val) == kwargs.get("keepdims"),
+        )
+
 
 @function
 def npy_unary_ufunc(name: StringLike) -> Term: ...
+
 
 @function
 def npy_reduce(name: StringLike) -> Term: ...
@@ -171,10 +203,13 @@ try:
     jit_compiler(
         fn=softmax.ast,
         argtypes=(Int64, Int64),
-        ruleset=base_ruleset
-        | setup_argtypes(TypeInt64, TypeInt64)
-        | module_rules
-        | module_rulesets,
+        ruleset=(
+            base_ruleset
+            | py_eqsat_rules()
+            | setup_argtypes(TypeInt64, TypeInt64)
+            | module_rules
+            | module_rulesets
+        ),
         pipeline_report=report,
         pipeline_debug=True,
         **compiler_config,

@@ -1,8 +1,9 @@
 import numpy as np
 
 
-def softmax(x, axis):
+def softmax(x):
     """Compute softmax values for each sets of scores in x."""
+    axis = -1
     e_x = np.exp(x - np.max(x, axis=axis, keepdims=True))
     return e_x / np.sum(e_x, axis=axis, keepdims=True)
 
@@ -28,7 +29,7 @@ def scaled_dot_product_attention(query, key, value):
     scores = np.matmul(Q, K.transpose(0, 2, 1)) / np.sqrt(d_k)
 
     # Get attention weights
-    weights = softmax(scores, axis=-1)
+    weights = softmax(scores)
 
     # Calculate weighted sum
     context = np.matmul(weights, V)
