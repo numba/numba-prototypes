@@ -112,12 +112,17 @@ from utils import (
 # Two separate matmuls followed by elementwise add
 
 
+# <img src="img/matmul_add.svg" />
+
+
 def original_mma(input_1, input_2, input_3, input_4):
     return input_1 @ (input_2 + input_3) @ input_4
 
 
 # ### Optimized version
 # Concatenate inputs along feature dimensions
+#
+# <img src="img/hstack_vstack.svg" />
 
 
 def optimized_mma(input_1, input_2, input_3, input_4):

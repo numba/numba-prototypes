@@ -10,8 +10,11 @@
 PY_FILES := $(wildcard ch[0-9]*.py) $(wildcard demo[0-9]*.py) index.py
 IPYNB_FILES := $(patsubst %.py,%.ipynb,$(PY_FILES))
 PAGES_SUBDIR := ../pages/sealir_tutorials
-PRE_RENDERED_HTML_FILES := $(wildcard *.pre_rendered.html)
-HTML_FILES := $(patsubst %.ipynb,$(PAGES_SUBDIR)/%.html,$(IPYNB_FILES)) $(patsubst %.pre_rendered.html,$(PAGES_SUBDIR)/%.pre_rendered.html,$(PRE_RENDERED_HTML_FILES))
+HTML_FILES := $(patsubst %.ipynb,$(PAGES_SUBDIR)/%.html,$(IPYNB_FILES))
+IMG_DIR := ./img
+IMG_TARGET_DIR := $(PAGES_SUBDIR)/img
+IMG_FILES := $(wildcard $(IMG_DIR)/*)
+IMG_TARGET_FILES := $(patsubst $(IMG_DIR)/%,$(IMG_TARGET_DIR)/%,$(IMG_FILES))
 
 # Default target to build all notebooks
 all: $(IPYNB_FILES)
@@ -30,10 +33,22 @@ format:
 		echo "$$files" | xargs black -l79; \
 	fi
 
-pages: $(PAGES_SUBDIR) $(HTML_FILES)
+pages: $(PAGES_SUBDIR) $(HTML_FILES) $(IMG_TARGET_FILES)
 
 $(PAGES_SUBDIR):
 	mkdir -p $(PAGES_SUBDIR)
+
+# Create target directory for images
+$(IMG_TARGET_DIR):
+	mkdir -p $(IMG_TARGET_DIR)
+
+# Pattern rule to copy individual image files when they change
+$(IMG_TARGET_DIR)/%: $(IMG_DIR)/% | $(IMG_TARGET_DIR)
+	@echo "Copying $< to $@"
+	cp $< $@
+
+# Convenience target for copying all images
+copy-img: $(IMG_TARGET_FILES)
 
 # Pattern rule to convert .py files to .ipynb
 %.ipynb: %.py
@@ -43,14 +58,12 @@ $(PAGES_SUBDIR):
 $(PAGES_SUBDIR)/%.html: %.ipynb
 	jupyter nbconvert --execute --to html  --HTMLExporter.theme=dark --output=$@ $<
 
-# Pattern rule to copy pre-rendered .html files
-$(PAGES_SUBDIR)/%.pre_rendered.html: %.pre_rendered.html
-	cp $< $@
-
 # Clean target to remove generated notebooks and rendered HTML
 clean:
 	rm -f $(IPYNB_FILES)
 	rm -f $(HTML_FILES)
+	rm -f $(IMG_TARGET_FILES)
+	rm -rf $(IMG_TARGET_DIR)
 	rm -df $(PAGES_SUBDIR)
 
 test:

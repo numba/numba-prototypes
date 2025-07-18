@@ -1,0 +1,461 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   viewBox="0 0 1002 270.35217"
+   version="1.1"
+   id="svg42"
+   sodipodi:docname="hstack_vstack.svg"
+   width="1002"
+   height="270.35217"
+   inkscape:version="1.4.2 (ebf0e940, 2025-05-08)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <sodipodi:namedview
+     id="namedview42"
+     pagecolor="#ffffff"
+     bordercolor="#000000"
+     borderopacity="0.25"
+     inkscape:showpageshadow="2"
+     inkscape:pageopacity="0.0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#d1d1d1"
+     inkscape:zoom="1.4737011"
+     inkscape:cx="354.8888"
+     inkscape:cy="125.195"
+     inkscape:window-width="1520"
+     inkscape:window-height="1186"
+     inkscape:window-x="1048"
+     inkscape:window-y="43"
+     inkscape:window-maximized="0"
+     inkscape:current-layer="g28" />
+  <!-- Background -->
+  <rect
+     width="1000.3605"
+     height="268.71265"
+     fill="#f8f9fa"
+     stroke="#e9ecef"
+     stroke-width="1.63954"
+     id="rect1"
+     style="fill:#ececec"
+     x="0.81976998"
+     y="0.81976998" />
+  <!-- Title -->
+  <text
+     x="501"
+     y="31"
+     text-anchor="middle"
+     font-family="Times, serif"
+     font-size="20px"
+     font-weight="bold"
+     fill="#2c3e50"
+     id="text1"
+     dx="0 0 0 0 0 0">Tensor rewrite rule: A @ B + C @ D = hstack(A, C) @ vstack(B, D)</text>
+  <!-- Left side: A @ B + C @ D -->
+  <g
+     transform="translate(50.999999,80.999999)"
+     id="g15">
+    <text
+       x="0"
+       y="20"
+       font-family="Times, serif"
+       font-size="16px"
+       font-weight="bold"
+       fill="#2c3e50"
+       id="text2">Original Expression:</text>
+    <!-- A @ B -->
+    <g
+       transform="translate(0,50)"
+       id="g8">
+      <!-- Matrix A -->
+      <g
+         id="g4">
+        <rect
+           x="0"
+           y="0"
+           width="60"
+           height="40"
+           fill="#e3f2fd"
+           stroke="#1976d2"
+           stroke-width="2"
+           id="rect2" />
+        <text
+           x="30"
+           y="25"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="14px"
+           font-weight="bold"
+           fill="#1976d2"
+           id="text3">A</text>
+        <text
+           x="30"
+           y="55"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="12px"
+           fill="#666666"
+           id="text4">M × N</text>
+      </g>
+      <!-- @ symbol -->
+      <text
+         x="75"
+         y="25"
+         font-family="Times, serif"
+         font-size="16px"
+         fill="#2c3e50"
+         id="text5">@</text>
+      <!-- Matrix B -->
+      <g
+         transform="translate(95)"
+         id="g7">
+        <rect
+           x="0"
+           y="0"
+           width="60"
+           height="40"
+           fill="#e8f5e8"
+           stroke="#388e3c"
+           stroke-width="2"
+           id="rect5" />
+        <text
+           x="30"
+           y="25"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="14px"
+           font-weight="bold"
+           fill="#388e3c"
+           id="text6">B</text>
+        <text
+           x="30"
+           y="55"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="12px"
+           fill="#666666"
+           id="text7">N × K</text>
+      </g>
+    </g>
+    <!-- + symbol -->
+    <text
+       x="185"
+       y="75"
+       font-family="Times, serif"
+       font-size="20px"
+       fill="#2c3e50"
+       id="text8">+</text>
+    <!-- C @ D -->
+    <g
+       transform="translate(220,50)"
+       id="g14">
+      <!-- Matrix C -->
+      <g
+         id="g10">
+        <rect
+           x="0"
+           y="0"
+           width="60"
+           height="40"
+           fill="#fce4ec"
+           stroke="#c2185b"
+           stroke-width="2"
+           id="rect8" />
+        <text
+           x="30"
+           y="25"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="14px"
+           font-weight="bold"
+           fill="#c2185b"
+           id="text9">C</text>
+        <text
+           x="30"
+           y="55"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="12px"
+           fill="#666666"
+           id="text10">M × P</text>
+      </g>
+      <!-- @ symbol -->
+      <text
+         x="75"
+         y="25"
+         font-family="Times, serif"
+         font-size="16px"
+         fill="#2c3e50"
+         id="text11">@</text>
+      <!-- Matrix D -->
+      <g
+         transform="translate(95)"
+         id="g13">
+        <rect
+           x="0"
+           y="0"
+           width="60"
+           height="40"
+           fill="#fff3e0"
+           stroke="#f57c00"
+           stroke-width="2"
+           id="rect11" />
+        <text
+           x="30"
+           y="25"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="14px"
+           font-weight="bold"
+           fill="#f57c00"
+           id="text12">D</text>
+        <text
+           x="30"
+           y="55"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="12px"
+           fill="#666666"
+           id="text13">P × K</text>
+      </g>
+    </g>
+  </g>
+  <!-- Equals symbol -->
+  <text
+     x="501"
+     y="141"
+     text-anchor="middle"
+     font-family="Times, serif"
+     font-size="24px"
+     fill="#2c3e50"
+     id="text15">=</text>
+  <!-- Right side: hstack(A, C) @ vstack(B, D) -->
+  <g
+     transform="translate(551,80.999999)"
+     id="g27">
+    <text
+       x="0"
+       y="20"
+       font-family="Times, serif"
+       font-size="16px"
+       font-weight="bold"
+       fill="#2c3e50"
+       id="text16">Equivalent Expression:</text>
+    <!-- hstack(A, C) -->
+    <g
+       transform="translate(0,50)"
+       id="g21">
+      <text
+         x="0"
+         y="15"
+         font-family="Times, serif"
+         font-size="14px"
+         fill="#666666"
+         id="text17">hstack(A, C)</text>
+      <!-- Combined matrix [A | C] -->
+      <g
+         transform="translate(0,20)"
+         id="g20">
+        <rect
+           x="0"
+           y="0"
+           width="120"
+           height="40"
+           fill="#f3e5f5"
+           stroke="#7b1fa2"
+           stroke-width="2"
+           id="rect17" />
+        <!-- A section -->
+        <rect
+           x="0"
+           y="0"
+           width="60"
+           height="40"
+           fill="#e3f2fd"
+           stroke="#1976d2"
+           stroke-width="2"
+           id="rect18" />
+        <text
+           x="30"
+           y="25"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="14px"
+           font-weight="bold"
+           fill="#1976d2"
+           id="text18">A</text>
+        <!-- C section -->
+        <rect
+           x="60"
+           y="0"
+           width="60"
+           height="40"
+           fill="#fce4ec"
+           stroke="#c2185b"
+           stroke-width="2"
+           id="rect19" />
+        <text
+           x="90"
+           y="25"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="14px"
+           font-weight="bold"
+           fill="#c2185b"
+           id="text19">C</text>
+        <!-- Combined dimension -->
+        <text
+           x="60"
+           y="55"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="12px"
+           fill="#666666"
+           id="text20">M × (N+P)</text>
+      </g>
+    </g>
+    <!-- @ symbol -->
+    <text
+       x="140"
+       y="85"
+       font-family="Times, serif"
+       font-size="16px"
+       fill="#2c3e50"
+       id="text21">@</text>
+    <!-- vstack(B, D) -->
+    <g
+       transform="translate(160,50)"
+       id="g26">
+      <text
+         x="0"
+         y="15"
+         font-family="Times, serif"
+         font-size="14px"
+         fill="#666666"
+         id="text22">vstack(B, D)</text>
+      <!-- Combined matrix [B; D] -->
+      <g
+         transform="translate(0,20)"
+         id="g25">
+        <rect
+           x="0"
+           y="0"
+           width="60"
+           height="80"
+           fill="#f3e5f5"
+           stroke="#7b1fa2"
+           stroke-width="2"
+           id="rect22" />
+        <!-- B section -->
+        <rect
+           x="0"
+           y="0"
+           width="60"
+           height="40"
+           fill="#e8f5e8"
+           stroke="#388e3c"
+           stroke-width="2"
+           id="rect23" />
+        <text
+           x="30"
+           y="25"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="14px"
+           font-weight="bold"
+           fill="#388e3c"
+           id="text23">B</text>
+        <!-- D section -->
+        <rect
+           x="0"
+           y="40"
+           width="60"
+           height="40"
+           fill="#fff3e0"
+           stroke="#f57c00"
+           stroke-width="2"
+           id="rect24" />
+        <text
+           x="30"
+           y="65"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="14px"
+           font-weight="bold"
+           fill="#f57c00"
+           id="text24">D</text>
+        <!-- Combined dimension -->
+        <text
+           x="30"
+           y="93"
+           text-anchor="middle"
+           font-family="Times, serif"
+           font-size="12px"
+           fill="#666666"
+           id="text25">(N+P) × K</text>
+      </g>
+    </g>
+  </g>
+  <!-- Visual indicators for stacking -->
+  <g
+     transform="translate(583,185)"
+     id="g28">
+    <!-- Horizontal stacking arrow -->
+    <line
+       x1="15"
+       y1="40"
+       x2="45"
+       y2="40"
+       stroke="#7b1fa2"
+       stroke-width="2"
+       marker-end="url(#arrowhead)"
+       id="line27" />
+    <text
+       x="30"
+       y="31"
+       text-anchor="middle"
+       font-family="Times, serif"
+       font-size="10px"
+       fill="#7b1fa2"
+       id="text27">horizontal</text>
+    <!-- Vertical stacking arrow -->
+    <line
+       x1="204"
+       y1="-9"
+       x2="204"
+       y2="21"
+       stroke="#7b1fa2"
+       stroke-width="2"
+       marker-end="url(#arrowhead)"
+       id="line28" />
+    <text
+       x="228"
+       y="6"
+       text-anchor="middle"
+       font-family="Times, serif"
+       font-size="10px"
+       fill="#7b1fa2"
+       id="text28">vertical</text>
+  </g>
+  <!-- Arrow marker definition -->
+  <defs
+     id="defs28">
+    <marker
+       id="arrowhead"
+       markerWidth="10"
+       markerHeight="7"
+       refX="9"
+       refY="3.5"
+       orient="auto">
+      <polygon
+         points="10,3.5 0,7 0,0 "
+         fill="#7b1fa2"
+         id="polygon28" />
+    </marker>
+  </defs>
+  <!-- Key/Legend -->
+  <!-- Requirements -->
+  <g
+     transform="translate(551,221)"
+     id="g42" />
+</svg>

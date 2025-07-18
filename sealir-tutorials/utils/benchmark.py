@@ -7,8 +7,6 @@ import statistics
 import timeit as _timeit
 from typing import Callable, Optional
 
-from . import IN_NOTEBOOK
-
 
 class TimeitResult:
     """Container for timing results with IPython-like formatting."""
@@ -78,6 +76,8 @@ def visualize_benchmark(
         >>> result2 = timeit(func2)
         >>> visualize_benchmark(result1, result2, labels=["Unoptimized", "Optimized"])
     """
+    from . import IN_NOTEBOOK
+
     try:
         import matplotlib.pyplot as plt
         import numpy as np
