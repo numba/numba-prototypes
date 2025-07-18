@@ -521,9 +521,10 @@ def egraph_saturation_with_error_checking(
             report.append("[debug] initial egraph", egraph)
 
         # Run all the rules until saturation
-        egraph.run(ruleset.saturate())
+        runreport = egraph.run(ruleset.saturate())
 
         if pipeline_debug:
+            report.append("[debug] run report", runreport)
             report.append("[debug] saturated egraph", egraph)
             report.append(
                 "[debug] egglog.extract", egraph.extract(egraph_root)

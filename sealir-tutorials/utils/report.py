@@ -7,11 +7,9 @@ import uuid
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from pprint import pformat
 from timeit import default_timer as timer
 
-from egglog import EGraph
-from IPython.display import HTML, SVG, display
+from IPython.display import HTML, display
 
 from .notebookutils import IN_NOTEBOOK
 
@@ -31,58 +29,6 @@ def remove_svg_constraints_xml(svg_str):
     return ET.tostring(root, encoding="unicode")
 
 
-def egraph_to_svg(egraph: EGraph) -> HTML:
-    content = egraph._graphviz()
-    svg_raw = content.pipe(format="svg", quiet=True)
-    svg_str = (
-        svg_raw.decode("utf-8") if isinstance(svg_raw, bytes) else svg_str
-    )
-
-    svg_data = svg_str
-
-    # Escape the SVG data properly for JavaScript
-    svg_escaped = (
-        svg_data.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-    )
-
-    return HTML(
-        f"""
-    <div style="margin: 10px 0;">
-        <button onclick="openSVGInNewTab()" style="
-            margin-bottom: 10px;
-            padding: 8px 16px;
-            background: #007cba;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-        ">Open Full Size in New Tab</button>
-
-        <div style="
-            overflow: auto;
-            border: 1px solid #ccc;
-            resize: both;
-            min-width: 10em;
-            min-height: 3em;
-        ">
-            {svg_data}
-        </div>
-    </div>
-
-    <script>
-    function openSVGInNewTab() {{
-        const svgData = `{svg_escaped}`;
-        const blob = new Blob([svgData], {{type: 'image/svg+xml;charset=utf-8'}});
-        const url = URL.createObjectURL(blob);
-        const newWindow = window.open();
-        newWindow.location.href = url;
-
-        // Clean up after a delay
-        setTimeout(() => URL.revokeObjectURL(url), 2000);
-    }}
-    </script>
-    """
-    )
 
 
 class ReportInterface(ABC):
@@ -151,14 +97,40 @@ class DummyReport(ReportInterface):
         return f"DummyReport()"
 
 
+
+def format_time(time_seconds: float, decimal_places: int = 1) -> str:
+    """
+    Format time with automatically selected unit (s, ms, μs, ns).
+
+    Args:
+        time_seconds: Time value in seconds
+        decimal_places: Number of decimal places to display
+    """
+    if time_seconds >= 1:
+        return f"{time_seconds:.{decimal_places}f}s"
+    elif time_seconds >= 1e-3:
+        return f"{time_seconds * 1e3:.{decimal_places}f}ms"
+    elif time_seconds >= 1e-6:
+        return f"{time_seconds * 1e6:.{decimal_places}f}μs"
+    else:
+        return f"{time_seconds * 1e9:.{decimal_places}f}ns"
+
+
 class Report(ReportInterface):
     """
     A utility class for creating collapsible panes in Jupyter notebooks.
 
-    Supports both text content and IPython display-able objects (images, plots, etc.).
+    Supports both text content and IPython display-able objects (images, plots,
+    etc.).
+
+    Notes:
+
+    - Timing overhead represents milliseconds consumed by `.append()` rendering
+      operations.
     """
 
     Sink = DummyReport
+    renderer = {}  # Registry for type-specific renderers
 
     def __init__(
         self,
@@ -184,7 +156,8 @@ class Report(ReportInterface):
         """Compute metadata as a dict for timing breakdown."""
         last_time = self._start_time
         timing = []
-        total_overhead_ms = 0
+        total_overhead = 0
+        complete_end_time = timer()
         for pane_info in self.panes:
             title = pane_info["title"]
             end_time = pane_info["end_time"]
@@ -192,35 +165,35 @@ class Report(ReportInterface):
             timing.append(
                 {
                     "title": title,
-                    "elapsed_ms": (end_time - last_time) * 1000,
-                    "overhead_ms": overhead_time * 1000,
+                    "elapsed": (end_time - last_time),
+                    "overhead": overhead_time,
                 }
             )
             last_time = end_time
-            total_overhead_ms += overhead_time
-        total_elapsed = (last_time - self._start_time) * 1000
+            total_overhead += overhead_time
+        total_elapsed = (complete_end_time - self._start_time)
         return {
-            "total_elapsed_ms": total_elapsed,
-            "total_overhead_ms": total_overhead_ms * 1000,
+            "total_elapsed": total_elapsed,
+            "total_overhead": total_overhead,
             "timing": timing,
         }
 
     def _format_metadata(self, metadata_dict):
         """Format the metadata dict as a string."""
-        elapsed = metadata_dict["total_elapsed_ms"]
-        overhead = metadata_dict["total_overhead_ms"]
+        elapsed = metadata_dict["total_elapsed"]
+        overhead = metadata_dict["total_overhead"]
         buf = [
-            f"time elapsed {elapsed:.2f}ms",
-            f"overhead {overhead:.2f}ms",
-            f"elapsed - overhead {elapsed - overhead:.2f}ms",
+            f"time elapsed {format_time(elapsed)}",
+            f"overhead {format_time(overhead)}",
+            f"elapsed - overhead {format_time(elapsed - overhead)}",
             "timing breakdown (+ overhead):",
         ]
         for entry in metadata_dict["timing"]:
-            elapsed = entry["elapsed_ms"]
-            overhead = entry["overhead_ms"]
+            elapsed = entry["elapsed"]
+            overhead = entry["overhead"]
             diff = elapsed - overhead
             buf.append(
-                f"  {diff:.2f}ms (+ {overhead:.2f}ms): {entry['title']:20}"
+                f"  {format_time(diff)} (+ {format_time(overhead)}: {entry['title']:20}"
             )
         return "\n".join(buf)
 
@@ -230,15 +203,13 @@ class Report(ReportInterface):
         try:
             yield report
         finally:
+            meta = report._compute_metadata()
+            elapsed = meta["total_elapsed"]
+            overhead = meta["total_overhead"]
+            elapsed_discounted = elapsed - overhead
             if self.enable_nested_metadata or metadata:
-                meta = report._compute_metadata()
-                elapsed = meta["total_elapsed_ms"]
-                overhead_ms = meta["total_overhead_ms"]
                 report.append("[metadata]", report._format_metadata(meta))
-                elapsed_discounted = elapsed - overhead_ms
-                title = f"{report.title} ({elapsed_discounted:.2f}ms)"
-            else:
-                title = report.title
+            title = f"{report.title}: {format_time(elapsed_discounted)} (+{format_time(overhead)} overhead)"
             self.append(title, report)
 
     def append(self, title, content):
@@ -250,10 +221,54 @@ class Report(ReportInterface):
             self._original_contents = {}
         self._original_contents[pane_id] = content
 
-        if isinstance(content, EGraph):
-            content = egraph_to_svg(content)
+        html_content, is_nested_report = self._render_content(content)
 
-        # Process different content types (same as original)
+        ts_current = timer()
+        self.panes.append(
+            {
+                "id": pane_id,
+                "title": title,
+                "content": html_content,
+                "is_nested_report": is_nested_report,
+                "fallback_content": str(content),
+                "end_time": ts_current,
+                "overhead_time": ts_current - ts_overhead,
+            }
+        )
+
+    def _render_content(self, content):
+        """
+        Render content into HTML format and determine if it's a nested report.
+
+        Args:
+            content: The content to render (can be EGraph, Report, or various display objects)
+
+        Returns:
+            tuple: (html_content, is_nested_report)
+        """
+        # Check for registered custom renderers first
+        content_type = type(content)
+        if content_type in self.renderer:
+            return self.renderer[content_type](self, content)
+
+        # Check for registered renderers by base classes (MRO order)
+        for cls in content_type.__mro__:
+            if cls in self.renderer:
+                return self.renderer[cls](self, content)
+
+        # Fall back to built-in renderers
+        return self._render_builtin_content(content)
+
+    def _render_builtin_content(self, content):
+        """
+        Built-in content rendering logic.
+
+        Args:
+            content: The content to render
+
+        Returns:
+            tuple: (html_content, is_nested_report)
+        """
         if isinstance(content, Report):
             # Nested Report support
             html_content = self._render_nested_report(content)
@@ -289,7 +304,6 @@ class Report(ReportInterface):
                 html_content = content
             else:
                 # Escape HTML and preserve whitespace
-
                 escaped_content = html.escape(content)
                 html_content = f'<pre style="white-space: pre-wrap; font-family: monospace; background-color: #2a2a2a; color: #e0e0e0; padding: 10px; border-radius: 4px; overflow-x: auto; border: 1px solid #404040;">{escaped_content}</pre>'
             is_nested_report = False
@@ -299,18 +313,7 @@ class Report(ReportInterface):
             html_content = f'<pre style="white-space: pre-wrap; font-family: monospace; background-color: #2a2a2a; color: #e0e0e0; padding: 10px; border-radius: 4px; overflow-x: auto; border: 1px solid #404040;">{escaped_content}</pre>'
             is_nested_report = False
 
-        ts_current = timer()
-        self.panes.append(
-            {
-                "id": pane_id,
-                "title": title,
-                "content": html_content,
-                "is_nested_report": is_nested_report,
-                "fallback_content": str(content),
-                "end_time": ts_current,
-                "overhead_time": ts_current - ts_overhead,
-            }
-        )
+        return html_content, is_nested_report
 
     def _render_nested_report(self, nested_report):
         """Render a nested Report as HTML content."""

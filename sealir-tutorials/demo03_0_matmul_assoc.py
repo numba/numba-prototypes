@@ -286,9 +286,10 @@ def egraph_saturation(
                 ).to_json()
                 saturation_steps.append(jsdata)
         else:
-            egraph.run(all_rules.saturate())
+            runreport = egraph.run(all_rules.saturate())
             saturation_steps = None
         if pipeline_debug:
+            report.append("[debug] Run report", runreport)
             report.append("[debug] Saturated egraph", egraph)
         return dict(egraph=egraph, saturation_steps=saturation_steps)
 

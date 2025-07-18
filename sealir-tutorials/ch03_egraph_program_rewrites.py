@@ -57,9 +57,10 @@ def egraph_saturation(
     pipeline_report=Report.Sink(),
 ) -> EGraphOutput:
     # Apply the ruleset to the egraph
-    egraph.run(ruleset.saturate())
-    pipeline_report.append("EGraph Saturated", egraph)
-    return {"egraph": egraph, "egraph_root": egraph_root}
+    with pipeline_report.nest("Egraph Saturation") as report:
+        runreport = egraph.run(ruleset.saturate())
+        report.append("egraph run report", runreport)
+        return {"egraph": egraph, "egraph_root": egraph_root}
 
 
 compiler_pipeline = _ch02_compiler_pipeline.replace(
