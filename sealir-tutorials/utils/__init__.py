@@ -1,17 +1,15 @@
-from .expr_tree_builder import visualize_expr_tree
-from .notebookutils import *
-from .pipeline import Pipeline
-from .report import Report
-from .benchmark import timeit, visualize_benchmark
-
-
 from egglog import EGraph
 from egglog.bindings import RunReport
 from IPython.display import HTML
 
-
+from .benchmark import timeit, visualize_benchmark
+from .expr_tree_builder import visualize_expr_tree
+from .notebookutils import *
+from .pipeline import Pipeline
+from .report import Report
 
 # Report extensions
+
 
 def egraph_to_svg(egraph: EGraph) -> HTML:
     content = egraph._graphviz()
@@ -66,11 +64,12 @@ def egraph_to_svg(egraph: EGraph) -> HTML:
     """
     )
 
+
 def _egraph_renderer(report, content: EGraph):
     return report._render_content(egraph_to_svg(content))
 
-Report.renderer[EGraph] = _egraph_renderer
 
+Report.renderer[EGraph] = _egraph_renderer
 
 
 def _egraph_runreport_renderer(report, content: RunReport):
@@ -113,12 +112,14 @@ def _egraph_runreport_renderer(report, content: RunReport):
         rows = []
         for key, value in sorted(data_dict.items()):
             formatted_value = value_formatter(value)
-            rows.append(f"""
+            rows.append(
+                f"""
                 <tr>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #444; font-family: 'SF Mono', 'Monaco', 'Menlo', 'Consolas', monospace; color: #e1e1e1;">{key}</td>
                     <td style="padding: 8px 12px; border-bottom: 1px solid #444; text-align: right; color: #e1e1e1;">{formatted_value}</td>
                 </tr>
-            """)
+            """
+            )
 
         return f"""
         <div style="margin: 15px 0;">
@@ -138,8 +139,9 @@ def _egraph_runreport_renderer(report, content: RunReport):
         """
 
     # Build HTML content
-    html_parts = []# Add overall status
-    html_parts.append(f"""
+    html_parts = []  # Add overall status
+    html_parts.append(
+        f"""
     <div style="margin: 15px 0; padding: 12px 16px;
                 background-color: {'rgba(40, 167, 69, 0.15)' if content.updated else 'rgba(220, 53, 69, 0.15)'};
                 border: 1px solid {'#28a745' if content.updated else '#dc3545'};
@@ -147,15 +149,50 @@ def _egraph_runreport_renderer(report, content: RunReport):
         <strong style="color: {'#4ade80' if content.updated else '#f87171'};">Run Status:</strong>
         <span style="color: #e1e1e1;">{'Updated' if content.updated else 'No updates'}</span>
     </div>
-    """)
+    """
+    )
 
     # Create tables for each dictionary
-    html_parts.append(create_table("Search Time Per Rule", content.search_time_per_rule, format_timedelta))
-    html_parts.append(create_table("Apply Time Per Rule", content.apply_time_per_rule, format_timedelta))
-    html_parts.append(create_table("Search Time Per Ruleset", content.search_time_per_ruleset, format_timedelta))
-    html_parts.append(create_table("Apply Time Per Ruleset", content.apply_time_per_ruleset, format_timedelta))
-    html_parts.append(create_table("Rebuild Time Per Ruleset", content.rebuild_time_per_ruleset, format_timedelta))
-    html_parts.append(create_table("Number of Matches Per Rule", content.num_matches_per_rule))
+    html_parts.append(
+        create_table(
+            "Search Time Per Rule",
+            content.search_time_per_rule,
+            format_timedelta,
+        )
+    )
+    html_parts.append(
+        create_table(
+            "Apply Time Per Rule",
+            content.apply_time_per_rule,
+            format_timedelta,
+        )
+    )
+    html_parts.append(
+        create_table(
+            "Search Time Per Ruleset",
+            content.search_time_per_ruleset,
+            format_timedelta,
+        )
+    )
+    html_parts.append(
+        create_table(
+            "Apply Time Per Ruleset",
+            content.apply_time_per_ruleset,
+            format_timedelta,
+        )
+    )
+    html_parts.append(
+        create_table(
+            "Rebuild Time Per Ruleset",
+            content.rebuild_time_per_ruleset,
+            format_timedelta,
+        )
+    )
+    html_parts.append(
+        create_table(
+            "Number of Matches Per Rule", content.num_matches_per_rule
+        )
+    )
 
     # Wrap everything in a container
     full_html = f"""
@@ -202,14 +239,18 @@ def _egraph_runreport_renderer_nested(report, content: RunReport):
         else:
             return f"{total_seconds:.3f}s"
 
-    def add_dict_to_report(parent_report, title, data_dict, value_formatter=None):
+    def add_dict_to_report(
+        parent_report, title, data_dict, value_formatter=None
+    ):
         """Add a dictionary as a nested report"""
         if value_formatter is None:
             value_formatter = str
 
         section_report = Report(title, default_expanded=True)
 
-        for key, value in sorted(data_dict.items(), key=lambda x: x[1], reverse=True):
+        for key, value in sorted(
+            data_dict.items(), key=lambda x: x[1], reverse=True
+        ):
             formatted_value = value_formatter(value)
             section_report.append(key, formatted_value)
 
@@ -224,13 +265,41 @@ def _egraph_runreport_renderer_nested(report, content: RunReport):
     main_report.append("Updated", content.updated)
 
     # Add each section as a nested report
-    add_dict_to_report(main_report, "Search Time Per Rule", content.search_time_per_rule, format_timedelta)
-    add_dict_to_report(main_report, "Apply Time Per Rule", content.apply_time_per_rule, format_timedelta)
-    add_dict_to_report(main_report, "Search Time Per Ruleset", content.search_time_per_ruleset, format_timedelta)
-    add_dict_to_report(main_report, "Apply Time Per Ruleset", content.apply_time_per_ruleset, format_timedelta)
-    add_dict_to_report(main_report, "Rebuild Time Per Ruleset", content.rebuild_time_per_ruleset, format_timedelta)
-    add_dict_to_report(main_report, "Number of Matches Per Rule", content.num_matches_per_rule)
+    add_dict_to_report(
+        main_report,
+        "Search Time Per Rule",
+        content.search_time_per_rule,
+        format_timedelta,
+    )
+    add_dict_to_report(
+        main_report,
+        "Apply Time Per Rule",
+        content.apply_time_per_rule,
+        format_timedelta,
+    )
+    add_dict_to_report(
+        main_report,
+        "Search Time Per Ruleset",
+        content.search_time_per_ruleset,
+        format_timedelta,
+    )
+    add_dict_to_report(
+        main_report,
+        "Apply Time Per Ruleset",
+        content.apply_time_per_ruleset,
+        format_timedelta,
+    )
+    add_dict_to_report(
+        main_report,
+        "Rebuild Time Per Ruleset",
+        content.rebuild_time_per_ruleset,
+        format_timedelta,
+    )
+    add_dict_to_report(
+        main_report, "Number of Matches Per Rule", content.num_matches_per_rule
+    )
 
     return report._render_content(main_report)
+
 
 Report.renderer[RunReport] = _egraph_runreport_renderer_nested

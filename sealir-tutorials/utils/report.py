@@ -29,8 +29,6 @@ def remove_svg_constraints_xml(svg_str):
     return ET.tostring(root, encoding="unicode")
 
 
-
-
 class ReportInterface(ABC):
     """
     Abstract interface for report classes.
@@ -95,7 +93,6 @@ class DummyReport(ReportInterface):
 
     def __repr__(self):
         return f"DummyReport()"
-
 
 
 def format_time(time_seconds: float, decimal_places: int = 1) -> str:
@@ -171,7 +168,7 @@ class Report(ReportInterface):
             )
             last_time = end_time
             total_overhead += overhead_time
-        total_elapsed = (complete_end_time - self._start_time)
+        total_elapsed = complete_end_time - self._start_time
         return {
             "total_elapsed": total_elapsed,
             "total_overhead": total_overhead,
