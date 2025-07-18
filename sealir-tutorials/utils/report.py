@@ -365,20 +365,36 @@ class Report(ReportInterface):
             display: flex;
             align-items: center;
             justify-content: space-between;
-            transition: background-color 0.2s ease;
+            transition: background-color 0.2s ease, border-left 0.2s ease;
             font-weight: 400;
             color: #c0c0c0;
             font-size: 1em;
+            border-left: 3px solid #404040;
         }}
 
         .nested-pane-header-{nested_id}:hover {{
             background-color: #333;
         }}
 
+        .nested-pane-header-{nested_id}.expanded {{
+            background-color: #2d2d2d;
+            color: #e0e0e0;
+            font-weight: 500;
+            border-left: 3px solid #007cba;
+        }}
+
+        .nested-pane-header-{nested_id}.expanded:hover {{
+            background-color: #353535;
+        }}
+
         .nested-pane-toggle-{nested_id} {{
             font-size: 1.2em;
             color: #888;
-            transition: transform 0.2s ease;
+            transition: transform 0.2s ease, color 0.2s ease;
+        }}
+
+        .nested-pane-toggle-{nested_id}.expanded {{
+            color: #007cba;
         }}
 
         .nested-pane-content-{nested_id} {{
@@ -397,6 +413,18 @@ class Report(ReportInterface):
         .nested-pane-toggle-{nested_id}.expanded {{
             transform: rotate(90deg);
         }}
+
+        .nested-pane-status-{nested_id} {{
+            font-size: 0.85em;
+            color: #777;
+            font-style: italic;
+            margin-left: 8px;
+            transition: opacity 0.2s ease;
+        }}
+
+        .nested-pane-status-{nested_id}.expanded {{
+            opacity: 0;
+        }}
         </style>
         """
 
@@ -406,13 +434,19 @@ class Report(ReportInterface):
         function toggleNestedPane_{nested_id}(paneId) {{
             const content = document.getElementById(paneId + '_content');
             const toggle = document.getElementById(paneId + '_toggle');
+            const header = document.getElementById(paneId + '_header');
+            const status = document.getElementById(paneId + '_status');
 
             if (content.classList.contains('expanded')) {{
                 content.classList.remove('expanded');
                 toggle.classList.remove('expanded');
+                header.classList.remove('expanded');
+                status.classList.remove('expanded');
             }} else {{
                 content.classList.add('expanded');
                 toggle.classList.add('expanded');
+                header.classList.add('expanded');
+                status.classList.add('expanded');
             }}
         }}
         </script>
@@ -424,8 +458,8 @@ class Report(ReportInterface):
             expanded_class = "expanded" if self.default_expanded else ""
             panes_html += f"""
             <div class="nested-pane-{nested_id}">
-                <div class="nested-pane-header-{nested_id}" onclick="toggleNestedPane_{nested_id}('{pane['id']}')">
-                    <span>{pane['title']}</span>
+                <div id="{pane['id']}_header" class="nested-pane-header-{nested_id} {expanded_class}" onclick="toggleNestedPane_{nested_id}('{pane['id']}')">
+                    <span>{pane['title']}<br/><span id="{pane['id']}_status" class="nested-pane-status-{nested_id} {expanded_class}">(content hidden: click to show)</span></span>
                     <span id="{pane['id']}_toggle" class="nested-pane-toggle-{nested_id} {expanded_class}">▶</span>
                 </div>
                 <div id="{pane['id']}_content" class="nested-pane-content-{nested_id} {expanded_class}">
@@ -486,9 +520,9 @@ class Report(ReportInterface):
             border: 1px solid #404040;
             border-radius: 8px;
             background-color: #232323;
-            min-width: 300px;
+            min-width: 400px;
             max-width: 600px;
-            flex: 1 1 300px;
+            flex: 1 1 400px;
             display: flex;
             flex-direction: column;
             margin-bottom: 0;
@@ -513,20 +547,49 @@ class Report(ReportInterface):
             display: flex;
             align-items: center;
             justify-content: space-between;
-            transition: background-color 0.2s ease;
+            transition: background-color 0.2s ease, border-left 0.2s ease;
             font-weight: 500;
             color: #d0d0d0;
             border-radius: 8px 8px 0 0;
+            border-left: 4px solid #404040;
         }}
 
         .pane-header-{self.report_id}:hover {{
             background-color: #2d2d2d;
         }}
 
+        .pane-header-{self.report_id}.expanded {{
+            background-color: #2a2a2a;
+            color: #f0f0f0;
+            font-weight: 600;
+            border-left: 4px solid #007cba;
+        }}
+
+        .pane-header-{self.report_id}.expanded:hover {{
+            background-color: #323232;
+        }}
+
         .pane-toggle-{self.report_id} {{
             font-size: 1.2em;
             color: #a0a0a0;
-            transition: transform 0.2s ease;
+            transition: transform 0.2s ease, color 0.2s ease;
+        }}
+
+        .pane-toggle-{self.report_id}.expanded {{
+            color: #007cba;
+            font-weight: bold;
+        }}
+
+        .pane-status-{self.report_id} {{
+            font-size: 0.9em;
+            color: #888;
+            font-style: italic;
+            margin-left: 8px;
+            transition: opacity 0.2s ease;
+        }}
+
+        .pane-status-{self.report_id}.expanded {{
+            opacity: 0;
         }}
 
         .pane-content-{self.report_id} {{
@@ -569,13 +632,19 @@ class Report(ReportInterface):
         function togglePane_{self.report_id}(paneId) {{
             const content = document.getElementById(paneId + '_content');
             const toggle = document.getElementById(paneId + '_toggle');
+            const header = document.getElementById(paneId + '_header');
+            const status = document.getElementById(paneId + '_status');
 
             if (content.classList.contains('expanded')) {{
                 content.classList.remove('expanded');
                 toggle.classList.remove('expanded');
+                header.classList.remove('expanded');
+                status.classList.remove('expanded');
             }} else {{
                 content.classList.add('expanded');
                 toggle.classList.add('expanded');
+                header.classList.add('expanded');
+                status.classList.add('expanded');
             }}
         }}
 
@@ -606,8 +675,8 @@ class Report(ReportInterface):
             pane_id = pane["id"]
             panes_html += f"""
             <div class="pane-{self.report_id}" id="{pane_id}">
-                <div class="pane-header-{self.report_id}" onclick="togglePane_{self.report_id}('{pane_id}')">
-                    <span>{pane_number}{pane['title']}</span>
+                <div id="{pane_id}_header" class="pane-header-{self.report_id} {expanded_class}" onclick="togglePane_{self.report_id}('{pane_id}')">
+                    <span>{pane_number}{pane['title']}<br/><span id="{pane_id}_status" class="pane-status-{self.report_id} {expanded_class}">(content hidden: click to show)</span></span>
                     <span>
                         <button type=\"button\" class=\"expand-btn-{self.report_id}\" id=\"{pane_id}_expandbtn\" onclick=\"event.stopPropagation();expandPaneFullWidth_{self.report_id}('{pane_id}')\">Expand</button>
                         <span id="{pane_id}_toggle" class="pane-toggle-{self.report_id} {expanded_class}">▶</span>
