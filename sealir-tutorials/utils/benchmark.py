@@ -59,48 +59,10 @@ def timeit(
     return TimeitResult(times, number, repeat)
 
 
-def visualize_benchmark(
-    *results, labels=None, title="Benchmark Comparison", figsize=(10, 6)
-):
-    """
-    Visualize benchmark results using matplotlib.
-
-    Args:
-        *results: TimeitResult objects to compare
-        labels: List of labels for each result (optional, will use default names)
-        title: Title for the plot
-        figsize: Figure size tuple
-
-    Example:
-        >>> result1 = timeit(func1)
-        >>> result2 = timeit(func2)
-        >>> visualize_benchmark(result1, result2, labels=["Unoptimized", "Optimized"])
-    """
-    from . import IN_NOTEBOOK
-
-    try:
-        import matplotlib.pyplot as plt
-        import numpy as np
-    except ImportError:
-        print(
-            "matplotlib is required for visualization. Install with: pip install matplotlib"
-        )
-        return
-
-    if not results:
-        print("No results provided for visualization")
-        return
-
-    # Generate default labels if not provided
-    if labels is None:
-        labels = [f"Method {i+1}" for i in range(len(results))]
-    elif len(labels) != len(results):
-        print(
-            f"Warning: {len(labels)} labels provided for {len(results)} results"
-        )
-        labels = labels[: len(results)] + [
-            f"Method {i+1}" for i in range(len(labels), len(results))
-        ]
+def _create_matplotlib_plots(results, labels, title, figsize):
+    """Create matplotlib plots for benchmark visualization."""
+    import matplotlib.pyplot as plt
+    import numpy as np
 
     # Create figure with subplots (now only 1 row, 2 columns)
     fig, (ax2, ax3) = plt.subplots(1, 2, figsize=figsize)
@@ -162,8 +124,14 @@ def visualize_benchmark(
         ax3.set_title("Relative Speedup")
 
     plt.tight_layout()
-    if IN_NOTEBOOK:
-        plt.show()
+    plt.show()
+
+
+def _print_benchmark_summary(results, labels):
+    """Print benchmark summary without using matplotlib/numpy."""
+    # Extract data
+    names = labels
+    bests = [r.best for r in results]
 
     # Print summary
     print("\n" + "=" * 50)
@@ -171,7 +139,7 @@ def visualize_benchmark(
     print("=" * 50)
 
     if len(results) > 1:
-        best_idx = np.argmin(bests)
+        best_idx = min(range(len(bests)), key=lambda i: bests[i])
         print(f"Fastest: {names[best_idx]}")
         print(f"   Time: {bests[best_idx]:.2e} seconds per loop")
 
@@ -189,3 +157,50 @@ def visualize_benchmark(
     print(f"\nAll results:")
     for name, result in zip(names, results):
         print(f"   {name}: {result}")
+
+
+def visualize_benchmark(
+    *results, labels=None, title="Benchmark Comparison", figsize=(10, 6),
+    show_plots=None,
+):
+    """
+    Visualize benchmark results using matplotlib.
+
+    Args:
+        *results: TimeitResult objects to compare
+        labels: List of labels for
+        each result (optional, will use default names)
+        title: Title for the plot
+        figsize: Figure size tuple
+        show_plots: Whether to display matplotlib plots.
+                    If None, plots are shown only in notebook environments.
+
+    Example:
+        >>> result1 = timeit(func1)
+        >>> result2 = timeit(func2)
+        >>> visualize_benchmark(result1, result2,
+                                labels=["Unoptimized", "Optimized"])
+    """
+    from . import IN_NOTEBOOK
+
+    if not results:
+        print("No results provided for visualization")
+        return
+
+    # Generate default labels if not provided
+    if labels is None:
+        labels = [f"Method {i+1}" for i in range(len(results))]
+    elif len(labels) != len(results):
+        print(
+            f"Warning: {len(labels)} labels provided for {len(results)} results"
+        )
+        labels = labels[: len(results)] + [
+            f"Method {i+1}" for i in range(len(labels), len(results))
+        ]
+
+    # Create plots only if in notebook environment
+    if show_plots or (show_plots is None and IN_NOTEBOOK):
+        _create_matplotlib_plots(results, labels, title, figsize)
+
+    # Always print the summary (non-matplotlib functionality)
+    _print_benchmark_summary(results, labels)
