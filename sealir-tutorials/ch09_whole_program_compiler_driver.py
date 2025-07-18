@@ -62,9 +62,7 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass
 
-import IPython
-
-from utils import IN_NOTEBOOK
+from utils import IN_NOTEBOOK, display
 
 # ### Symbol Information class
 
@@ -138,6 +136,8 @@ class CallGraphVisitor(ast.NodeVisitor):
         """Update the calls for a function or register a global call."""
         # Flatten the name of the call from ast.Attribute or ast.Name.
         call_qname = attribute_to_qualified_name(node)
+        if call_qname is None:
+            return
         # Get the current class name, if we are visiting a class and have a
         # method.
         class_name, method_name = (
@@ -267,9 +267,8 @@ def attribute_to_qualified_name(node):
     elif isinstance(node, ast.Call):
         return attribute_to_qualified_name(node.func)
     else:
-        raise TypeError(
-            f"Expected ast.Attribute or ast.Name, got {type(node).__name__}"
-        )
+        # Node type not supported for qualified name conversion
+        return None
 
 
 def to_graphviz(cgv):
@@ -358,5 +357,6 @@ if __name__ == "__main__":
 # are calls to Numpy, a library who's source is outside of the module. Thus we
 # must assume that these will be resolved at a later stage.
 
-if IN_NOTEBOOK:
-    IPython.display.display(to_graphviz(cgv))
+if __name__ == "__main__":
+    if IN_NOTEBOOK:
+        display(to_graphviz(cgv))
