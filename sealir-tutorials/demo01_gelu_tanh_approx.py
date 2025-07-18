@@ -95,7 +95,7 @@ from ch07_mlir_ufunc import (
     ufunc_compiler,
     ufunc_vectorize,
 )
-from utils.report import Report
+from utils import Report, timeit, visualize_benchmark
 
 # ## The GELU Function
 #
@@ -618,6 +618,14 @@ if __name__ == "__main__":
     out = np.zeros_like(input_val)
 
     print("original")
-    # %timeit gelu_tanh_forward(input_val)
+    t_original = timeit(lambda: gelu_tanh_forward(input_val))
+
     print("superoptimized")
-    # %timeit vectorized_gelu(input_val, out=out)
+    t_superopt = timeit(lambda: vectorized_gelu(input_val, out=out))
+
+    visualize_benchmark(
+        t_original,
+        t_superopt,
+        labels=["original", "superoptimized"],
+        title="GELU Ufunc Benchmark",
+    )
