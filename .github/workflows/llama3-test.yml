@@ -1,0 +1,50 @@
+name: Test Llama3 NumPy Implementation
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'examples/llama3/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'examples/llama3/**'
+  workflow_dispatch:
+
+jobs:
+  test-llama3:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: 3.13
+
+    - name: Install dependencies
+      run: |
+        cd examples/llama3
+        pip install -r requirements.txt
+
+    - name: Download model and tokenizer
+      run: |
+        cd examples/llama3
+        # Download pre-converted model weights from likejazz/llama3.np
+        wget --no-verbose -O stories15M.model.npz https://github.com/likejazz/llama3.np/raw/7dae0e181efcba2e1fdca7d8718f73ba2505eb2f/stories15M.model.npz
+        # Download pre-converted tokenizer
+        wget --no-verbose -O tokenizer.model.np https://github.com/likejazz/llama3.np/raw/7dae0e181efcba2e1fdca7d8718f73ba2505eb2f/tokenizer.model.np
+        # Verify files were downloaded
+        ls -la *.npz *.np
+
+    - name: Run Llama3 test script with golden reference
+      run: |
+        cd examples/llama3
+        python test_workflow.py
+
+    - name: Run Llama3 with custom prompt
+      run: |
+        cd examples/llama3
+        python llama3.py "The quick brown fox"
