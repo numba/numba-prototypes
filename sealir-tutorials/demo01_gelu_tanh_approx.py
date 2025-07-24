@@ -38,6 +38,7 @@
 import mlir.dialects.arith as arith
 import mlir.dialects.math as math
 import mlir.ir as ir
+import numba  # for benchmark against non-superoptimizing numba
 import numpy as np
 from egglog import (
     Expr,
@@ -620,12 +621,17 @@ if __name__ == "__main__":
     print("original")
     t_original = timeit(lambda: gelu_tanh_forward(input_val))
 
+    print("numba")
+    nb_gelu = numba.vectorize(gelu_tanh_forward)
+    t_numba = timeit(lambda: nb_gelu(input_val, out=out))
+
     print("superoptimized")
     t_superopt = timeit(lambda: vectorized_gelu(input_val, out=out))
 
     visualize_benchmark(
         t_original,
+        t_numba,
         t_superopt,
-        labels=["original", "superoptimized"],
+        labels=["original", "numba_v1", "superoptimized"],
         title="GELU Ufunc Benchmark",
     )
