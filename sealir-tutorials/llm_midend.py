@@ -32,7 +32,7 @@ from sealir.eqsat.rvsdg_eqsat import (
     TermList,
 )
 
-from ch04_1_typeinfer_ifelse import Type, TypeVar
+from ch04_1_typeinfer_ifelse import Type, TypeVar, TypeFloat64
 from ch05_typeinfer_array import (
     Int64,
     TypeInt64,
@@ -40,6 +40,7 @@ from ch05_typeinfer_array import (
     compiler_config,
     jit_compiler,
     setup_argtypes,
+    array_desc_rules
 )
 from ch09_whole_program_compiler_driver import CallGraphVisitor
 from utils import Report
@@ -127,9 +128,36 @@ module_rules = ruleset(*make_module_fact_ruleset(cgv.imported))
 @function
 def NpyOp_Sum(operand: Term, axis: i64Like, keepdims: BoolLike) -> Term: ...
 
+@function
+def NpyOp_Max(operand: Term, axis: i64Like, keepdims: BoolLike) -> Term: ...
+
 
 class NumPyRules:
     module_name = "numpy"
+
+    @staticmethod
+    def _make_reduce_op_rules(op_name: str, op_constructor):
+        """
+        Common logic for numpy reduce operations (max, sum, etc.) that handle
+        keepdims and axis parameters.
+        """
+        io = var("io", Term)
+        args = var("args", TermList)
+        kwargs = var("kwargs", TermDict)
+        callee = Py_CallKwargs(
+            func=npy_reduce(op_name), io=io, args=args, kwargs=kwargs
+        )
+        keepdims_val = var("keepdims_val", Bool)
+        axis_val = var("axis_val", i64)
+        yield rule(callee).then(
+            kwargs.lookup("keepdims"), kwargs.lookup("axis")
+        )
+        yield rewrite(callee.getPort(1)).to(
+            op_constructor(args[0], axis=axis_val, keepdims=keepdims_val),
+            # conditions
+            Term.LiteralI64(axis_val) == kwargs.get("axis"),
+            Term.LiteralBool(keepdims_val) == kwargs.get("keepdims"),
+        )
 
     @staticmethod
     def exp(orig: Term):
@@ -138,28 +166,12 @@ class NumPyRules:
     @staticmethod
     def max(orig: Term):
         yield rewrite(orig, subsume=True).to(npy_reduce("max"))
+        yield from NumPyRules._make_reduce_op_rules("max", NpyOp_Max)
 
     @staticmethod
     def sum(orig: Term):
         yield rewrite(orig, subsume=True).to(npy_reduce("sum"))
-
-        io = var("io", Term)
-        args = var("args", TermList)
-        kwargs = var("kwargs", TermDict)
-        callee = Py_CallKwargs(
-            func=npy_reduce("sum"), io=io, args=args, kwargs=kwargs
-        )
-        keepdims_val = var("keepdims_val", Bool)
-        axis_val = var("axis_val", i64)
-        yield rule(callee).then(
-            kwargs.lookup("keepdims"), kwargs.lookup("axis")
-        )
-        yield rewrite(callee.getPort(1)).to(
-            NpyOp_Sum(args[0], axis=axis_val, keepdims=keepdims_val),
-            # conditions
-            Term.LiteralI64(axis_val) == kwargs.get("axis"),
-            Term.LiteralBool(keepdims_val) == kwargs.get("keepdims"),
-        )
+        yield from NumPyRules._make_reduce_op_rules("sum", NpyOp_Sum)
 
 
 @function
@@ -198,15 +210,22 @@ softmax = cgv.functions["softmax"]
 pprint(softmax)
 
 
+array_x_desc, array_x_infos = array_desc_rules("array_x", shape=("N",), dtype=TypeFloat64, layout="c")
+ruleset_array_facts = ruleset(
+    *array_x_infos,
+)
+
+
 report = Report(default_expanded=True, enable_nested_metadata=True)
 try:
     jit_compiler(
         fn=softmax.ast,
-        argtypes=(Int64, Int64),
+        argtypes=(array_x_desc.toType(),),
         ruleset=(
             base_ruleset
             | py_eqsat_rules()
-            | setup_argtypes(TypeInt64, TypeInt64)
+            | setup_argtypes(array_x_desc.toType())
+            | ruleset_array_facts
             | module_rules
             | module_rulesets
         ),
