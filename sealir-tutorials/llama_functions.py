@@ -362,6 +362,29 @@ class Backend:
 
         return fn_name
 
+    def gen_array_broadcast(self, module, dims, new_shape, broadcast_along):
+        fn_name = self.gen_fn_name("broadcast")
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
+            memref_type_res = MemRefType.get(list(new_shape), element_type)
+            func_type = FunctionType.get([memref_type, memref_type_res], [])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                input_memref, output_memref = func_op.arguments
+                linalg.broadcast(
+                    input_memref,
+                    outs=[output_memref],
+                    dimensions=broadcast_along
+                )
+                func.ReturnOp([])
+
+        return fn_name
+
     def gen_array_reshape_runtime(self, module):
         fn_name = self.gen_fn_name("reshape_runtime")
 
@@ -556,17 +579,18 @@ with context:
     module = Module.create(loc=Location.unknown())
 
 backend = Backend()
-# function_name = backend.generate_arange(module, None)
-# function_name = backend.gen_array_unary(module, 3, math.exp, None)
-# function_name = backend.gen_array_binary(module, 2, 2, arith.addf, None)
-# function_name = backend.gen_array_reduce(module, 3, (0, 2), arith.addf, None)
-# function_name = backend.gen_array_outer_product(module, 2, None)
-# function_name = backend.gen_array_matmul(module, 2, None)
-# function_name = backend.gen_array_fill_value(module, 2, None)
-# function_name = backend.gen_array_transpose(module, 3, None)
-# function_name = backend.gen_array_triu(module, 3, None)
-# function_name = backend.gen_array_reshape(module, 3, (2, 5, 8))
-function_name = backend.gen_array_argmax(module, 3, 0)
+
+input_ndim = 3
+# We can have dynamic shapes over here too, but will require adjustment to the broadcast op defined below
+softmax_input_shape = (3, 4, 6)
+
+arr_max_reduce = backend.gen_array_reduce(module, input_ndim, (input_ndim - 1,), arith.maximumf, None)
+arr_sub = backend.gen_array_binary(module, input_ndim, input_ndim, arith.subf, None)
+arr_exp = backend.gen_array_unary(module, input_ndim, math.exp, None)
+arr_sum_reduce = backend.gen_array_reduce(module, input_ndim, (input_ndim - 1,), arith.addf, None)
+arr_div = backend.gen_array_binary(module, input_ndim, input_ndim, arith.divf, None)
+arr_broadcast = backend.gen_array_broadcast(module, input_ndim - 1, softmax_input_shape, broadcast_along=[2])
+
 
 print("Generated MLIR:")
 print(str(module))
@@ -578,19 +602,48 @@ print("After lowering to LLVM:")
 print(str(module))
 print("\n" + "="*50 + "\n")
 
+# Compile the functions, this will be responsiblity of the backend
 with InsertionPoint(module.body), Location.unknown():
     element_type = F64Type.get()
-    memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * 3, element_type)
+    memref_type = MemRefType.get(softmax_input_shape, element_type)
+    memref_type_reduced = MemRefType.get(softmax_input_shape[:-1], element_type)
 
-jit_func = backend.jit_compile_extra(module, (memref_type,), (memref_type,), function_name, is_ufunc=True)
+arr_max_reduce_jit = backend.jit_compile_extra(module, (memref_type,), (memref_type_reduced,), arr_max_reduce, is_ufunc=True)
+arr_sub_jit = backend.jit_compile_extra(module, (memref_type, memref_type), (memref_type,), arr_sub, is_ufunc=True)
+arr_exp_jit = backend.jit_compile_extra(module, (memref_type,), (memref_type,), arr_exp, is_ufunc=True)
+arr_sum_reduce_jit = backend.jit_compile_extra(module, (memref_type,), (memref_type_reduced,), arr_sum_reduce, is_ufunc=True)
+arr_div_jit = backend.jit_compile_extra(module, (memref_type, memref_type), (memref_type,), arr_div, is_ufunc=True)
+arr_broadcast_jit = backend.jit_compile_extra(module, (memref_type_reduced,), (memref_type,), arr_broadcast, is_ufunc=True)
 
 print("Function compiled successfully!")
 
-inp = np.random.random((5, 5, 5))
-res = np.zeros(25, dtype=np.int64).reshape(5, 5)
+def softmax(x):
+    """Compute softmax values for each sets of scores in x."""
+    e_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
+    return e_x / np.sum(e_x, axis=-1, keepdims=True)
 
-jit_func(inp, res)
+def softmax_mlir(x):
+    # We need placeholders to store the results because our current mlir
+    # python bindings don't allow us to return a internally allocated memref 
+    # so we have to pre-allocate the memref over here and pass that in as a 
+    # placeholder for storing the results of each result.
 
-print("Function executed succesfully. Result: ", res)
+    x_placeholder = np.zeros_like(x)
+    x_placeholder_2 = np.zeros_like(x)
+    x_placeholder_3 = np.zeros_like(x)
+    x_placeholder_4 = np.zeros_like(x)
+    x_placeholder_5 = np.zeros_like(x)
+    reduced_placeholder = np.zeros(x.shape[:-1])
+    reduced_placeholder_1 = np.zeros(x.shape[:-1])
+
+    e_x = arr_exp_jit(arr_sub_jit(x, arr_broadcast_jit(arr_max_reduce_jit(x, reduced_placeholder), x_placeholder), x_placeholder_2), x_placeholder_3)
+    return arr_div_jit(e_x, arr_broadcast_jit(arr_sum_reduce_jit(e_x, reduced_placeholder_1), x_placeholder_4), x_placeholder_5)
+
+softmax_input = np.random.random(softmax_input_shape)
+numpy_result = softmax(softmax_input)
+mlir_result = softmax_mlir(softmax_input)
+
+assert np.allclose(numpy_result, mlir_result)
+print("Function executed succesfully. Result: ", mlir_result)
 
 print("\n" + "="*60 + "\n")
