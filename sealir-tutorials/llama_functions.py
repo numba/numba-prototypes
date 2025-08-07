@@ -15,6 +15,7 @@ class Backend:
     def run_passes(self, module):
         if _DEBUG:
             module.dump()
+        pass_man = PassManager(context=module.context)
 
         if _DEBUG:
             module.context.enable_multithreading(False)
@@ -22,7 +23,6 @@ class Backend:
             # notebook may hang if ir_printing is enabled and and MLIR failed.
             pass_man.enable_ir_printing()
 
-        pass_man = PassManager(context=module.context)
         pass_man.add("convert-linalg-to-loops")
         pass_man.add("convert-scf-to-cf")
         pass_man.add("finalize-memref-to-llvm")
@@ -95,6 +95,23 @@ class Backend:
 
         return jit_func
 
+    def jit_compile(self, module, func, input_shapes, output_shapes, dtype=None):
+        with InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type_ins = tuple([MemRefType.get(x, element_type) for x in input_shapes])
+            memref_type_outs = tuple([MemRefType.get(x, element_type) for x in output_shapes])
+
+        fn_jitted = self.jit_compile_extra(module, memref_type_ins, memref_type_outs, func, is_ufunc=True)
+        
+        def jit_func_wrap(*args):
+            res = [np.zeros(x) for x in output_shapes]
+            fn_jitted(*args, *res)
+            if len(res) == 1:
+                return res[0]
+            else:
+                return tuple(res)
+
+        return jit_func_wrap
 
     @classmethod
     def get_exec_ptr(self, mlir_ty, val):
@@ -347,18 +364,29 @@ class Backend:
 
     def gen_array_reshape(self, module, dims, reshape_tuple):
         fn_name = self.gen_fn_name("reshape")
+        reshape_tuple = list(reshape_tuple)
+        for idx, i in enumerate(reshape_tuple):
+            if i == -1:
+                reshape_tuple[idx] = ShapedType.get_dynamic_size()
 
         with module.context, InsertionPoint(module.body), Location.unknown():
             element_type = F64Type.get()
+            index_type = IndexType.get()
             memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
             memref_type_res = MemRefType.get(list(reshape_tuple), element_type)
+            shape_memref_type = MemRefType.get([len(reshape_tuple)], element_type=index_type)
             func_type = FunctionType.get([memref_type, memref_type_res], [])
 
             func_op = func.FuncOp(fn_name, func_type)
             func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
 
             with InsertionPoint(func_op.add_entry_block()):
-                func.ReturnOp([memref.reshape(memref_type_res, func_op.arguments[0])])
+                shape_memref = memref.AllocOp(shape_memref_type, [], [])
+                for idx, i in enumerate(reshape_tuple):
+                    memref.store(arith.constant(index_type, i), shape_memref, [arith.constant(index_type, idx)])
+                out = memref.reshape(memref_type_res, func_op.arguments[0], shape=shape_memref)
+                memref.copy(out, func_op.arguments[1])
+                func.ReturnOp([])
 
         return fn_name
 
@@ -385,11 +413,6 @@ class Backend:
 
         return fn_name
 
-    def gen_array_reshape_runtime(self, module):
-        fn_name = self.gen_fn_name("reshape_runtime")
-
-        return fn_name
-
     def gen_array_index(self, module):
         fn_name = self.gen_fn_name("index")
 
@@ -405,15 +428,40 @@ class Backend:
 
         return fn_name
 
+    @classmethod
+    def build_mlir_reassociation(cls, ndim, new_axes):
+        new_axes = sorted([ax if ax >= 0 else ndim + len(new_axes) + ax for ax in new_axes])
+        final_ndim = ndim + len(new_axes)
+        is_new_dim = [False] * final_ndim
+        for ax in new_axes:
+            is_new_dim[ax] = True
+        
+        reassociation = []
+        current_group = []
+        for output_pos in range(final_ndim):
+            current_group.append(output_pos)
+            if not is_new_dim[output_pos]:
+                reassociation.append(current_group)
+                current_group = []
+        
+        # Convert to MLIR ArrayAttr
+        attr_groups = []
+        for group in reassociation:
+            group_attrs = [IntegerAttr.get(IntegerType.get_signless(64), idx) for idx in group]
+            attr_groups.append(ArrayAttr.get(group_attrs))
+        
+        return ArrayAttr.get(attr_groups)
+
     def gen_array_expand_dims(self, module, dims, axes):
         fn_name = self.gen_fn_name("expand_dims")
 
         with module.context, InsertionPoint(module.body), Location.unknown():
             element_type = F64Type.get()
+            index_type = IndexType.get()
             memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
             result_shape = [ShapedType.get_dynamic_size()] * (dims + len(axes))
             for i in axes:
-                result_shape[i] = [arith.constant(IndexType.get(), 1)]
+                result_shape[i] = 1
 
             memref_type_res = MemRefType.get(result_shape, element_type)
             func_type = FunctionType.get([memref_type, memref_type_res], [])
@@ -422,7 +470,16 @@ class Backend:
             func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
 
             with InsertionPoint(func_op.add_entry_block()):
-                func.ReturnOp([memref.ExpandShapeOp(memref_type_res, func_op.arguments[0], [])])
+                reassociation = Backend.build_mlir_reassociation(dims, axes)
+                output_shape = [memref.dim(func_op.arguments[0], arith.constant(index_type, i)) for i in range(dims)]
+                res = memref.expand_shape(memref_type_res,
+                    func_op.arguments[0], 
+                    reassociation=reassociation, 
+                    output_shape=output_shape, 
+                    static_output_shape=DenseI64ArrayAttr.get(result_shape)
+                )
+                memref.copy(res, func_op.arguments[1])
+                func.ReturnOp([])
 
         return fn_name
 
@@ -489,14 +546,51 @@ class Backend:
             func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
 
             with InsertionPoint(func_op.add_entry_block()):
-                input_memref_lhs, input_memref_rhs, output_memref = func_op.arguments
-                linalg.matmul(input_memref_lhs, input_memref_rhs, outs=[output_memref])
+                a, b, c = func_op.arguments
+
+                total_dims = dims + 1
+
+                batch_exprs = [AffineExpr.get_dim(i) for i in range(dims - 2)]
+                m_expr = AffineExpr.get_dim(dims - 2)  # M dimension
+                n_expr = AffineExpr.get_dim(dims - 1)  # N dimension  
+                k_expr = AffineExpr.get_dim(dims)      # K dimension (reduction)
+                
+                map_a = AffineMap.get(total_dims, 0, batch_exprs + [m_expr, k_expr])
+                map_b = AffineMap.get(total_dims, 0, batch_exprs + [k_expr, n_expr])
+                map_c = AffineMap.get(total_dims, 0, batch_exprs + [m_expr, n_expr])
+                
+                indexing_maps = ArrayAttr.get([
+                    AffineMapAttr.get(map_a),
+                    AffineMapAttr.get(map_b),
+                    AffineMapAttr.get(map_c)
+                ])
+                
+                iterator_types = ArrayAttr.get([
+                    StringAttr.get("parallel") for _ in range(dims - 1)  # batch + M + N
+                ] + [StringAttr.get("reduction")])  # K
+
+                generic_op = linalg.generic(
+                    inputs=[a, b], outputs=[c], result_tensors=[],
+                    indexing_maps=indexing_maps, 
+                    iterator_types=iterator_types
+                )
+
+                block = generic_op.regions[0].blocks.append(element_type, element_type, element_type)
+                with InsertionPoint(block):
+                    a_val, b_val, acc_val = block.arguments
+                    mul = arith.mulf(a_val, b_val)
+                    add = arith.addf(acc_val, mul)
+                    linalg.yield_([add])
+                
                 func.ReturnOp([])
 
         return fn_name
 
-    def gen_array_transpose(self, module, dims, dtype):
+    def gen_array_transpose(self, module, dims, permutation = None, dtype = None):
         fn_name = self.gen_fn_name("transpose")
+
+        if permutation is None:
+            permutation=[i for i in range(dims).__reversed__()]
 
         with module.context, InsertionPoint(module.body), Location.unknown():
             element_type = F64Type.get()
@@ -508,7 +602,7 @@ class Backend:
 
             with InsertionPoint(func_op.add_entry_block()):
                 input_memref, output_memref = func_op.arguments
-                linalg.transpose(input_memref, outs=[output_memref], permutation=[(dims-1-i) for i in range(dims)])
+                linalg.transpose(input_memref, outs=[output_memref], permutation=permutation)
                 func.ReturnOp([])
 
         return fn_name
@@ -571,6 +665,48 @@ class Backend:
 
         return fn_name
 
+    def gen_array_take(self, module, dims, axis, slice_idx):
+        fn_name = self.gen_fn_name("triu")
+
+        out_shape = [ShapedType.get_dynamic_size()] * dims
+        out_shape[axis] = 1
+
+        offsets = [0] * dims
+        offsets[axis] = slice_idx
+
+        strides = [ShapedType.get_dynamic_stride_or_offset()] * dims
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            index_type = IndexType.get()
+            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
+            memref_type_out = MemRefType.get(out_shape, element_type)
+            func_type = FunctionType.get([memref_type, memref_type_out], [])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                input_memref, output_memref = func_op.arguments
+
+                sizes = [memref.dim(func_op.arguments[0], arith.constant(index_type, i)) for i in range(dims)]
+                sizes.pop(axis)
+                subview = memref.SubViewOp(
+                    memref_type_out,
+                    input_memref,
+                    offsets=[],
+                    sizes=sizes,
+                    strides=[],
+                    static_offsets=DenseI64ArrayAttr.get(offsets),
+                    static_sizes=DenseI64ArrayAttr.get(out_shape),
+                    static_strides=DenseI64ArrayAttr.get(strides)
+                ).result
+
+                memref.copy(subview, output_memref)
+
+                func.ReturnOp([])
+
+        return fn_name
 
 context = Context()
 context.load_all_available_dialects()
@@ -580,17 +716,31 @@ with context:
 
 backend = Backend()
 
-input_ndim = 3
-# We can have dynamic shapes over here too, but will require adjustment to the broadcast op defined below
-softmax_input_shape = (3, 4, 6)
+batch_size, seq_len, n_heads, dims = 1, 5, 6, 288
+n_local_heads, head_dim = n_heads, dims // n_heads
 
-arr_max_reduce = backend.gen_array_reduce(module, input_ndim, (input_ndim - 1,), arith.maximumf, None)
-arr_sub = backend.gen_array_binary(module, input_ndim, input_ndim, arith.subf, None)
-arr_exp = backend.gen_array_unary(module, input_ndim, math.exp, None)
-arr_sum_reduce = backend.gen_array_reduce(module, input_ndim, (input_ndim - 1,), arith.addf, None)
-arr_div = backend.gen_array_binary(module, input_ndim, input_ndim, arith.divf, None)
-arr_broadcast = backend.gen_array_broadcast(module, input_ndim - 1, softmax_input_shape, broadcast_along=[2])
+input_shape = (batch_size, seq_len, dims)
+softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
 
+input_ndim = len(input_shape)
+softmax_ndim = len(softmax_input_shape)
+
+arr_max_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.maximumf, None)
+arr_sub = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.subf, None)
+arr_exp = backend.gen_array_unary(module, softmax_ndim, math.exp, None)
+arr_sum_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.addf, None)
+arr_div = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.divf, None)
+arr_broadcast = backend.gen_array_broadcast(module, softmax_ndim - 1, softmax_input_shape, broadcast_along=[softmax_ndim - 1])
+
+arr_transpose = backend.gen_array_transpose(module, 2)
+# arr_expand = backend.gen_array_expand_dims(module, 2, (0,))
+arr_reshape_exp_1 = backend.gen_array_reshape(module, 2, (batch_size, dims, dims))
+arr_matmul = backend.gen_array_matmul(module, 3, None)
+arr_reshape = backend.gen_array_reshape(module, 3, (batch_size, seq_len, n_local_heads, head_dim))
+
+arr_reshape_2 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, n_local_heads, -1, 2))
+# arr_take_0 = backend.gen_array_take(module, 5, 4, 0)
+# arr_take_1 = backend.gen_array_take(module, 5, 4, 1)
 
 print("Generated MLIR:")
 print(str(module))
@@ -602,18 +752,22 @@ print("After lowering to LLVM:")
 print(str(module))
 print("\n" + "="*50 + "\n")
 
-# Compile the functions, this will be responsiblity of the backend
-with InsertionPoint(module.body), Location.unknown():
-    element_type = F64Type.get()
-    memref_type = MemRefType.get(softmax_input_shape, element_type)
-    memref_type_reduced = MemRefType.get(softmax_input_shape[:-1], element_type)
+arr_max_reduce = backend.jit_compile(module, arr_max_reduce, (softmax_input_shape,), (softmax_input_shape[:-1],))
+arr_sub = backend.jit_compile(module, arr_sub, (softmax_input_shape, softmax_input_shape), (softmax_input_shape,))
+arr_exp = backend.jit_compile(module, arr_exp, (softmax_input_shape,), (softmax_input_shape,))
+arr_sum_reduce = backend.jit_compile(module, arr_sum_reduce, (softmax_input_shape,), (softmax_input_shape[:-1],))
+arr_div = backend.jit_compile(module, arr_div, (softmax_input_shape, softmax_input_shape), (softmax_input_shape,))
+arr_broadcast = backend.jit_compile(module, arr_broadcast, (softmax_input_shape[:-1],), (softmax_input_shape,))
 
-arr_max_reduce_jit = backend.jit_compile_extra(module, (memref_type,), (memref_type_reduced,), arr_max_reduce, is_ufunc=True)
-arr_sub_jit = backend.jit_compile_extra(module, (memref_type, memref_type), (memref_type,), arr_sub, is_ufunc=True)
-arr_exp_jit = backend.jit_compile_extra(module, (memref_type,), (memref_type,), arr_exp, is_ufunc=True)
-arr_sum_reduce_jit = backend.jit_compile_extra(module, (memref_type,), (memref_type_reduced,), arr_sum_reduce, is_ufunc=True)
-arr_div_jit = backend.jit_compile_extra(module, (memref_type, memref_type), (memref_type,), arr_div, is_ufunc=True)
-arr_broadcast_jit = backend.jit_compile_extra(module, (memref_type_reduced,), (memref_type,), arr_broadcast, is_ufunc=True)
+arr_transpose = backend.jit_compile(module, arr_transpose, ((dims, dims),), ((dims, dims),))
+# arr_expand = backend.jit_compile(module, arr_expand, ((dims, dims),), ((batch_size, dims, dims),))
+arr_reshape_exp_1 = backend.jit_compile(module, arr_reshape_exp_1, ((dims, dims),), ((batch_size, dims, dims),))
+arr_matmul = backend.jit_compile(module, arr_matmul, ((batch_size, seq_len, dims), (batch_size, dims, dims)), ((batch_size, seq_len, dims),))
+arr_reshape = backend.jit_compile(module, arr_reshape, ((batch_size, seq_len, dims),), ((batch_size, seq_len, n_local_heads, head_dim),))
+
+arr_reshape_2 = backend.jit_compile(module, arr_reshape_2, ((batch_size, seq_len, n_local_heads, head_dim),), ((batch_size, seq_len, n_local_heads, head_dim // 2, 2),))
+# arr_take_0 = backend.jit_compile(module, arr_take_0, (batch_size, seq_len, n_local_heads, head_dim // 2, 2), ((batch_size, seq_len, n_local_heads, head_dim // 2, 1)))
+# arr_take_1 = backend.jit_compile(module, arr_take_1, (batch_size, seq_len, n_local_heads, head_dim // 2, 2), ((batch_size, seq_len, n_local_heads, head_dim // 2, 1)))
 
 print("Function compiled successfully!")
 
@@ -623,25 +777,157 @@ def softmax(x):
     return e_x / np.sum(e_x, axis=-1, keepdims=True)
 
 def softmax_mlir(x):
-    # We need placeholders to store the results because our current mlir
-    # python bindings don't allow us to return a internally allocated memref 
-    # so we have to pre-allocate the memref over here and pass that in as a 
-    # placeholder for storing the results of each result.
+    e_x = arr_exp(arr_sub(x, arr_broadcast(arr_max_reduce(x))))
+    return arr_div(e_x, arr_broadcast(arr_sum_reduce(e_x)))
 
-    x_placeholder = np.zeros_like(x)
-    x_placeholder_2 = np.zeros_like(x)
-    x_placeholder_3 = np.zeros_like(x)
-    x_placeholder_4 = np.zeros_like(x)
-    x_placeholder_5 = np.zeros_like(x)
-    reduced_placeholder = np.zeros(x.shape[:-1])
-    reduced_placeholder_1 = np.zeros(x.shape[:-1])
+print("Testing Softmax")
 
-    e_x = arr_exp_jit(arr_sub_jit(x, arr_broadcast_jit(arr_max_reduce_jit(x, reduced_placeholder), x_placeholder), x_placeholder_2), x_placeholder_3)
-    return arr_div_jit(e_x, arr_broadcast_jit(arr_sum_reduce_jit(e_x, reduced_placeholder_1), x_placeholder_4), x_placeholder_5)
-
+# Random input data
 softmax_input = np.random.random(softmax_input_shape)
+# NumPy execution
 numpy_result = softmax(softmax_input)
+# SealIR execution
 mlir_result = softmax_mlir(softmax_input)
+
+# Check Results
+assert np.allclose(numpy_result, mlir_result)
+print("Function executed and verified succesfully.")
+
+def apply_rotary_emb(xq, xk, freqs_cos, freqs_sin):
+    xqri = xq.reshape(*xq.shape[:-1], -1, 2)
+    xkri = xk.reshape(*xk.shape[:-1], -1, 2)
+    return xqri, xkri
+
+    xq_r = xqri[..., 0]
+    xq_i = xqri[..., 1]
+    xk_r = xkri[..., 0]
+    xk_i = xkri[..., 1]
+    freqs_cos = np.expand_dims(freqs_cos, axis=(0, 2))
+    freqs_sin = np.expand_dims(freqs_sin, axis=(0, 2))
+    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
+    xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
+    xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin
+    xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
+
+    # Combine real and imaginary parts
+    xq_out = np.stack([xq_out_r, xq_out_i], axis=-1).reshape(
+        xq_out_r.shape[:-1] + (-1,)
+    )
+    xk_out = np.stack([xk_out_r, xk_out_i], axis=-1).reshape(
+        xk_out_r.shape[:-1] + (-1,)
+    )
+
+    return xq_out, xk_out
+
+def apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin):
+    xqri = arr_reshape_2(xq)
+    xkri = arr_reshape_2(xk)
+    return xqri, xkri
+
+print("Testing Apply Rotatory Embeddings")
+
+# Generate random data
+xq = np.random.random((batch_size, seq_len, n_local_heads, head_dim))
+xk = np.random.random((batch_size, seq_len, n_local_heads, head_dim))
+freqs_cos = np.random.random((seq_len, head_dim // 2))
+freqs_sin = np.random.random((seq_len, head_dim // 2))
+
+# NumPy execution
+numpy_result = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
+# SealIR execution
+mlir_result = apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin)
+
+# Check Results
+assert np.allclose(numpy_result, mlir_result)
+print("Function executed and verified succesfully.")
+
+def attention(
+    x, # shape = (1, 5, 288)
+    start_pos, # 0
+    mask, # shape = (5, 5)
+    freqs_cos, # shape = (5, 24)
+    freqs_sin, # shape = (5, 24)
+    attn_weights, # 4 arrays of shape = (288, 288)
+    cache_k, # shape = (1, 256, 6, 48)
+    cache_v, # shape = (1, 256, 6, 48)
+):
+    q_weight, k_weight, v_weight, o_weight = [w.T for w in attn_weights]
+
+    n_local_heads = n_heads # 6
+    head_dim = dims // n_heads # 288/ 6 = 48
+
+    batch_size, seq_len, _ = x.shape
+
+    xq = x @ q_weight
+    xk = x @ k_weight
+    xv = x @ v_weight
+
+    xq = xq.reshape(batch_size, seq_len, n_local_heads, head_dim)
+    xk = xk.reshape(batch_size, seq_len, n_local_heads, head_dim)
+    xv = xv.reshape(batch_size, seq_len, n_local_heads, head_dim)
+
+    return xq, xk, xv
+
+    xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
+    cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
+    cache_v[:batch_size, start_pos : start_pos + seq_len] = xv
+    ks = cache_k[:batch_size, : start_pos + seq_len]
+    vs = cache_v[:batch_size, : start_pos + seq_len]
+
+    xq = xq.transpose(0, 2, 1, 3)
+    xk = ks.transpose(0, 2, 1, 3)
+    xv = vs.transpose(0, 2, 1, 3)
+
+    attention_scores = (xq @ xk.transpose(0, 1, 3, 2)) / math.sqrt(head_dim)
+    if mask is not None:
+        attention_scores = attention_scores + mask[None, None, :, :]
+    attn = softmax(attention_scores)
+    output = attn @ xv
+    output = output.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, -1)
+    output = output @ o_weight
+    return output, cache_k, cache_v
+
+def attention_mlir(
+    x, # shape = (1, 5, 288)
+    start_pos, # 0
+    mask, # shape = (5, 5)
+    freqs_cos, # shape = (5, 24)
+    freqs_sin, # shape = (5, 24)
+    attn_weights, # 4 arrays of shape = (288, 288)
+    cache_k, # shape = (1, 256, 6, 48)
+    cache_v, # shape = (1, 256, 6, 48)
+):  
+    q_weight, k_weight, v_weight, o_weight = [arr_transpose(w, np.zeros_like(w)) for w in attn_weights]
+
+    xq = arr_matmul(x, arr_reshape_exp_1(q_weight))
+    xk = arr_matmul(x, arr_reshape_exp_1(k_weight))
+    xv = arr_matmul(x, arr_reshape_exp_1(v_weight))
+
+    xq = arr_reshape(xq)
+    xk = arr_reshape(xk)
+    xv = arr_reshape(xv)
+
+    return xq, xk, xv
+
+attention_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+attention_weights = [np.random.random(dims*dims).reshape(dims, dims) for _ in range(4)]
+
+numpy_result = attention(x=attention_input,
+                         start_pos=None,
+                         mask=None,
+                         freqs_cos=None,
+                         freqs_sin=None,
+                         attn_weights=attention_weights,
+                         cache_k=None,
+                         cache_v=None)
+mlir_result = attention_mlir(x=attention_input,
+                         start_pos=None,
+                         mask=None,
+                         freqs_cos=None,
+                         freqs_sin=None,
+                         attn_weights=attention_weights,
+                         cache_k=None,
+                         cache_v=None)
 
 assert np.allclose(numpy_result, mlir_result)
 print("Function executed succesfully. Result: ", mlir_result)
