@@ -26,10 +26,17 @@ jobs:
         activate-environment: sealir_tutorial
         environment-file: sealir-tutorials/conda_environment.yml
 
+    - name: Post install fixes
+      # Something is breaking the graphviz installation
+      run: |
+        source $CONDA/bin/activate
+        conda activate sealir_tutorial
+        conda install -c conda-forge graphviz --force-reinstall
+        conda env export
+
     - name: Run tests
       working-directory: sealir-tutorials
       run: |
         source $CONDA/bin/activate
         conda activate sealir_tutorial
-        conda list
         make test
