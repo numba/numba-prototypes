@@ -100,18 +100,31 @@ class Backend:
         return jit_func
 
     def jit_compile(self, module, func, input_shapes, output_shapes, dtype=None, shared_libs=None):
+        in_types, out_types = [], []
+
         with InsertionPoint(module.body), Location.unknown():
             element_type = F64Type.get()
-            memref_type_ins = tuple([MemRefType.get(x, element_type) for x in input_shapes])
-            memref_type_outs = tuple([MemRefType.get(x, element_type) for x in output_shapes])
-
+            for i in input_shapes:
+                if i is not None:
+                    in_types.append(MemRefType.get(i, element_type))
+                else:
+                    in_types.append(element_type)
+        
+            for j in output_shapes:
+                if j is not None:
+                    out_types.append(MemRefType.get(j, element_type))
+                else:
+                    out_types.append(element_type)
+        
         if shared_libs == None:
             shared_libs = []
         is_ufunc=True
+
         if len(output_shapes) == 0:
             is_ufunc = False
-            memref_type_outs = (element_type,)
-        fn_jitted = self.jit_compile_extra(module, memref_type_ins, memref_type_outs, func, is_ufunc=is_ufunc, shared_libs=shared_libs)
+            out_types = (element_type,)
+
+        fn_jitted = self.jit_compile_extra(module, in_types, out_types, func, is_ufunc=is_ufunc, shared_libs=shared_libs)
 
         def jit_func_wrap(*args):
             res = [np.zeros(x) for x in output_shapes]
@@ -803,7 +816,7 @@ class Backend:
             index_type = IndexType.get()
             memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
             memref_type_out = MemRefType.get(out_shape, element_type, layout=StridedLayoutAttr.get(first_offset, out_strides))
-            func_type = FunctionType.get([memref_type, memref_type_out], [element_type])
+            func_type = FunctionType.get([memref_type, memref_type_out], [])
 
             func_op = func.FuncOp(fn_name, func_type)
             func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
@@ -828,7 +841,7 @@ class Backend:
 
                 memref.copy(subview, output_memref)
 
-                func.ReturnOp([arith.constant(element_type, 0.0)])
+                func.ReturnOp([])
 
         return fn_name
 
@@ -951,8 +964,8 @@ arr_mul = backend.gen_array_binary(module, 4, 4, arith.mulf, None)
 # arr_stack = backend.gen_array_stack(module, 4, None, None)
 
 arr_transpose_2 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3))
-arr_setitem = backend.gen_array_setitem(module, 4, (slice(1), slice(0, seq_len)))
-arr_getitem = backend.gen_array_getitem(module, 4, (slice(1), slice(0, seq_len)))
+arr_setitem = backend.gen_array_setitem(module, 4, (None, slice(0, seq_len)))
+arr_getitem = backend.gen_array_getitem(module, 4, (None, slice(0, seq_len)))
 arr_transpose_3 = backend.gen_array_transpose(module, 4, (0, 1, 3, 2), None)
 arr_matmul_1 = backend.gen_array_matmul(module, 4, None)
 arr_broadcast_3 = backend.gen_array_broadcast(module, 2, (batch_size, n_local_heads, seq_len, seq_len), broadcast_along=[0, 1])
@@ -960,6 +973,9 @@ arr_add_2 = backend.gen_array_binary(module, 4, 4, arith.addf, None)
 arr_matmul_2 = backend.gen_array_matmul(module, 4, None)
 arr_transpose_4 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3), None)
 arr_reshape_4 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, dims))
+arr_fill = backend.gen_array_fill_value(module, 4, None)
+arr_sqrt = backend.gen_array_unary(module, 4, math.sqrt, None)
+arr_div_2 = backend.gen_array_binary(module, 4, 4, arith.divf, None)
 
 print("Generated MLIR:")
 print(str(module))
@@ -999,8 +1015,8 @@ arr_add = backend.jit_compile(module, arr_add, ((batch_size, seq_len, n_local_he
 # arr_stack = backend.jit_compile(module, arr_stack, ((batch_size, seq_len, n_local_heads, head_dim // 2),), ((batch_size, seq_len, n_local_heads, head_dim),))
 
 arr_transpose_2 = backend.jit_compile(module, arr_transpose_2, ((batch_size, seq_len, n_local_heads, head_dim),), ((batch_size, n_local_heads, seq_len, head_dim),))
-arr_setitem = backend.jit_compile(module, arr_setitem, ((batch_size, cache_size, n_heads, head_dim), (batch_size, seq_len, n_heads, head_dim)), ())
-arr_getitem = backend.jit_compile(module, arr_getitem, ((batch_size, cache_size, n_heads, head_dim),), ((batch_size, seq_len, n_heads, head_dim),))
+arr_setitem = backend.jit_compile(module, arr_setitem, ((batch_size, cache_size, n_heads, head_dim), (batch_size, seq_len, n_heads, head_dim)), (), shared_libs=[find_library(x) for x in shared_libs])
+arr_getitem = backend.jit_compile(module, arr_getitem, ((batch_size, cache_size, n_heads, head_dim),), ((batch_size, seq_len, n_heads, head_dim),), shared_libs=[find_library(x) for x in shared_libs])
 arr_transpose_3 = backend.jit_compile(module, arr_transpose_3, ((batch_size, n_local_heads, seq_len, head_dim),), ((batch_size, n_local_heads, head_dim, seq_len),))
 arr_matmul_1 = backend.jit_compile(module, arr_matmul_1, ((batch_size, n_local_heads, seq_len, head_dim), (batch_size, n_local_heads, head_dim, seq_len)), ((batch_size, n_local_heads, seq_len, seq_len),))
 arr_broadcast_3 = backend.jit_compile(module, arr_broadcast_3, ((seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),))
@@ -1008,6 +1024,9 @@ arr_add_2 = backend.jit_compile(module, arr_add_2, ((batch_size, n_local_heads, 
 arr_matmul_2 = backend.jit_compile(module, arr_matmul_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, head_dim)), ((batch_size, n_local_heads, seq_len, head_dim),))
 arr_transpose_4 = backend.jit_compile(module, arr_transpose_4, ((batch_size, n_local_heads, seq_len, head_dim),), ((batch_size, seq_len, n_local_heads, head_dim),))
 arr_reshape_4 = backend.jit_compile(module, arr_reshape_4, ((batch_size, seq_len, n_local_heads, head_dim),), ((batch_size, seq_len, dims),))
+arr_fill = backend.jit_compile(module, arr_fill, (None,), ((batch_size, n_local_heads, seq_len, seq_len),), None)
+arr_sqrt = backend.jit_compile(module, arr_sqrt, ((batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),), None)
+arr_div_2 = backend.jit_compile(module, arr_div_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),))
 
 print("Function compiled successfully!")
 
@@ -1075,7 +1094,7 @@ def apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin):
     xk_out_r = arr_sub_1(arr_mul(xk_r, freqs_cos), arr_mul(xk_i, freqs_sin))
     xk_out_i = arr_add(arr_mul(xk_r, freqs_sin), arr_mul(xk_i, freqs_cos))
 
-    # Combine real and imaginary parts
+    # TODO: Combine real and imaginary parts
     xq_out = np.stack([xq_out_r, xq_out_i], axis=-1).reshape(
         xq_out_r.shape[:-1] + (-1,)
     )
@@ -1169,20 +1188,16 @@ def attention_mlir(
 
     xq, xk = apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin)
 
-    cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
-    cache_v[:batch_size, start_pos : start_pos + seq_len] = xv
-    ks = cache_k[:batch_size, : start_pos + seq_len]
-    vs = cache_v[:batch_size, : start_pos + seq_len]
+    arr_setitem(cache_k, xk)
+    arr_setitem(cache_v, xv)
+    ks = arr_getitem(cache_k)
+    vs = arr_getitem(cache_v)
 
     xq = arr_transpose_2(xq)
     xk = arr_transpose_2(ks)
     xv = arr_transpose_2(vs)
 
-    # Head dim is a scalar, we need machinery to jit in compile time constants
-    # and doing array operations with the scalar
-    sqrt_val = pymath.sqrt(head_dim)
-
-    attention_scores = arr_matmul_1(xq, arr_transpose_3(xk)) / sqrt_val
+    attention_scores = arr_div_2(arr_matmul_1(xq, arr_transpose_3(xk)), arr_sqrt(arr_fill(head_dim)))
 
     if mask is not None:
         attention_scores = arr_add_2(attention_scores, arr_broadcast_3(mask))
@@ -1190,11 +1205,13 @@ def attention_mlir(
     attn = softmax_mlir(attention_scores)
 
     output = arr_matmul_2(attn, xv)
-    output = arr_transpose_4(output).reshape(batch_size, seq_len, -1)
+    output = arr_reshape_4(arr_transpose_4(output))
 
     output = arr_matmul(output, arr_reshape_exp_1(o_weight))
 
     return output, cache_k, cache_v
+
+print("Testing Attention layer")
 
 attention_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
 attention_weights = [np.random.random(dims*dims).reshape(dims, dims) for _ in range(4)]
