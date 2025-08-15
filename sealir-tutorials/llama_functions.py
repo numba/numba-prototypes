@@ -441,47 +441,58 @@ class Backend:
 
         return fn_name
 
-    def gen_array_stack(self, module, dims, num_inputs, axis, input_shapes):
+    def gen_array_stack(self, module, dims, num_inputs, axis, sizes_along_axis):
         fn_name = self.gen_fn_name("stack")
 
         with module.context, InsertionPoint(module.body), Location.unknown():
             element_type = F64Type.get()
             index_type = IndexType.get()
-
             memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
-
-            func_type = FunctionType.get([memref_type]*(num_inputs+1), [])
+            func_type = FunctionType.get([memref_type] * (num_inputs + 1), [])
 
             func_op = func.FuncOp(fn_name, func_type)
             func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
 
             with InsertionPoint(func_op.add_entry_block()):
-                args = func_op.arguments
+                input_args = func_op.arguments[:-1]
+                output_memref = func_op.arguments[-1]
+                curr_offset = 0
 
-                upper_bound_shape_affine = AffineSymbolExpr.get_symbol()
-                parallel = affine.AffineParallelOp(
-                    results_=[],
-                    reductions=ArrayAttr.get([]),
-                    lowerBoundsMap=AffineMap.get(0, 0, [AffineExpr.get_constant(0)] * 4),
-                    lowerBoundsGroups=[1] * dims,
-                    upperBoundsMap=AffineMap.get(0, 0, upper_bound_shape_affine),
-                    upperBoundsGroups=[1] * dims,
-                    steps=[1] * dims,
-                    mapOperands=[]
-                )
+                for input_arg, size_along_axis in zip(input_args, sizes_along_axis):
 
-                body = parallel.regions[0].blocks.append(
-                    *([index_type] * dims)
-                )
-                with InsertionPoint(body):
-                    i, j, k, l = body.arguments
-                    affine.AffineIfOp()
-                    for arg in args[:-1]:
-                        elem = affine.load(element_type, arg, [i, j, k, l], AffineMap.get(4, 0, [AffineDimExpr.get(i) for i in range(dims)]))
-                        affine.store(elem, args[-1], [i, j, k, l], AffineMap.get(4, 0, [AffineDimExpr.get(i) for i in range(dims)]))
-                    affine.AffineYieldOp([])
+                    out_shape = [ShapedType.get_dynamic_size()] * dims
+                    out_shape[axis] = size_along_axis
+
+                    offsets = [0] * dims
+                    offsets[axis] = curr_offset
+
+                    strides = [1] * dims
+                    strides[axis] = num_inputs
+
+                    out_strides = [ShapedType.get_dynamic_stride_or_offset()] * dims
+                    out_strides[axis] = num_inputs
+
+                    out_layout = StridedLayoutAttr.get(curr_offset, out_strides)
+                    memref_type_out = MemRefType.get(out_shape, element_type, layout=out_layout)
+                    sizes = [memref.dim(func_op.arguments[0], arith.constant(index_type, i)) for i in range(dims)]
+                    sizes.pop(axis)
+                    subview = memref.SubViewOp(
+                        memref_type_out,
+                        output_memref,
+                        offsets=[],
+                        sizes=sizes,
+                        strides=[],
+                        static_offsets=DenseI64ArrayAttr.get(offsets),
+                        static_sizes=DenseI64ArrayAttr.get(out_shape),
+                        static_strides=DenseI64ArrayAttr.get(strides)
+                    ).result
+
+                    memref.copy(input_arg, subview)
+                    curr_offset += 1
+
                 func.ReturnOp([])
 
+        return fn_name
 
     @classmethod
     def build_mlir_reassociation(cls, ndim, new_axes):
@@ -961,7 +972,7 @@ arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, n
 arr_add = backend.gen_array_binary(module, 4, 4, arith.addf, None)
 arr_sub_1 = backend.gen_array_binary(module, 4, 4, arith.subf, None)
 arr_mul = backend.gen_array_binary(module, 4, 4, arith.mulf, None)
-# arr_stack = backend.gen_array_stack(module, 4, None, None)
+arr_stack = backend.gen_array_stack(module, 4, 2, 3, (head_dim // 2, head_dim // 2))
 
 arr_transpose_2 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3))
 arr_setitem = backend.gen_array_setitem(module, 4, (None, slice(0, seq_len)))
@@ -976,6 +987,7 @@ arr_reshape_4 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, dims)
 arr_fill = backend.gen_array_fill_value(module, 4, None)
 arr_sqrt = backend.gen_array_unary(module, 4, math.sqrt, None)
 arr_div_2 = backend.gen_array_binary(module, 4, 4, arith.divf, None)
+
 
 print("Generated MLIR:")
 print(str(module))
@@ -1012,7 +1024,7 @@ arr_broadcast_2 = backend.jit_compile(module, arr_broadcast_2, ((seq_len, head_d
 arr_mul = backend.jit_compile(module, arr_mul, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
 arr_sub_1 = backend.jit_compile(module, arr_sub_1, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
 arr_add = backend.jit_compile(module, arr_add, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
-# arr_stack = backend.jit_compile(module, arr_stack, ((batch_size, seq_len, n_local_heads, head_dim // 2),), ((batch_size, seq_len, n_local_heads, head_dim),))
+arr_stack = backend.jit_compile(module, arr_stack, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim),), shared_libs=[find_library(x) for x in shared_libs])
 
 arr_transpose_2 = backend.jit_compile(module, arr_transpose_2, ((batch_size, seq_len, n_local_heads, head_dim),), ((batch_size, n_local_heads, seq_len, head_dim),))
 arr_setitem = backend.jit_compile(module, arr_setitem, ((batch_size, cache_size, n_heads, head_dim), (batch_size, seq_len, n_heads, head_dim)), (), shared_libs=[find_library(x) for x in shared_libs])
@@ -1039,7 +1051,7 @@ def softmax_mlir(x):
     e_x = arr_exp(arr_sub(x, arr_broadcast(arr_max_reduce(x))))
     return arr_div(e_x, arr_broadcast(arr_sum_reduce(e_x)))
 
-print("Testing Softmax")
+# print("Testing Softmax")
 
 # Random input data
 softmax_input = np.random.random(softmax_input_shape)
@@ -1095,12 +1107,8 @@ def apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin):
     xk_out_i = arr_add(arr_mul(xk_r, freqs_sin), arr_mul(xk_i, freqs_cos))
 
     # TODO: Combine real and imaginary parts
-    xq_out = np.stack([xq_out_r, xq_out_i], axis=-1).reshape(
-        xq_out_r.shape[:-1] + (-1,)
-    )
-    xk_out = np.stack([xk_out_r, xk_out_i], axis=-1).reshape(
-        xk_out_r.shape[:-1] + (-1,)
-    )
+    xq_out = arr_stack(xq_out_r, xq_out_i)
+    xk_out = arr_stack(xk_out_r, xk_out_i)
 
     return xq_out, xk_out
 
