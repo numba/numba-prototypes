@@ -20,7 +20,7 @@ dependencies:
   - pygraphviz
   - pip
   - pip:
-    - egglog
+    - egglog ==10
     - numba_rvsdg
     - git+https://github.com/numba/sealir
     - pytest-xdist
