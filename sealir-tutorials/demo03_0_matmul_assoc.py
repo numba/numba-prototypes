@@ -77,7 +77,13 @@ from ch05_typeinfer_array import (
     base_ruleset,
     setup_argtypes,
 )
-from utils import Pipeline, Report, display, visualize_expr_tree
+from utils import (
+    Report,
+    display,
+    timeit,
+    visualize_benchmark,
+    visualize_expr_tree,
+)
 
 # -
 
@@ -95,24 +101,52 @@ K = 200
 
 # (M x N) (N x K) (K x N)
 
+f0_3m = lambda arr0, arr1, arr2: (arr0 @ arr1) @ arr2
+f1_3m = lambda arr0, arr1, arr2: arr0 @ (arr1 @ arr2)
+
+# <img src="img/matmul_assoc.svg" width="80%" />
+
+# compute cost as FLOPS
+
+if __name__ == "__main__":
+    print(" left associative cost =", (2 * M * N * K) * (2 * M * K * K))
+    print("right associative cost =", (2 * N * K * N) * (2 * M * N * N))
+
+    report = Report("expr tree", True)
+    report.append("f0_3m", visualize_expr_tree(f0_3m))
+    report.append("f1_3m", visualize_expr_tree(f1_3m))
+    report.display()
+
+
 if __name__ == "__main__":
     arr0 = np.random.random((M, N))
     arr1 = np.random.random((N, K))
     arr2 = np.random.random((K, N))
-    res0 = (arr0 @ arr1) @ arr2
-    res1 = arr0 @ (arr1 @ arr2)
-    print(res0.shape)
-    print(res1.shape)
-    np.testing.assert_allclose(res0, res1)
+    print(arr0.shape, arr1.shape, arr2.shape)
+    res0 = f0_3m(arr0, arr1, arr2)
+    res1 = f1_3m(arr0, arr1, arr2)
     # unoptimized
-    # %timeit arr0 @ arr1 @ arr2
+    left_time = timeit(lambda: f0_3m(arr0, arr1, arr2))
     # optimized
-    # %timeit arr0 @ (arr1 @ arr2)
+    right_time = timeit(lambda: f1_3m(arr0, arr1, arr2))
+
+    visualize_benchmark(
+        left_time,
+        right_time,
+        labels=["Left-associative", "Right-associative"],
+        title="Matrix Multiplication Optimization",
+        figsize=(8, 5),
+    )
 
 # ## NumPy Example: Five Matrix Multiplications
 #
-# Here we define two different ways to multiply five matrices and compare their
+# Here we define two different ways to do five matrix multiplications and compare their
 # results and performance.
+# <code>
+# arr0 @ arr1 @ arr2 @ arr1 @ arr2 @ arr3
+#        ^^^^^^^^^^^   ^^^^^^^^^^^
+#           common subexpressions
+# </code>
 
 f0 = lambda arr0, arr1, arr2, arr3: arr0 @ arr1 @ arr2 @ arr1 @ arr2 @ arr3
 
@@ -140,9 +174,16 @@ if __name__ == "__main__":
     report.display()
 
     # unoptimized
-    # %timeit f0(arr0, arr1, arr2, arr3)
+    f0_time = timeit(lambda: f0(arr0, arr1, arr2, arr3))
     # optimized
-    # %timeit f1(arr0, arr1, arr2, arr3)
+    f1_time = timeit(lambda: f1(arr0, arr1, arr2, arr3))
+    visualize_benchmark(
+        f0_time,
+        f1_time,
+        labels=["original", "hand-optimized"],
+        title="Matrix Multiplication Optimization",
+        figsize=(8, 5),
+    )
 
 # ## E-Graph Construction for Matrix Multiplication
 #
@@ -180,6 +221,21 @@ def MatMul_KnownShape(
 def ArrayDescOp(term: Term) -> ArrayDesc: ...
 
 
+# ### Matrix Multiplication Associativity
+
+
+@ruleset
+def ruleset_matmul_associativity(
+    ary0: Term,
+    ary1: Term,
+    ary2: Term,
+):
+    # associative
+    yield rewrite(MatMul(MatMul(ary0, ary1), ary2)).to(
+        MatMul(ary0, MatMul(ary1, ary2))
+    )
+
+
 @ruleset
 def ruleset_optimize_matmul(
     ary0: Term,
@@ -191,11 +247,6 @@ def ruleset_optimize_matmul(
     shapeN: i64,
     shapeK: i64,
 ):
-    # associative
-    yield rewrite(MatMul(MatMul(ary0, ary1), ary2)).to(
-        MatMul(ary0, MatMul(ary1, ary2))
-    )
-
     yield rule(
         # array desc propagation
         ary2 == MatMul(ary0, ary1),
@@ -286,8 +337,11 @@ def egraph_saturation(
                 ).to_json()
                 saturation_steps.append(jsdata)
         else:
-            egraph.run(all_rules.saturate())
+            runreport = egraph.run(all_rules.saturate())
+            if pipeline_debug:
+                report.append("[debug] Run report", runreport)
             saturation_steps = None
+
         if pipeline_debug:
             report.append("[debug] Saturated egraph", egraph)
         return dict(egraph=egraph, saturation_steps=saturation_steps)
@@ -298,7 +352,9 @@ pipeline_middle_end = _ch04_0_pipeline_new_extract.trunc(
 ).replace("egraph_saturation", egraph_saturation)
 pipeline_to_egraph = pipeline_middle_end.trunc("pipeline_egraph_extraction")
 
-extra_ruleset = ruleset_matmul_op | ruleset_optimize_matmul
+extra_ruleset = (
+    ruleset_matmul_op | ruleset_optimize_matmul | ruleset_matmul_associativity
+)
 
 
 if __name__ == "__main__":
@@ -487,6 +543,9 @@ if __name__ == "__main__":
     res0 = f1(arr0, arr1, arr2, arr3)
     np.testing.assert_allclose(res0, res1)
 
+# ### Benchmark
+
+if __name__ == "__main__":
     report = Report(
         "Expression tree of different versions",
         default_expanded=True,
@@ -499,10 +558,19 @@ if __name__ == "__main__":
     report.display()
 
     # original
-    # %timeit f0(arr0, arr1, arr2, arr3)
+    f0_time = timeit(lambda: f0(arr0, arr1, arr2, arr3))
 
     # manual optimized
-    # %timeit f1(arr0, arr1, arr2, arr3)
+    f1_time = timeit(lambda: f1(arr0, arr1, arr2, arr3))
 
     # cost-based extraction
-    # %timeit extracted(arr0, arr1, arr2, arr3)
+    superopt_time = timeit(lambda: extracted(arr0, arr1, arr2, arr3))
+
+    visualize_benchmark(
+        f0_time,
+        f1_time,
+        superopt_time,
+        labels=["original", "hand-optimized", "superoptimized"],
+        title="Matrix Multiplication Optimization",
+        figsize=(8, 5),
+    )

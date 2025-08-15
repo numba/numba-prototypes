@@ -91,10 +91,17 @@ from demo03_0_matmul_assoc import SourceMaker as _demo03_0_SourceMaker
 from demo03_0_matmul_assoc import (
     compiler,
     pipeline_to_egraph,
+    ruleset_matmul_associativity,
     ruleset_matmul_op,
     ruleset_optimize_matmul,
 )
-from utils import Pipeline, Report, display, visualize_expr_tree
+from utils import (
+    Report,
+    display,
+    timeit,
+    visualize_benchmark,
+    visualize_expr_tree,
+)
 
 # ## Original and Optimized Matrix Multiplication Functions
 #
@@ -105,18 +112,23 @@ from utils import Pipeline, Report, display, visualize_expr_tree
 # Two separate matmuls followed by elementwise add
 
 
+# <img src="img/matmul_add.svg" />
+
+
 def original_mma(input_1, input_2, input_3, input_4):
     return input_1 @ (input_2 + input_3) @ input_4
 
 
 # ### Optimized version
 # Concatenate inputs along feature dimensions
+#
+# <img src="img/hstack_vstack.svg" />
 
 
 def optimized_mma(input_1, input_2, input_3, input_4):
-    #    input_1 @ (input_2, input_3)
+    #    input_1 @ (input_2 + input_3)
     # => input_1 @ input_2 + input_1 @ input_3
-    # => hstack(input_1, input_1) + vstack(input_2, input_3)
+    # => hstack(input_1, input_1) @ vstack(input_2, input_3)
     concat_input = np.hstack([input_1, input_1])
     concat_weight = np.vstack([input_2, input_3])
     return concat_input @ concat_weight @ input_4
@@ -219,8 +231,8 @@ def ruleset_tensat(ary1: Term, ary2: Term, ary3: Term, ary4: Term):
     matmul = Npy_MatMul
     hstack = Npy_HStack
     vstack = Npy_VStack
-    # tensat rule
-    # (A @ B) + (C @ D) => (A, C) @ (B, D)
+    # taso/tensat rule
+    # (A @ B) + (C @ D) => hstack(A, C) @ vstack(B, D)
     yield rewrite(
         ewadd(matmul(ary1, ary3), matmul(ary2, ary4)),
     ).to(matmul(hstack(ary1, ary2), vstack(ary3, ary4)))
@@ -498,6 +510,7 @@ extra_ruleset = (
     | ruleset_broadcasting
     | ruleset_matmul_op
     | ruleset_optimize_matmul
+    | ruleset_matmul_associativity
     | ruleset_tensat
     | ruleset_specialize_numpy
 )
@@ -534,7 +547,6 @@ if __name__ == "__main__":
         extra_ruleset=extra_ruleset,
         arg_facts=ruleset_array_facts,
         global_ns={"np": np},
-        animate=True,
         pipeline_report=report,
         pipeline_debug=True,
         cost_model=MyCostModel(),
@@ -552,17 +564,26 @@ if __name__ == "__main__":
 
     extracted = cres.extracted
 
-    import json
-
-    steps = []
-    for step in cres.saturation_steps:
-        steps.append(json.loads(step))
-    with open("jsanimate.json", "w") as fout:
-        json.dump({"steps": steps}, fout)
-
     got = extracted(input_1, input_2, input_3, input_4)
     np.testing.assert_allclose(original, got)
 
-    # %timeit original_mma(input_1, input_2, input_3, input_4)
-    # %timeit optimized_mma(input_1, input_2, input_3, input_4)
-    # %timeit extracted(input_1, input_2, input_3, input_4)
+    print("original")
+    t_original = timeit(
+        lambda: original_mma(input_1, input_2, input_3, input_4)
+    )
+
+    print("hand-optimzed")
+    t_handopt = timeit(
+        lambda: optimized_mma(input_1, input_2, input_3, input_4)
+    )
+
+    print("superoptimized")
+    t_superopt = timeit(lambda: extracted(input_1, input_2, input_3, input_4))
+
+    visualize_benchmark(
+        t_original,
+        t_handopt,
+        t_superopt,
+        labels=["original", "hand-optimized", "superoptimized"],
+        title="Tensor Algebra Optimization",
+    )

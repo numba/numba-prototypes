@@ -7,11 +7,9 @@ import uuid
 import xml.etree.ElementTree as ET
 from abc import ABC, abstractmethod
 from contextlib import contextmanager
-from pprint import pformat
 from timeit import default_timer as timer
 
-from egglog import EGraph
-from IPython.display import HTML, SVG, display
+from IPython.display import HTML, display
 
 from .notebookutils import IN_NOTEBOOK
 
@@ -29,60 +27,6 @@ def remove_svg_constraints_xml(svg_str):
         del root.attrib["height"]
     # Convert back to string
     return ET.tostring(root, encoding="unicode")
-
-
-def egraph_to_svg(egraph: EGraph) -> HTML:
-    content = egraph._graphviz()
-    svg_raw = content.pipe(format="svg", quiet=True)
-    svg_str = (
-        svg_raw.decode("utf-8") if isinstance(svg_raw, bytes) else svg_str
-    )
-
-    svg_data = svg_str
-
-    # Escape the SVG data properly for JavaScript
-    svg_escaped = (
-        svg_data.replace("\\", "\\\\").replace("`", "\\`").replace("$", "\\$")
-    )
-
-    return HTML(
-        f"""
-    <div style="margin: 10px 0;">
-        <button onclick="openSVGInNewTab()" style="
-            margin-bottom: 10px;
-            padding: 8px 16px;
-            background: #007cba;
-            color: white;
-            border: none;
-            border-radius: 4px;
-            cursor: pointer;
-        ">Open Full Size in New Tab</button>
-
-        <div style="
-            overflow: auto;
-            border: 1px solid #ccc;
-            resize: both;
-            min-width: 10em;
-            min-height: 3em;
-        ">
-            {svg_data}
-        </div>
-    </div>
-
-    <script>
-    function openSVGInNewTab() {{
-        const svgData = `{svg_escaped}`;
-        const blob = new Blob([svgData], {{type: 'image/svg+xml;charset=utf-8'}});
-        const url = URL.createObjectURL(blob);
-        const newWindow = window.open();
-        newWindow.location.href = url;
-
-        // Clean up after a delay
-        setTimeout(() => URL.revokeObjectURL(url), 2000);
-    }}
-    </script>
-    """
-    )
 
 
 class ReportInterface(ABC):
@@ -151,14 +95,39 @@ class DummyReport(ReportInterface):
         return f"DummyReport()"
 
 
+def format_time(time_seconds: float, decimal_places: int = 1) -> str:
+    """
+    Format time with automatically selected unit (s, ms, μs, ns).
+
+    Args:
+        time_seconds: Time value in seconds
+        decimal_places: Number of decimal places to display
+    """
+    if time_seconds >= 1:
+        return f"{time_seconds:.{decimal_places}f}s"
+    elif time_seconds >= 1e-3:
+        return f"{time_seconds * 1e3:.{decimal_places}f}ms"
+    elif time_seconds >= 1e-6:
+        return f"{time_seconds * 1e6:.{decimal_places}f}μs"
+    else:
+        return f"{time_seconds * 1e9:.{decimal_places}f}ns"
+
+
 class Report(ReportInterface):
     """
     A utility class for creating collapsible panes in Jupyter notebooks.
 
-    Supports both text content and IPython display-able objects (images, plots, etc.).
+    Supports both text content and IPython display-able objects (images, plots,
+    etc.).
+
+    Notes:
+
+    - Timing overhead represents milliseconds consumed by `.append()` rendering
+      operations.
     """
 
     Sink = DummyReport
+    renderer = {}  # Registry for type-specific renderers
 
     def __init__(
         self,
@@ -184,30 +153,45 @@ class Report(ReportInterface):
         """Compute metadata as a dict for timing breakdown."""
         last_time = self._start_time
         timing = []
+        total_overhead = 0
+        complete_end_time = timer()
         for pane_info in self.panes:
             title = pane_info["title"]
             end_time = pane_info["end_time"]
+            overhead_time = pane_info["overhead_time"]
             timing.append(
                 {
                     "title": title,
-                    "elapsed_ms": (end_time - last_time) * 1000,
+                    "elapsed": (end_time - last_time),
+                    "overhead": overhead_time,
                 }
             )
             last_time = end_time
-        total_elapsed = (last_time - self._start_time) * 1000
+            total_overhead += overhead_time
+        total_elapsed = complete_end_time - self._start_time
         return {
-            "total_elapsed_ms": total_elapsed,
+            "total_elapsed": total_elapsed,
+            "total_overhead": total_overhead,
             "timing": timing,
         }
 
     def _format_metadata(self, metadata_dict):
         """Format the metadata dict as a string."""
+        elapsed = metadata_dict["total_elapsed"]
+        overhead = metadata_dict["total_overhead"]
         buf = [
-            f"time elapsed {metadata_dict['total_elapsed_ms']:.2f}ms",
-            "timing breakdown:",
+            f"time elapsed {format_time(elapsed)}",
+            f"overhead {format_time(overhead)}",
+            f"elapsed - overhead {format_time(elapsed - overhead)}",
+            "timing breakdown (+ overhead):",
         ]
         for entry in metadata_dict["timing"]:
-            buf.append(f"  {entry['elapsed_ms']:.2f}ms: {entry['title']:20}")
+            elapsed = entry["elapsed"]
+            overhead = entry["overhead"]
+            diff = elapsed - overhead
+            buf.append(
+                f"  {format_time(diff)} (+ {format_time(overhead)}: {entry['title']:20}"
+            )
         return "\n".join(buf)
 
     @contextmanager
@@ -216,16 +200,17 @@ class Report(ReportInterface):
         try:
             yield report
         finally:
+            meta = report._compute_metadata()
+            elapsed = meta["total_elapsed"]
+            overhead = meta["total_overhead"]
+            elapsed_discounted = elapsed - overhead
             if self.enable_nested_metadata or metadata:
-                meta = report._compute_metadata()
-                elapsed = meta["total_elapsed_ms"]
                 report.append("[metadata]", report._format_metadata(meta))
-                title = f"{report.title} ({elapsed:.2f}ms)"
-            else:
-                title = report.title
+            title = f"{report.title}: {format_time(elapsed_discounted)} (+{format_time(overhead)} overhead)"
             self.append(title, report)
 
     def append(self, title, content):
+        ts_overhead = timer()
         pane_id = f"pane_{uuid.uuid4().hex[:8]}"
 
         # Store original content for terminal display
@@ -233,10 +218,54 @@ class Report(ReportInterface):
             self._original_contents = {}
         self._original_contents[pane_id] = content
 
-        if isinstance(content, EGraph):
-            content = egraph_to_svg(content)
+        html_content, is_nested_report = self._render_content(content)
 
-        # Process different content types (same as original)
+        ts_current = timer()
+        self.panes.append(
+            {
+                "id": pane_id,
+                "title": title,
+                "content": html_content,
+                "is_nested_report": is_nested_report,
+                "fallback_content": str(content),
+                "end_time": ts_current,
+                "overhead_time": ts_current - ts_overhead,
+            }
+        )
+
+    def _render_content(self, content):
+        """
+        Render content into HTML format and determine if it's a nested report.
+
+        Args:
+            content: The content to render (can be EGraph, Report, or various display objects)
+
+        Returns:
+            tuple: (html_content, is_nested_report)
+        """
+        # Check for registered custom renderers first
+        content_type = type(content)
+        if content_type in self.renderer:
+            return self.renderer[content_type](self, content)
+
+        # Check for registered renderers by base classes (MRO order)
+        for cls in content_type.__mro__:
+            if cls in self.renderer:
+                return self.renderer[cls](self, content)
+
+        # Fall back to built-in renderers
+        return self._render_builtin_content(content)
+
+    def _render_builtin_content(self, content):
+        """
+        Built-in content rendering logic.
+
+        Args:
+            content: The content to render
+
+        Returns:
+            tuple: (html_content, is_nested_report)
+        """
         if isinstance(content, Report):
             # Nested Report support
             html_content = self._render_nested_report(content)
@@ -272,7 +301,6 @@ class Report(ReportInterface):
                 html_content = content
             else:
                 # Escape HTML and preserve whitespace
-
                 escaped_content = html.escape(content)
                 html_content = f'<pre style="white-space: pre-wrap; font-family: monospace; background-color: #2a2a2a; color: #e0e0e0; padding: 10px; border-radius: 4px; overflow-x: auto; border: 1px solid #404040;">{escaped_content}</pre>'
             is_nested_report = False
@@ -282,16 +310,7 @@ class Report(ReportInterface):
             html_content = f'<pre style="white-space: pre-wrap; font-family: monospace; background-color: #2a2a2a; color: #e0e0e0; padding: 10px; border-radius: 4px; overflow-x: auto; border: 1px solid #404040;">{escaped_content}</pre>'
             is_nested_report = False
 
-        self.panes.append(
-            {
-                "id": pane_id,
-                "title": title,
-                "content": html_content,
-                "is_nested_report": is_nested_report,
-                "fallback_content": str(content),
-                "end_time": timer(),
-            }
-        )
+        return html_content, is_nested_report
 
     def _render_nested_report(self, nested_report):
         """Render a nested Report as HTML content."""
@@ -346,20 +365,36 @@ class Report(ReportInterface):
             display: flex;
             align-items: center;
             justify-content: space-between;
-            transition: background-color 0.2s ease;
+            transition: background-color 0.2s ease, border-left 0.2s ease;
             font-weight: 400;
             color: #c0c0c0;
             font-size: 1em;
+            border-left: 3px solid #404040;
         }}
 
         .nested-pane-header-{nested_id}:hover {{
             background-color: #333;
         }}
 
+        .nested-pane-header-{nested_id}.expanded {{
+            background-color: #2d2d2d;
+            color: #e0e0e0;
+            font-weight: 500;
+            border-left: 3px solid #007cba;
+        }}
+
+        .nested-pane-header-{nested_id}.expanded:hover {{
+            background-color: #353535;
+        }}
+
         .nested-pane-toggle-{nested_id} {{
             font-size: 1.2em;
             color: #888;
-            transition: transform 0.2s ease;
+            transition: transform 0.2s ease, color 0.2s ease;
+        }}
+
+        .nested-pane-toggle-{nested_id}.expanded {{
+            color: #007cba;
         }}
 
         .nested-pane-content-{nested_id} {{
@@ -378,6 +413,18 @@ class Report(ReportInterface):
         .nested-pane-toggle-{nested_id}.expanded {{
             transform: rotate(90deg);
         }}
+
+        .nested-pane-status-{nested_id} {{
+            font-size: 0.85em;
+            color: #777;
+            font-style: italic;
+            margin-left: 8px;
+            transition: opacity 0.2s ease;
+        }}
+
+        .nested-pane-status-{nested_id}.expanded {{
+            opacity: 0;
+        }}
         </style>
         """
 
@@ -387,13 +434,19 @@ class Report(ReportInterface):
         function toggleNestedPane_{nested_id}(paneId) {{
             const content = document.getElementById(paneId + '_content');
             const toggle = document.getElementById(paneId + '_toggle');
+            const header = document.getElementById(paneId + '_header');
+            const status = document.getElementById(paneId + '_status');
 
             if (content.classList.contains('expanded')) {{
                 content.classList.remove('expanded');
                 toggle.classList.remove('expanded');
+                header.classList.remove('expanded');
+                status.classList.remove('expanded');
             }} else {{
                 content.classList.add('expanded');
                 toggle.classList.add('expanded');
+                header.classList.add('expanded');
+                status.classList.add('expanded');
             }}
         }}
         </script>
@@ -405,8 +458,8 @@ class Report(ReportInterface):
             expanded_class = "expanded" if self.default_expanded else ""
             panes_html += f"""
             <div class="nested-pane-{nested_id}">
-                <div class="nested-pane-header-{nested_id}" onclick="toggleNestedPane_{nested_id}('{pane['id']}')">
-                    <span>{pane['title']}</span>
+                <div id="{pane['id']}_header" class="nested-pane-header-{nested_id} {expanded_class}" onclick="toggleNestedPane_{nested_id}('{pane['id']}')">
+                    <span>{pane['title']}<br/><span id="{pane['id']}_status" class="nested-pane-status-{nested_id} {expanded_class}">(content hidden: click to show)</span></span>
                     <span id="{pane['id']}_toggle" class="nested-pane-toggle-{nested_id} {expanded_class}">▶</span>
                 </div>
                 <div id="{pane['id']}_content" class="nested-pane-content-{nested_id} {expanded_class}">
@@ -467,9 +520,9 @@ class Report(ReportInterface):
             border: 1px solid #404040;
             border-radius: 8px;
             background-color: #232323;
-            min-width: 300px;
+            min-width: 400px;
             max-width: 600px;
-            flex: 1 1 300px;
+            flex: 1 1 400px;
             display: flex;
             flex-direction: column;
             margin-bottom: 0;
@@ -494,20 +547,49 @@ class Report(ReportInterface):
             display: flex;
             align-items: center;
             justify-content: space-between;
-            transition: background-color 0.2s ease;
+            transition: background-color 0.2s ease, border-left 0.2s ease;
             font-weight: 500;
             color: #d0d0d0;
             border-radius: 8px 8px 0 0;
+            border-left: 4px solid #404040;
         }}
 
         .pane-header-{self.report_id}:hover {{
             background-color: #2d2d2d;
         }}
 
+        .pane-header-{self.report_id}.expanded {{
+            background-color: #2a2a2a;
+            color: #f0f0f0;
+            font-weight: 600;
+            border-left: 4px solid #007cba;
+        }}
+
+        .pane-header-{self.report_id}.expanded:hover {{
+            background-color: #323232;
+        }}
+
         .pane-toggle-{self.report_id} {{
             font-size: 1.2em;
             color: #a0a0a0;
-            transition: transform 0.2s ease;
+            transition: transform 0.2s ease, color 0.2s ease;
+        }}
+
+        .pane-toggle-{self.report_id}.expanded {{
+            color: #007cba;
+            font-weight: bold;
+        }}
+
+        .pane-status-{self.report_id} {{
+            font-size: 0.9em;
+            color: #888;
+            font-style: italic;
+            margin-left: 8px;
+            transition: opacity 0.2s ease;
+        }}
+
+        .pane-status-{self.report_id}.expanded {{
+            opacity: 0;
         }}
 
         .pane-content-{self.report_id} {{
@@ -550,13 +632,19 @@ class Report(ReportInterface):
         function togglePane_{self.report_id}(paneId) {{
             const content = document.getElementById(paneId + '_content');
             const toggle = document.getElementById(paneId + '_toggle');
+            const header = document.getElementById(paneId + '_header');
+            const status = document.getElementById(paneId + '_status');
 
             if (content.classList.contains('expanded')) {{
                 content.classList.remove('expanded');
                 toggle.classList.remove('expanded');
+                header.classList.remove('expanded');
+                status.classList.remove('expanded');
             }} else {{
                 content.classList.add('expanded');
                 toggle.classList.add('expanded');
+                header.classList.add('expanded');
+                status.classList.add('expanded');
             }}
         }}
 
@@ -587,8 +675,8 @@ class Report(ReportInterface):
             pane_id = pane["id"]
             panes_html += f"""
             <div class="pane-{self.report_id}" id="{pane_id}">
-                <div class="pane-header-{self.report_id}" onclick="togglePane_{self.report_id}('{pane_id}')">
-                    <span>{pane_number}{pane['title']}</span>
+                <div id="{pane_id}_header" class="pane-header-{self.report_id} {expanded_class}" onclick="togglePane_{self.report_id}('{pane_id}')">
+                    <span>{pane_number}{pane['title']}<br/><span id="{pane_id}_status" class="pane-status-{self.report_id} {expanded_class}">(content hidden: click to show)</span></span>
                     <span>
                         <button type=\"button\" class=\"expand-btn-{self.report_id}\" id=\"{pane_id}_expandbtn\" onclick=\"event.stopPropagation();expandPaneFullWidth_{self.report_id}('{pane_id}')\">Expand</button>
                         <span id="{pane_id}_toggle" class="pane-toggle-{self.report_id} {expanded_class}">▶</span>

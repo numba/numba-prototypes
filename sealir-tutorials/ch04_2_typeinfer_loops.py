@@ -81,6 +81,7 @@ from ch04_1_typeinfer_ifelse import (
     ruleset_type_infer_float,
     setup_argtypes,
 )
+from utils import Report
 
 # ## Loop Type Inference Rules
 #
@@ -322,9 +323,11 @@ if __name__ == "__main__":
         fn=example_1,
         argtypes=(Int64, Int64),
         ruleset=base_ruleset | setup_argtypes(TypeInt64, TypeInt64),
+        pipeline_report=Report(),
         **compiler_config,
     )
     jit_func = cres.jit_func
+    cres.pipeline_report.display()
     run_test(example_1, jit_func, (10, 7), verbose=True)
 
 # ## Example 2: Nested Loop
