@@ -16,15 +16,21 @@
 #
 # ## AST frontend and LLVM backend
 #
-# This chapter introduces the fundamental components of our compiler:
-# the AST frontend and LLVM backend. We show how to parse Python functions
-# into an intermediate representation (RVSDG-IR) and then compile them to
-# executable code using LLVM.
+#
+# This chapter introduces the fundamental components of our compiler: the
+# [Abstract Syntax Tree
+# (AST)](https://en.wikipedia.org/wiki/Abstract_syntax_tree) frontend and
+# [LLVM](https://en.wikipedia.org/wiki/LLVM) backend. We show how to parse
+# Python functions into a [Regionalized Value-State Dependence Graph
+# intermediate representation (RVSDG-IR)](https://arxiv.org/abs/1912.05036) and
+# then compile them to executable code using LLVM.
 #
 # The chapter covers:
 # - How to implement a frontend that converts Python AST to RVSDG-IR
 # - How to implement a backend that generates LLVM IR
-# - How to JIT compile and execute the generated code
+# - How to [just-in_time compile
+#   (JIT)](https://en.wikipedia.org/wiki/Just-in-time_compilation) and execute
+#   the generated code
 
 # ## Imports and Setup
 #
@@ -53,25 +59,63 @@ from utils import Pipeline, Report
 # ## Frontend Implementation
 #
 # The frontend accepts a Python function object, reads its source code, and
-# parses its Abstract Syntax Tree (AST). It then transforms the AST into a
-# Regionalized Value-State Dependence Graph (RVSDG), a representation that
-# simplifies further intermediate representation (IR) processing. The RVSDG uses
-# a data-flow centric encoding in which control-flow constructs are mapped into
+# parses its AST. It then
+# transforms the AST into a RVSDG, a representation that simplifies
+# further intermediate representation (IR) processing. The RVSDG uses a
+# data-flow centric encoding in which control-flow constructs are mapped into
 # regions. These regions function much like ordinary operations, with clearly
 # defined sets of input and output ports. Additionally, state is explicitly
 # encoded as I/O, so that every operation maintains a pure operational
 # appearance.
-
+#
+# The `pipeline_frontend()` transforms Python functions into RVSDG intermediate
+# representation for compilation. The pipeline extracts source code, parses it
+# into an AST, and converts the AST into a RVSDG—a data-flow representation
+# that encapsulates control structures (loops, conditionals) as regions with
+# explicit input/output ports. This design eliminates control-flow analysis
+# complexity, makes data dependencies explicit, and enables aggressive
+# optimizations and parallelization. The pipeline outputs the RVSDG expression
+# and debugging information for traceability to source code.
 
 class FrontendOutput(TypedDict):
+    """
+    Output structure from the frontend pipeline containing the transformed
+    representation and debugging information.
+
+    Attributes:
+        rvsdg_expr:
+        dbginfo:
+    """
     rvsdg_expr: object
+    """The RVSDG expression representing the transformed function in data-flow
+    form
+    """
     dbginfo: object
+    """Debug information object containing source mappings and metadata
+    for tracing transformations back to original source code
+    """
 
 
 @Pipeline
 def pipeline_frontend(fn, pipeline_report=Report.Sink()) -> FrontendOutput:
     """
-    Frontend code is all encapsulated in sealir.rvsdg.restructure_source
+    Transform a Python function into an RVSDG representation for compilation.
+
+    Args:
+        fn: Python function object to be compiled
+        pipeline_report: Reporting sink for debugging and visualization
+                         (optional)
+
+    Returns:
+        FrontendOutput: Dictionary containing the RVSDG expression and debug
+        info
+
+    Example:
+        >>> def my_func(x, y):
+        ...     return x + y * 2
+        >>> result = pipeline_frontend(my_func)
+        >>> # result['rvsdg_expr'] contains the data-flow representation
+        >>> # result['dbginfo'] contains source mapping information
     """
     with pipeline_report.nest("Frontend", default_expanded=True) as report:
         rvsdg_expr, dbginfo = rvsdg.restructure_source(fn)
@@ -80,9 +124,10 @@ def pipeline_frontend(fn, pipeline_report=Report.Sink()) -> FrontendOutput:
     return {"rvsdg_expr": rvsdg_expr, "dbginfo": dbginfo}
 
 
-# ## Simple Frontend Example
+# ### Simple Frontend Example
 #
-# Here's a simple function to illustrate the frontend
+# Here's a simple function that adds two numbers together and prints the
+# RVSDG-IR to illustrate the frontend:
 
 if __name__ == "__main__":
 
@@ -94,7 +139,7 @@ if __name__ == "__main__":
     print(rvsdg.format_rvsdg(cres.rvsdg_expr))
 
 
-# Alternatively use Report to display the results
+# Alternatively, use Report to display the results:
 
 if __name__ == "__main__":
     report = Report("Frontend", default_expanded=True)
@@ -113,6 +158,7 @@ if __name__ == "__main__":
 # ```
 #
 # The region has three input ports: `!io`, `x`, and `y`.
+#
 # Its output ports are `!io`, `!ret`, `x`, and `y`.
 #
 # Here, `!io` represents the state. Because Python functions are imperative,
@@ -135,11 +181,10 @@ if __name__ == "__main__":
 # specific port: `$0[0]` corresponds to `!io`, `$0[1]` to `x`, and `$0[2]` to
 # `y`.
 
-# ## Complex Frontend Example
+# ### Complex Frontend Example
 #
-# Below is a more intricate example that requires restructuring of the
-# control flow. This is due to the use of the `break` statement to exit a
-# for-loop.
+# Below is a more intricate example that requires restructuring of the control
+# flow. This is due to the use of the `break` statement to exit a for-loop.
 #
 # RVSDG enforces structured control flow. Only three types of control-flow
 # regions are permitted:
@@ -151,6 +196,10 @@ if __name__ == "__main__":
 if __name__ == "__main__":
 
     def exercise_frontend_loop_if_break(x, y):
+        """
+        Iterates from 0 to x-1, accumulates the sum in c, and breaks the loop
+        if i > y. Returns the accumulated sum.
+        """
         c = 0
         for i in range(x):
             if i > y:
@@ -164,22 +213,35 @@ if __name__ == "__main__":
     )
     report.display()
 
-# Observations from the RVSDG-IR above:
+# This example has the same input and output regions as the simple example:
+#
+# ```
+# $0 = Region[1350] <- !io x y
+# {
+#     ...
+# } [3602] -> !io=$50[0] !ret=$50[6]
+# ```
+#
+# But has many more Python binary operations within the function. Here are some
+# observations from the RVSDG-IR above:
 #
 # * The for-loop is restructured into a `Loop` composed of `If-Else` regions.
-# * The `Loop` region is tail-controlled; its first output port acts as the loop
-#   condition. See `!_loopcond_0002`.
+# * The `Loop` region is tail-controlled; its first output port acts as the
+#   loop condition. See `!_loopcond_0002`.
 # * An extra `If-Else` follows the loop to adjust the value of `i`.
 #
 # The beauty of the structured control-flow is that everything can be
-# encapsulated as a plain data-flow operation, including any region.
-# Everything is just an operation with some input and output ports.
-# This simplifies the rest of the compiler.
+# encapsulated as a plain data-flow operation, including any region. Everything
+# is just an operation with some input and output ports. This simplifies the
+# rest of the compiler.
 
 # ## Backend Implementation
 #
 # SealIR includes a lightweight LLVM backend that emits the Python C-API, which
-# executes the RVSDG-IR. The example below demonstrates how to use this backend
+# executes the RVSDG-IR. After creating our LLVM backend, we can JIT compile
+# and test.
+#
+# The example below demonstrates how to use this backend:
 
 
 def _determine_arity(root: ase.SExpr) -> int:
@@ -250,9 +312,9 @@ def backend(root, ns=builtins.__dict__, codegen_extension=None):
     return mod
 
 
-# ## JIT Compilation
+# ### JIT Compilation
 #
-# The following function takes a LLVM module and JIT compile it for execution:
+# The following function takes a LLVM module and JIT compiles it for execution:
 
 
 def jit_compile(mod, rvsdg_expr):
@@ -273,7 +335,7 @@ def jit_compile(mod, rvsdg_expr):
     return JitCallable.from_pointer(rt, ptr, arity)
 
 
-# ## Compiler Pipeline
+# ### Compiler Pipeline
 #
 # The following is a simple compiler pipeline:
 
@@ -302,7 +364,7 @@ def compiler_pipeline(llmod, rvsdg_expr) -> JITOutput:
     return {"jit_func": jit_func}
 
 
-# ## Testing Framework
+# ### Testing Framework
 #
 # Define a testing framework to verify compiler correctness.
 
@@ -324,13 +386,18 @@ def run_test(fn, jt, args, *, verbose=False, equal=lambda x, y: x == y):
 
 # ## Complete Example
 #
-# The following puts everything together. Running the frontend to generate
-# RVSDG-IR. Then, emitting LLVM using the backend. Finally, JIT'ing it into
-# executable code and verifying it.
+# The following puts everything from this chapter together. Running the
+# frontend to generate RVSDG-IR. Then, emitting LLVM using the backend.
+# Finally, JIT'ing it into executable code and verifying it.
+#
+# Let's use a modified version of our complex example function:
 
 if __name__ == "__main__":
 
     def sum_ints(n):
+        """
+        Iterates to n and returns the accumulated sum.
+        """
         c = 0
         for i in range(n):
             c += i
@@ -340,3 +407,18 @@ if __name__ == "__main__":
     jt = compiler_pipeline(fn=sum_ints, pipeline_report=report).jit_func
     report.display()
     run_test(sum_ints, jt, (12,), verbose=True)
+
+# The JIT output matches the expected output, confirming correctness. The
+# compilation pipeline generates structured reports containing frontend RVSDG-IR
+# and backend LLVM-IR.
+#
+# Pipeline analysis:
+#
+# - Each compilation stage outputs structured reports with tabbed organization
+#   for separation of concerns and debugging accessibility.
+# - LLVM generates control-flow graphs using basic blocks and branch
+#   instructions; RVSDG represents computation as structured dataflow regions
+#   with explicit I/O ports.
+# - Generated LLVM code implements all operations via Python C-API function
+#   calls, maintaining compatibility with Python's object model and garbage
+#   collector.
