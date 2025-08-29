@@ -901,8 +901,13 @@ format_rvsdg = partial(rvsdg.format_rvsdg, format_attrs=my_attr_format)
 class ExtendEGraphToRVSDG(EGraphToRVSDG):
     grammar = Grammar
 
-    def handle_region_attributes(self, key: str, grm: Grammar):
+    def is_type_from_egraph(self, node) -> bool:
+        op = node["op"]
+        if op.startswith("Type."):
+            return True
+        return False
 
+    def handle_region_attributes(self, key: str, grm: Grammar):
         def search_equiv_calls(self_key: str):
             nodes = self.gdct["nodes"]
             ecl = nodes[self_key]["eclass"]
@@ -915,8 +920,7 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
             typs = []
             for k, v in search_equiv_calls(key_arg):
                 for j in self.search_eclass_siblings(k):
-                    op = self.gdct["nodes"][j]["op"]
-                    if op.startswith("Type."):
+                    if self.is_type_from_egraph(self.gdct["nodes"][j]):
                         typ = self.dispatch(j, grm)
                         typs.append(typ)
             return typs
@@ -959,7 +963,6 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
     def handle_Type(
         self, key: str, op: str, children: dict | list, grm: Grammar
     ):
-        assert op == "Type.simple"
         match children:
             case {"name": name}:
                 return grm.write(NbOp_Type(name))
@@ -999,7 +1002,7 @@ class MyCostModel(CostModel):
             return self.get_simple(1)
         elif op.startswith("Py_"):
             # Penalize Python operations
-            return self.get_simple(float("inf"))
+            return self.get_simple(float("1e9"))
         elif op.startswith("Nb_"):
             return self.get_simple(cost)
         # Fallthrough to parent's cost function
