@@ -11,6 +11,8 @@ from ctypes.util import find_library
 import math as pymath
 
 _DEBUG = False
+_VERIFY = False
+_FUZZ = False
 
 class Backend:
     fn_counter = {}
@@ -27,8 +29,9 @@ class Backend:
             pass_man.enable_ir_printing()
 
         pass_man.add("convert-linalg-to-loops")
-        pass_man.add("convert-scf-to-cf")
         pass_man.add("expand-strided-metadata")
+        pass_man.add("lower-affine")
+        pass_man.add("convert-scf-to-cf")
         pass_man.add("finalize-memref-to-llvm")
         pass_man.add("convert-math-to-libm")
         pass_man.add("convert-func-to-llvm")
@@ -958,7 +961,7 @@ arr_div = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.div
 arr_broadcast = backend.gen_array_broadcast(module, softmax_ndim - 1, softmax_input_shape, broadcast_along=[softmax_ndim - 1])
 
 arr_transpose = backend.gen_array_transpose(module, 2)
-# arr_expand = backend.gen_array_expand_dims(module, 2, (0,))
+arr_expand = backend.gen_array_expand_dims(module, 2, (0,))
 arr_reshape_exp_1 = backend.gen_array_reshape(module, 2, (batch_size, dims, dims))
 arr_matmul = backend.gen_array_matmul(module, 3, None)
 arr_reshape = backend.gen_array_reshape(module, 3, (batch_size, seq_len, n_local_heads, head_dim))
@@ -967,7 +970,7 @@ arr_reshape_2 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, n_loc
 arr_take_0 = backend.gen_array_take(module, 5, 4, 0)
 arr_take_1 = backend.gen_array_take(module, 5, 4, 1)
 arr_reshape_3 = backend.gen_array_reshape(module, 5, (batch_size, seq_len, n_local_heads, head_dim // 2))
-# arr_expand_2 = backend.gen_array_expand_dims(module, 2, (0, 2))
+arr_expand_2 = backend.gen_array_expand_dims(module, 2, (0, 2))
 arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, n_local_heads, head_dim // 2), broadcast_along=[0, 2])
 arr_add = backend.gen_array_binary(module, 4, 4, arith.addf, None)
 arr_sub_1 = backend.gen_array_binary(module, 4, 4, arith.subf, None)
@@ -993,6 +996,56 @@ print("Generated MLIR:")
 print(str(module))
 print("\n" + "="*50 + "\n")
 
+if _VERIFY:
+    print("Running verification...")
+    from utils import MLIRVerifier
+
+    verifier = MLIRVerifier(module)
+
+    verifier.verify(
+        [   
+            "lower-affine",
+            "convert-linalg-to-loops",
+            "expand-strided-metadata",
+            "lower-affine",
+            "convert-scf-to-cf",
+            "finalize-memref-to-llvm",
+            "convert-math-to-libm",
+            "convert-func-to-llvm",
+            "convert-index-to-llvm",
+            "reconcile-unrealized-casts"
+        ],
+        "outs"
+    )
+
+
+if _FUZZ:
+    from utils import PassFuzzer
+    pass_manager = PassManager(context=module.context)
+
+    # TODO: Figure out why this is required, the weird string parse issue?
+    pass_manager.add("convert-linalg-to-loops")
+    pass_manager.run(module.operation)
+
+    passes = [
+            "convert-linalg-to-loops",
+            "expand-strided-metadata",
+            "convert-scf-to-cf",
+            "convert-math-to-libm",
+            "reconcile-unrealized-casts",
+            "finalize-memref-to-llvm",
+            "convert-func-to-llvm",
+            "convert-index-to-llvm",
+        ]
+    print("Fuzzing MLIR Passes...")
+
+    fuzzer = PassFuzzer(module, passes)
+
+    sequence = fuzzer.find_effective_pass_sequence()
+
+    print("Effective Pass Sequence:")
+    print(sequence)
+
 backend.run_passes(module)
 
 print("After lowering to LLVM:")
@@ -1010,7 +1063,7 @@ arr_div = backend.jit_compile(module, arr_div, (softmax_input_shape, softmax_inp
 arr_broadcast = backend.jit_compile(module, arr_broadcast, (softmax_input_shape[:-1],), (softmax_input_shape,))
 
 arr_transpose = backend.jit_compile(module, arr_transpose, ((dims, dims),), ((dims, dims),))
-# arr_expand = backend.jit_compile(module, arr_expand, ((dims, dims),), ((batch_size, dims, dims),))
+arr_expand = backend.jit_compile(module, arr_expand, ((dims, dims),), ((batch_size, dims, dims),))
 arr_reshape_exp_1 = backend.jit_compile(module, arr_reshape_exp_1, ((dims, dims),), ((batch_size, dims, dims),))
 arr_matmul = backend.jit_compile(module, arr_matmul, ((batch_size, seq_len, dims), (batch_size, dims, dims)), ((batch_size, seq_len, dims),))
 arr_reshape = backend.jit_compile(module, arr_reshape, ((batch_size, seq_len, dims),), ((batch_size, seq_len, n_local_heads, head_dim),))
@@ -1019,7 +1072,7 @@ arr_reshape_2 = backend.jit_compile(module, arr_reshape_2, ((batch_size, seq_len
 arr_take_0 = backend.jit_compile(module, arr_take_0, ((batch_size, seq_len, n_local_heads, head_dim // 2, 2),), ((batch_size, seq_len, n_local_heads, head_dim // 2, 1),), shared_libs=[find_library(x) for x in shared_libs])
 arr_take_1 = backend.jit_compile(module, arr_take_1, ((batch_size, seq_len, n_local_heads, head_dim // 2, 2),), ((batch_size, seq_len, n_local_heads, head_dim // 2, 1),), shared_libs=[find_library(x) for x in shared_libs])
 arr_reshape_3 = backend.jit_compile(module, arr_reshape_3, ((batch_size, seq_len, n_local_heads, head_dim // 2, 1),), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
-# arr_expand_2 = backend.jit_compile(module, arr_expand, ((dims, dims),), ((batch_size, dims, dims),))
+arr_expand_2 = backend.jit_compile(module, arr_expand_2, ((dims, dims),), ((batch_size, dims, dims),))
 arr_broadcast_2 = backend.jit_compile(module, arr_broadcast_2, ((seq_len, head_dim // 2),), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
 arr_mul = backend.jit_compile(module, arr_mul, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
 arr_sub_1 = backend.jit_compile(module, arr_sub_1, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
