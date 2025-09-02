@@ -50,6 +50,7 @@ from egglog import (
     set_,
     subsume,
     union,
+    method,
 )
 from llvmlite import ir
 from sealir.eqsat.py_eqsat import (
@@ -124,6 +125,7 @@ class DataLayout(Expr):
 
 
 class ArrayDesc(Expr):
+    @method(cost=10000)
     def __init__(self, uid: StringLike): ...
 
     @property
@@ -608,7 +610,7 @@ def ruleset_broadcasting(
         nd > y.ndim,
         nd_diff == nd - y.ndim,
     ).then(
-        subsume(bc),
+        # subsume(bc),
         union(z).with_(Broadcast(x, ArrayAddDim(y, nd_diff))),
     )
 

@@ -4,7 +4,7 @@ from pprint import pprint
 from types import FunctionType
 
 from ch04_1_typeinfer_ifelse import Type, TypeFloat64, TypeVar
-from ch05_typeinfer_array import ArrayDesc, Broadcast, Dim
+from ch05_typeinfer_array import ArrayDesc, Broadcast, Dim, ruleset_broadcasting
 from ch05_typeinfer_array import (
     ExtendEGraphToRVSDG as _ch05_ExtendEGraphToRVSDG,
 )
@@ -17,7 +17,7 @@ from ch05_typeinfer_array import (
     base_ruleset,
 )
 from ch05_typeinfer_array import compiler_config as _compiler_config
-from ch05_typeinfer_array import jit_compiler, setup_argtypes
+from ch05_typeinfer_array import jit_compiler, setup_argtypes, DataLayout
 from ch09_whole_program_compiler_driver import CallGraphVisitor
 from egglog import (
     Bool,
@@ -50,9 +50,14 @@ from sealir.eqsat.py_eqsat import (
 from sealir.eqsat.py_eqsat import make_rules as py_eqsat_rules
 from sealir.eqsat.rvsdg_eqsat import Term, TermDict, TermList, termlist
 from sealir.rvsdg.grammar import SExpr
+import sealir.rvsdg.grammar as rg
+from sealir import ase
 from utils import Report
 
-source_filename = "llm.py"
+from pathlib import Path
+import os.path
+
+source_filename = Path(os.path.dirname(__file__)) / "llm.py"
 with open(source_filename, "r") as fin:
     source_code = fin.read()
 
@@ -178,6 +183,7 @@ def ruleset_ufunc_reduce_array_desc(
     idx: i64,
     dim: Dim,
 ):
+    from egglog import panic, delete, ne
     # get_ufunc_reduce_array_desc
     yield rule(
         out_array == get_ufunc_reduce_array_desc(in_array, axis, keepdims),
@@ -201,7 +207,6 @@ def ruleset_ufunc_reduce_array_desc(
         _array_dims_reduce_axis_keepdims(
             in_array, out_array, ndim + axis, ndim, idx
         ),
-        subsume(target),
     )
     #   out_dim[idx]=in_dim[idx] if idx != axis
     yield rule(
@@ -209,6 +214,8 @@ def ruleset_ufunc_reduce_array_desc(
         0 <= idx,
         idx < ndim,
         idx != axis,
+        axis >= 0,  # normalized
+        axis < ndim, # valid
     ).then(
         union(out_array.dim(idx)).with_(in_array.dim(idx)),
     )
@@ -291,6 +298,7 @@ class NumPyRules:
         res = var("res", Term)
         lhs_arraydesc = var("lhs_arraydesc", ArrayDesc)
         rhs_arraydesc = var("rhs_arraydesc", ArrayDesc)
+        res_arraydesc = var("res_arraydesc", ArrayDesc)
         arg_vector = var("arg_vector", Vec[Term])
 
         the_call = Py_Call(
@@ -316,6 +324,18 @@ class NumPyRules:
             set_(TypeVar(res).getType()).to(
                 Broadcast(lhs_arraydesc, rhs_arraydesc).toType()
             )
+        )
+        yield rule(
+            res == op_constructor(lhs, rhs),
+            lhs_arraydesc.toType() == TypeVar(lhs).getType(),
+            rhs_arraydesc.toType() == TypeVar(rhs).getType(),
+            res_arraydesc.toType() == TypeVar(res).getType(),
+            # if the dtype matches TODO: fix type promotion
+            lhs_arraydesc.dtype == rhs_arraydesc.dtype,
+        ).then(
+            # set dtype
+            set_(res_arraydesc.dtype).to(lhs_arraydesc.dtype),
+            set_(res_arraydesc.dataLayout).to(DataLayout.strided()),  # TODO improve this
         )
 
     @staticmethod
@@ -427,6 +447,60 @@ module_rulesets = (
     | ruleset_numpy_promote_binop
 )
 
+######################################
+# Explain array desc
+
+
+
+class ArrayShapeBuilder(Expr):
+    def __init__(self): ...
+    def to_append(self, ad: ArrayDesc, start: i64Like, nd: i64Like) -> "ArrayShapeBuilder": ...
+    def append(self, dim: Dim) -> "ArrayShapeBuilder": ...
+    def end(self) -> "ArrayShapeBuilder": ...
+
+@function(cost=0)
+def ArrayType(ndim: i64Like, dtype: Type, shape: ArrayShapeBuilder, layout: DataLayout) -> ArrayDesc:
+    ...
+
+@ruleset
+def ruleset_explain_array_desc(ad: ArrayDesc, ndim: i64, dtype: Type, asb: ArrayShapeBuilder, dim: Dim, idx: i64,
+                               layout: DataLayout):
+    yield rule(
+        ndim == ad.ndim,
+        dtype == ad.dtype,
+        layout == ad.dataLayout,
+    ).then(
+        union(ad).with_(ArrayType(
+            ndim=ndim, dtype=dtype,
+            shape=ArrayShapeBuilder().to_append(ad, 0, ndim),
+            layout=layout,
+        ))
+    )
+
+    yield rewrite(
+        asb.to_append(ad, idx, ndim)
+    ).to(
+        asb.append(dim).to_append(ad, idx + 1, ndim),
+        dim == ad.dim(idx),
+        idx < ndim,
+    )
+    yield rewrite(
+        asb.to_append(ad, ndim, ndim)
+    ).to(
+        asb.end()
+    )
+
+class Annotate(Expr):
+    def __init__(self, term: Term, ty: Type): ...
+
+@ruleset
+def ruleset_typevar_annotate(term: Term, tv: TypeVar, typ: Type):
+    yield rule(
+        typ == TypeVar(term).getType(),
+    ).then(
+        Annotate(term, typ)
+    )
+
 
 #######################################
 # Extra operator rules
@@ -488,7 +562,7 @@ class ExtendEGraphToRVSDG(_ch05_ExtendEGraphToRVSDG):
             assert isinstance(children, dict)
             return grm.write(
                 LLM_generic(
-                    desc=op + "{" + f"{', '.join(children)}" + "}",
+                    desc=op + f"<{', '.join(children)}>",
                     operands=tuple(children.values()),
                 )
             )
@@ -497,13 +571,7 @@ class ExtendEGraphToRVSDG(_ch05_ExtendEGraphToRVSDG):
     def is_type_from_egraph(self, node) -> bool:
         return node["op"] == "·.toType"
 
-    def handle_ArrayDesc(
-        self, key: str, op: str, children: dict | list, grm: Grammar
-    ):
-        assert isinstance(children, dict)
-        return grm.write(
-            LLM_Type(name=str(op), children=tuple(children.values()))
-        )
+
 
     def handle_Type(
         self, key: str, op: str, children: dict | list, grm: Grammar
@@ -512,25 +580,111 @@ class ExtendEGraphToRVSDG(_ch05_ExtendEGraphToRVSDG):
             return super().handle_Type(key, op, children, grm)
         except NotImplementedError:
             assert isinstance(children, dict)
-            return grm.write(
-                LLM_Type(name=op, children=tuple(children.values()))
-            )
+            return self.handle_generic(key, op, children, grm)
 
+    def handle_generic(
+        self, key: str, op: str, children: dict | list, grm: Grammar
+    ):
+        assert isinstance(children, dict)
+        return super().handle_generic(str, op, children, grm)
+
+    handle_ArrayDesc = handle_generic
+    handle_Dim = handle_generic
+    handle_TypedOuts = handle_generic
+    handle_TypedIns = handle_generic
+    handle_TypeVar = handle_generic
+    handle_Module = handle_generic
+    handle_ErrorMsg = handle_generic
+    handle_DataLayout = handle_generic
+    handle_Annotate = handle_generic
+    handle_ArrayShapeBuilder = handle_generic
 
 compiler_config = _compiler_config.copy()
 compiler_config["converter_class"] = ExtendEGraphToRVSDG
 
+
+class TypeSpeller(ase.TreeVisitor):
+
+    def __init__(self):
+        self.memo = {}
+
+    def visit(self, expr: SExpr):
+        from ch04_1_typeinfer_ifelse import NbOp_Type
+        memo = self.memo
+        match expr:
+            case rg.Generic(op, children):
+                memo[expr] = r = self.visit_Generic(op, tuple(map(lambda x: memo.get(x, x), children)))
+                assert r is not None
+            case NbOp_Type(str(name)):
+                memo[expr] = name
+            case _:
+                print("HAR?", ase.pretty_str(expr), type(expr))
+                return None
+        return expr
+
+    def visit_Generic(self, op, children):
+        match op, children:
+            case "ArrayShapeBuilder", ():
+                return ()
+            case 'Dim.symbolic', (name,):
+                return name
+            case '·.append', (asb, dim):
+                return asb + (dim,)
+            case '·.end', (asb,):
+                return asb
+            case 'DataLayout.strided', ():
+                return 'A'
+            case 'DataLayout.c_contiguous', ():
+                return 'C'
+            case 'ArrayType', (*args,):
+                return f'ArrayType({args})'
+            case '·.toType', (ad,):
+                return ad
+            case _:
+                raise ValueError(f"{op} {children}")
+
+
+    @classmethod
+    def apply(cls, expr: SExpr):
+        visitor = cls()
+        ase.apply_bottomup(expr, visitor, reachable="compute")
+        return visitor.memo[expr]
 
 class StubBackend:
     def lower(self, root, argtypes):
         from ch04_1_typeinfer_ifelse import Attributes
         from sealir.rvsdg import format_rvsdg
 
-        fname = root.fname
-        attrs = Attributes(root.body.begin.attrs)
-        retty = attrs.get_return_type(root.body)
+        [func] = [child for child in root._args
+                  if isinstance(child, rg.Func)]
+
+        # root._tape.render_dot(only_reachable=True).view()
+
+        fname = func.fname
+        beginnode = func.body.begin
+        from sealir import ase
+        intypes = {}
+        for argport in ase.search_parents(beginnode, lambda x: isinstance(x, rg.Unpack)):
+            print('   .parent', argport)
+            idx = argport._args[1]
+            annos = list(ase.search_parents(argport, lambda x: isinstance(x, rg.Generic) and x._args[0]=='Annotate'))
+            if annos:
+                intypes[idx] = TypeSpeller.apply(annos[0]._args[2])
+        print(intypes)
+
+        # outtypes
+        outtypes = {}
+        for port in func.body.ports:
+
+            annos = list(ase.search_parents(port.value, lambda x: isinstance(x, rg.Generic) and x._args[0]=='Annotate'))
+            if annos:
+                outtypes[port.name] = TypeSpeller.apply(annos[0]._args[2])
+        retty = outtypes['!ret']
+
+        # attrs = Attributes(func.body.begin.attrs)
+        # retty = attrs.get_return_type(func.body)
         print("RETURN TYPE", argtypes, "->", retty)
-        return format_rvsdg(root)
+        return format_rvsdg(func)
 
     def jit_compile(self, module, extracted, export_name):
         return module  # TODO
@@ -546,19 +700,23 @@ try:
         ruleset=(
             base_ruleset
             | py_eqsat_rules()
+            | ruleset_broadcasting
             | setup_argtypes(array_x_desc.toType())
             | ruleset_array_facts
             | module_rules
             | module_rulesets
             | ruleset_extra_builtin_operations
             | ruleset_ufunc_reduce_array_desc
+            | ruleset_explain_array_desc
+            | ruleset_typevar_annotate
         ),
         pipeline_report=report,
-        pipeline_debug=True,
+        pipeline_debug=False,
         **compiler_config,
     )
 finally:
     pass
+    # print(report.display())
     # report.display(view_html=True)
 
 print("OUTPUT".center(80, "-"))

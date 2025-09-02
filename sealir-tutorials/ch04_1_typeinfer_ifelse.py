@@ -441,13 +441,13 @@ def ruleset_region_types(
         union(TypeVar(term)).with_(typ),
     )
 
-    yield rule(
-        # Outputs
-        term == Term.RegionEnd(region=region, ports=portlist),
-        pv := portlist.getValue(idx),
-    ).then(
-        union(TypedOuts(region).at(idx)).with_(TypeVar(pv)),
-    )
+    # yield rule(
+    #     # Outputs
+    #     term == Term.RegionEnd(region=region, ports=portlist),
+    #     pv := portlist.getValue(idx),
+    # ).then(
+    #     union(TypedOuts(region).at(idx)).with_(TypeVar(pv)),
+    # )
 
 
 if __name__ == "__main__":
@@ -521,7 +521,8 @@ def egraph_saturation_with_error_checking(
             report.append("[debug] initial egraph", egraph)
 
         # Run all the rules until saturation
-        egraph.run(ruleset.saturate())
+        runreport = egraph.run(ruleset.saturate())
+        report.append("saturation report", runreport.updated)
 
         if pipeline_debug:
             report.append("[debug] saturated egraph", egraph)
@@ -555,6 +556,7 @@ def pipeline_egraph_extraction(
     with pipeline_report.nest(
         "EGraph Extraction", default_expanded=True
     ) as report:
+        stats = {}
         try:
             # This is the same as ch4.1
             cost, extracted = egraph_extraction(
@@ -562,12 +564,18 @@ def pipeline_egraph_extraction(
                 rvsdg_expr,
                 converter_class=converter_class,
                 cost_model=cost_model,
+                stats = stats,
             )
         except ExtractionError as e:
             raise CompilationError("extraction failed") from e
 
-        report.append("Extracted RVSDG", format_rvsdg(extracted))
+        report.append("Extraction stats", stats)
         report.append("Extracted cost", cost)
+        for i, child in enumerate(extracted._args):
+            if isinstance(child, rg.Func):
+                report.append(f"Extracted[{i}] Func", format_rvsdg(child))
+            else:
+                report.append(f"Extracted[{i}] {child._head}", ase.pretty_str(child))
 
     return dict(cost=cost, extracted=extracted)
 
@@ -907,58 +915,58 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
             return True
         return False
 
-    def handle_region_attributes(self, key: str, grm: Grammar):
-        def search_equiv_calls(self_key: str):
-            nodes = self.gdct["nodes"]
-            ecl = nodes[self_key]["eclass"]
-            for k, v in nodes.items():
-                children = v["children"]
-                if children and nodes[children[0]]["eclass"] == ecl:
-                    yield k, v
+    # def handle_region_attributes(self, key: str, grm: Grammar):
+    #     def search_equiv_calls(self_key: str):
+    #         nodes = self.gdct["nodes"]
+    #         ecl = nodes[self_key]["eclass"]
+    #         for k, v in nodes.items():
+    #             children = v["children"]
+    #             if children and nodes[children[0]]["eclass"] == ecl:
+    #                 yield k, v
 
-        def get_types(key_arg):
-            typs = []
-            for k, v in search_equiv_calls(key_arg):
-                for j in self.search_eclass_siblings(k):
-                    if self.is_type_from_egraph(self.gdct["nodes"][j]):
-                        typ = self.dispatch(j, grm)
-                        typs.append(typ)
-            return typs
+    #     def get_types(key_arg):
+    #         typs = []
+    #         for k, v in search_equiv_calls(key_arg):
+    #             for j in self.search_eclass_siblings(k):
+    #                 if self.is_type_from_egraph(self.gdct["nodes"][j]):
+    #                     typ = self.dispatch(j, grm)
+    #                     typs.append(typ)
+    #         return typs
 
-        attrs = []
-        typedargs = list(self.search_calls(key, "TypedIns"))
-        if typedargs:
-            [typedarg] = typedargs
-            for key_arg in self.search_method_calls(typedarg, "arg"):
-                _k_self, k_idx = self.get_children(key_arg)
-                # get the idx in `.arg(idx)`
-                idx = self.dispatch(k_idx, grm)
-                typs = get_types(key_arg)
+    #     attrs = []
+    #     typedargs = list(self.search_calls(key, "TypedIns"))
+    #     if typedargs:
+    #         [typedarg] = typedargs
+    #         for key_arg in self.search_method_calls(typedarg, "arg"):
+    #             _k_self, k_idx = self.get_children(key_arg)
+    #             # get the idx in `.arg(idx)`
+    #             idx = self.dispatch(k_idx, grm)
+    #             typs = get_types(key_arg)
 
-                if len(typs) == 1:
-                    typ = typs[0]
-                    attrs.append(grm.write(NbOp_InTypeAttr(idx=idx, type=typ)))
-                else:
-                    resolved = list(map(ase.pretty_str, typs))
-                    assert len(typs) == 0, f"multiple types: {resolved}"
+    #             if len(typs) == 1:
+    #                 typ = typs[0]
+    #                 attrs.append(grm.write(NbOp_InTypeAttr(idx=idx, type=typ)))
+    #             else:
+    #                 resolved = list(map(ase.pretty_str, typs))
+    #                 assert len(typs) == 0, f"multiple types: {resolved}"
 
-        typedouts = list(self.search_calls(key, "TypedOuts"))
-        if typedouts:
-            [typedout] = typedouts
-            for key_at in self.search_method_calls(typedout, "at"):
-                _k_self, k_idx = self.get_children(key_at)
-                idx = self.dispatch(k_idx, grm)
+    #     typedouts = list(self.search_calls(key, "TypedOuts"))
+    #     if typedouts:
+    #         [typedout] = typedouts
+    #         for key_at in self.search_method_calls(typedout, "at"):
+    #             _k_self, k_idx = self.get_children(key_at)
+    #             idx = self.dispatch(k_idx, grm)
 
-                typs = get_types(key_at)
-                if len(typs) == 1:
-                    typ = typs[0]
-                    attrs.append(
-                        grm.write(NbOp_OutTypeAttr(idx=idx, type=typ))
-                    )
-                else:
-                    assert len(typs) == 0, "multiple types"
+    #             typs = get_types(key_at)
+    #             if len(typs) == 1:
+    #                 typ = typs[0]
+    #                 attrs.append(
+    #                     grm.write(NbOp_OutTypeAttr(idx=idx, type=typ))
+    #                 )
+    #             else:
+    #                 assert len(typs) == 0, "multiple types"
 
-        return grm.write(rg.Attrs(tuple(attrs)))
+    #     return grm.write(rg.Attrs(tuple(attrs)))
 
     def handle_Type(
         self, key: str, op: str, children: dict | list, grm: Grammar
@@ -1005,6 +1013,8 @@ class MyCostModel(CostModel):
             return self.get_simple(float("1e9"))
         elif op.startswith("Nb_"):
             return self.get_simple(cost)
+        elif op == "ArrayDescSpec":
+            return self.get_simple(1)
         # Fallthrough to parent's cost function
         return super().get_cost_function(nodename, op, ty, cost, children)
 
