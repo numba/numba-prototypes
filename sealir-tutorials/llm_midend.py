@@ -1,3 +1,4 @@
+from __future__ import annotations
 import operator
 from functools import reduce
 from pprint import pprint
@@ -7,6 +8,7 @@ from ch04_1_typeinfer_ifelse import Type, TypeFloat64, TypeVar
 from ch05_typeinfer_array import ArrayDesc, Broadcast, Dim, ruleset_broadcasting
 from ch05_typeinfer_array import (
     ExtendEGraphToRVSDG as _ch05_ExtendEGraphToRVSDG,
+    MyCostModel as _ch05_MyCostModel,
 )
 from ch05_typeinfer_array import (
     Grammar,
@@ -37,6 +39,7 @@ from egglog import (
     subsume,
     union,
     var,
+    method,
 )
 from sealir.eqsat.py_eqsat import (
     Py_AttrIO,
@@ -52,6 +55,7 @@ from sealir.eqsat.rvsdg_eqsat import Term, TermDict, TermList, termlist
 from sealir.rvsdg.grammar import SExpr
 import sealir.rvsdg.grammar as rg
 from sealir import ase
+from sealir.rvsdg import format_rvsdg
 from utils import Report
 
 from pathlib import Path
@@ -137,24 +141,40 @@ module_rules = ruleset(*make_module_fact_ruleset(cgv.imported))
 # Install numpy function rules
 
 
-@function
+@function(cost=1000)
 def NpyOp_Sum(operand: Term, axis: i64Like, keepdims: BoolLike) -> Term: ...
 
-
 @function
+def NpyOp_Sum_Shaped(operand: Term, axis: i64Like, keepdims: BoolLike, outshape: Shape) -> Term: ...
+
+
+@function(cost=1000)
 def NpyOp_Max(operand: Term, axis: i64Like, keepdims: BoolLike) -> Term: ...
 
-
 @function
+def NpyOp_Max_Shaped(operand: Term, axis: i64Like, keepdims: BoolLike, outshape: Shape) -> Term: ...
+
+
+@function(cost=1000)
 def NpyOp_Exp(operand: Term) -> Term: ...
 
-
 @function
+def NpyOp_Exp_Shaped(operand: Term, outshape: Shape) -> Term: ...
+
+
+@function(cost=1000)
 def NpyOp_Subtract(lhs: Term, rhs: Term) -> Term: ...
 
 
 @function
+def NpyOp_Subtract_Shaped(lhs: Term, rhs: Term, outshape: Shape) -> Term: ...
+
+
+@function(cost=1000)
 def NpyOp_Divide(lhs: Term, rhs: Term) -> Term: ...
+
+@function
+def NpyOp_Divide_Shaped(lhs: Term, rhs: Term, outshape: Shape) -> Term: ...
 
 
 @function
@@ -163,14 +183,6 @@ def get_ufunc_reduce_array_desc(
 ) -> ArrayDesc: ...
 
 
-@function
-def _array_dims_reduce_axis_keepdims(
-    in_array: ArrayDesc,
-    out_array: ArrayDesc,
-    axis: i64Like,
-    ndim: i64Like,
-    i: i64Like,
-) -> Unit: ...
 
 
 @ruleset
@@ -183,7 +195,23 @@ def ruleset_ufunc_reduce_array_desc(
     idx: i64,
     dim: Dim,
 ):
-    from egglog import panic, delete, ne
+    @function
+    def _ad_reduce_keepdims_not_normed(
+        in_array: ArrayDesc,
+        out_array: ArrayDesc,
+        axis: i64Like,
+        ndim: i64Like,
+    ) -> Unit: ...
+
+    @function
+    def _ad_reduce_keepdims(
+        in_array: ArrayDesc,
+        out_array: ArrayDesc,
+        axis: i64Like,
+        ndim: i64Like,
+        i: i64Like,
+    ) -> Unit: ...
+
     # get_ufunc_reduce_array_desc
     yield rule(
         out_array == get_ufunc_reduce_array_desc(in_array, axis, keepdims),
@@ -193,48 +221,59 @@ def ruleset_ufunc_reduce_array_desc(
         set_(out_array.dataLayout).to(in_array.dataLayout),
         set_(out_array.ndim).to(ndim),
         set_(out_array.dtype).to(in_array.dtype),
-        _array_dims_reduce_axis_keepdims(in_array, out_array, axis, ndim, 0),
+        _ad_reduce_keepdims_not_normed(in_array, out_array, axis, ndim),
     )
 
-    # _array_dims_reduce_axis_keepdims
+    # _ad_reduce_keepdims_not_normed
     #   normalize axis
-    yield rule(
-        target := _array_dims_reduce_axis_keepdims(
-            in_array, out_array, axis, ndim, idx
+    yield rewrite(
+        _ad_reduce_keepdims_not_normed(
+            in_array, out_array, axis, ndim
+        ),
+        subsume=True,
+    ).to(
+        _ad_reduce_keepdims(
+            in_array, out_array, ndim + axis, ndim, 0
         ),
         axis < i64(0),
-    ).then(
-        _array_dims_reduce_axis_keepdims(
-            in_array, out_array, ndim + axis, ndim, idx
+    )
+    yield rewrite(
+        _ad_reduce_keepdims_not_normed(
+            in_array, out_array, axis, ndim
         ),
+        subsume=True,
+    ).to(
+        _ad_reduce_keepdims(
+            in_array, out_array, axis, ndim, 0
+        ),
+        axis >= i64(0),
     )
     #   out_dim[idx]=in_dim[idx] if idx != axis
     yield rule(
-        _array_dims_reduce_axis_keepdims(in_array, out_array, axis, ndim, idx),
+        _ad_reduce_keepdims(in_array, out_array, axis, ndim, idx),
         0 <= idx,
         idx < ndim,
         idx != axis,
-        axis >= 0,  # normalized
         axis < ndim, # valid
     ).then(
         union(out_array.dim(idx)).with_(in_array.dim(idx)),
     )
     #   out_dim[idx]=1 if idx == axis
     yield rule(
-        _array_dims_reduce_axis_keepdims(in_array, out_array, axis, ndim, idx),
+        _ad_reduce_keepdims(in_array, out_array, axis, ndim, idx),
         0 <= idx,
         idx < ndim,
-        idx != axis,
+        idx == axis,
     ).then(
         union(out_array.dim(idx)).with_(Dim.fixed(1)),
     )
     #  idx+=1
     yield rule(
-        _array_dims_reduce_axis_keepdims(in_array, out_array, axis, ndim, idx),
+        _ad_reduce_keepdims(in_array, out_array, axis, ndim, idx),
         0 <= idx,
         idx < ndim - 1,
     ).then(
-        _array_dims_reduce_axis_keepdims(
+        _ad_reduce_keepdims(
             in_array, out_array, axis, ndim, idx + 1
         ),
     )
@@ -243,12 +282,27 @@ def ruleset_ufunc_reduce_array_desc(
 @function
 def DEBUG(operand: Term) -> Term: ...
 
+class Shape(Expr):
+    @classmethod
+    def from_list(cls, shape: Vec[Dim]) -> Shape: ...
+
+    @classmethod
+    def from_arraydesc(cls, ad: ArrayDesc) -> Shape: ...
+
+    @method(cost=1000)
+    def __init__(self): ...
+
+    def to_append(self, ad: ArrayDesc, start: i64Like, nd: i64Like) -> Shape: ...
+
+    def append(self, dim: Dim) -> Shape: ...
+
+
 
 class NumPyRules:
     module_name = "numpy"
 
     @staticmethod
-    def _make_reduce_op_rules(op_name: str, op_constructor):
+    def _make_reduce_op_rules(op_name: str, op_constructor, op_con_special=None):
         """
         Common logic for numpy reduce operations (max, sum, etc.) that handle
         keepdims and axis parameters.
@@ -261,6 +315,9 @@ class NumPyRules:
 
         intype = var("intype", Type)
         arrdesc = var("arrdesc", ArrayDesc)
+        shape = var("shape", Shape)
+
+        nd = var("nd", i64)
 
         callee = Py_CallKwargs(
             func=npy_reduce(op_name), io=io, args=args, kwargs=kwargs
@@ -289,9 +346,26 @@ class NumPyRules:
                 ).toType()
             )
         )
+        # make it shape specialized
+        if op_con_special is not None:
+            yield rule(
+                res == op_constructor(obj, axis=axis_val, keepdims=keepdims_val),
+                arrdesc.toType() == TypeVar(res).getType(),
+                nd == arrdesc.ndim,
+                shape == Shape().to_append(arrdesc, 0, nd)
+            ).then(
+                union(res).with_(
+                    op_con_special(
+                        obj,
+                        axis=axis_val,
+                        keepdims=keepdims_val,
+                        outshape=Shape.from_arraydesc(arrdesc),
+                    )
+                )
+            )
 
     @staticmethod
-    def _make_binary_rules(op_name: str, op_constructor):
+    def _make_binary_rules(op_name: str, op_constructor, op_con_special=None):
         io = var("io", Term)
         lhs = var("lhs", Term)
         rhs = var("rhs", Term)
@@ -300,6 +374,8 @@ class NumPyRules:
         rhs_arraydesc = var("rhs_arraydesc", ArrayDesc)
         res_arraydesc = var("res_arraydesc", ArrayDesc)
         arg_vector = var("arg_vector", Vec[Term])
+        nd = var("nd", i64)
+        shape = var("shape", Shape)
 
         the_call = Py_Call(
             func=npy_binary_ufunc(op_name),
@@ -337,14 +413,32 @@ class NumPyRules:
             set_(res_arraydesc.dtype).to(lhs_arraydesc.dtype),
             set_(res_arraydesc.dataLayout).to(DataLayout.strided()),  # TODO improve this
         )
+        if op_con_special is not None:
+            yield rule(
+                res == op_constructor(lhs, rhs),
+                res_arraydesc.toType() == TypeVar(res).getType(),
+                nd == res_arraydesc.ndim,
+                shape == Shape().to_append(res_arraydesc, 0, nd)
+            ).then(
+                union(res).with_(
+                    op_con_special(
+                        lhs, rhs,
+                        outshape=Shape.from_arraydesc(res_arraydesc),
+                    )
+                )
+            )
+
 
     @staticmethod
-    def _make_unary_rules(op_name: str, op_constructor):
+    def _make_unary_rules(op_name: str, op_constructor, op_con_special=None):
         io = var("io", Term)
         operand = var("operand", Term)
         res = var("res", Term)
         operand_arraydesc = var("operand_arraydesc", ArrayDesc)
+        res_arraydesc = var("res_arraydesc", ArrayDesc)
         arg_vector = var("arg_vector", Vec[Term])
+        nd = var("nd", i64)
+        shape = var("shape", Shape)
 
         the_call = Py_Call(
             func=npy_unary_ufunc(op_name),
@@ -365,30 +459,44 @@ class NumPyRules:
             operand_arraydesc.toType() == TypeVar(operand).getType(),
         ).then(set_(TypeVar(res).getType()).to(operand_arraydesc.toType()))
 
+        if op_con_special is not None:
+            yield rule(
+                res == op_constructor(operand),
+                res_arraydesc.toType() == TypeVar(res).getType(),
+                nd == res_arraydesc.ndim,
+                shape == Shape().to_append(res_arraydesc, 0, nd)
+            ).then(
+                union(res).with_(
+                    op_con_special(
+                        operand,
+                        outshape=Shape.from_arraydesc(res_arraydesc),
+                    )
+                )
+            )
     @staticmethod
     def exp(orig: Term):
         yield rewrite(orig, subsume=True).to(npy_unary_ufunc("exp"))
-        yield from NumPyRules._make_unary_rules("exp", NpyOp_Exp)
+        yield from NumPyRules._make_unary_rules("exp", NpyOp_Exp, NpyOp_Exp_Shaped)
 
     @staticmethod
     def max(orig: Term):
         yield rewrite(orig, subsume=True).to(npy_reduce("max"))
-        yield from NumPyRules._make_reduce_op_rules("max", NpyOp_Max)
+        yield from NumPyRules._make_reduce_op_rules("max", NpyOp_Max, NpyOp_Max_Shaped)
 
     @staticmethod
     def sum(orig: Term):
         yield rewrite(orig, subsume=True).to(npy_reduce("sum"))
-        yield from NumPyRules._make_reduce_op_rules("sum", NpyOp_Sum)
+        yield from NumPyRules._make_reduce_op_rules("sum", NpyOp_Sum, NpyOp_Sum_Shaped)
 
     @staticmethod
     def subtract(orig: Term):
         yield rewrite(orig, subsume=True).to(npy_binary_ufunc("subtract"))
-        yield from NumPyRules._make_binary_rules("subtract", NpyOp_Subtract)
+        yield from NumPyRules._make_binary_rules("subtract", NpyOp_Subtract, NpyOp_Subtract_Shaped)
 
     @staticmethod
     def divide(orig: Term):
         yield rewrite(orig, subsume=True).to(npy_binary_ufunc("divide"))
-        yield from NumPyRules._make_binary_rules("divide", NpyOp_Divide)
+        yield from NumPyRules._make_binary_rules("divide", NpyOp_Divide, NpyOp_Divide_Shaped)
 
 
 @ruleset
@@ -452,19 +560,14 @@ module_rulesets = (
 
 
 
-class ArrayShapeBuilder(Expr):
-    def __init__(self): ...
-    def to_append(self, ad: ArrayDesc, start: i64Like, nd: i64Like) -> "ArrayShapeBuilder": ...
-    def append(self, dim: Dim) -> "ArrayShapeBuilder": ...
-    def end(self) -> "ArrayShapeBuilder": ...
-
-@function(cost=0)
-def ArrayType(ndim: i64Like, dtype: Type, shape: ArrayShapeBuilder, layout: DataLayout) -> ArrayDesc:
+@function(cost=1)
+def ArrayType(ndim: i64Like, dtype: Type, shape: Shape, layout: DataLayout) -> ArrayDesc:
     ...
 
 @ruleset
-def ruleset_explain_array_desc(ad: ArrayDesc, ndim: i64, dtype: Type, asb: ArrayShapeBuilder, dim: Dim, idx: i64,
-                               layout: DataLayout):
+def ruleset_explain_array_desc(ad: ArrayDesc, ndim: i64, dtype: Type, shape: Shape, dim: Dim, idx: i64,
+                               layout: DataLayout, dimVec: Vec[Dim], dimVec2: Vec[Dim]):
+    # ArrayType spelling
     yield rule(
         ndim == ad.ndim,
         dtype == ad.dtype,
@@ -472,23 +575,37 @@ def ruleset_explain_array_desc(ad: ArrayDesc, ndim: i64, dtype: Type, asb: Array
     ).then(
         union(ad).with_(ArrayType(
             ndim=ndim, dtype=dtype,
-            shape=ArrayShapeBuilder().to_append(ad, 0, ndim),
+            shape=Shape().to_append(ad, 0, ndim),
             layout=layout,
         ))
     )
 
+    # Shape building
     yield rewrite(
-        asb.to_append(ad, idx, ndim)
+        shape.to_append(ad, idx, ndim)
     ).to(
-        asb.append(dim).to_append(ad, idx + 1, ndim),
+        shape.append(dim).to_append(ad, idx + 1, ndim),
         dim == ad.dim(idx),
         idx < ndim,
     )
     yield rewrite(
-        asb.to_append(ad, ndim, ndim)
+        shape.to_append(ad, ndim, ndim)
     ).to(
-        asb.end()
+        shape
     )
+    yield rewrite(Shape.from_arraydesc(ad), subsume=True).to(
+        Shape().to_append(ad, 0, ndim),
+        ndim == ad.ndim
+    )
+    yield rewrite(Shape().append(dim)).to(
+        Shape.from_list(Vec[Dim](dim))
+    )
+    yield rewrite(
+        Shape.from_list(dimVec).append(dim)
+    ).to(
+        Shape.from_list(dimVec.append(Vec[Dim](dim)))
+    )
+
 
 class Annotate(Expr):
     def __init__(self, term: Term, ty: Type): ...
@@ -538,7 +655,7 @@ pprint(target_function)
 
 
 array_x_desc, array_x_infos = array_desc_rules(
-    "array_x", shape=("N",), dtype=TypeFloat64, layout="c"
+    "array_x", shape=("M", "N",), dtype=TypeFloat64, layout="c"
 )
 ruleset_array_facts = ruleset(
     *array_x_infos,
@@ -550,9 +667,10 @@ class LLM_generic(NbOp_Base):
     operands: tuple[SExpr, ...]
 
 
-class LLM_Type(NbOp_Base):
-    name: str
-    children: tuple[SExpr, ...]
+class CostModel(_ch05_MyCostModel):
+    def get_cost_function(self, nodename, op, ty, cost, children):
+        cost = super().get_cost_function(nodename, op, ty, cost, children)
+        return cost
 
 
 class ExtendEGraphToRVSDG(_ch05_ExtendEGraphToRVSDG):
@@ -597,10 +715,11 @@ class ExtendEGraphToRVSDG(_ch05_ExtendEGraphToRVSDG):
     handle_ErrorMsg = handle_generic
     handle_DataLayout = handle_generic
     handle_Annotate = handle_generic
-    handle_ArrayShapeBuilder = handle_generic
+    handle_Shape = handle_generic
 
 compiler_config = _compiler_config.copy()
 compiler_config["converter_class"] = ExtendEGraphToRVSDG
+compiler_config["cost_model"] = CostModel()
 
 
 class TypeSpeller(ase.TreeVisitor):
@@ -615,6 +734,9 @@ class TypeSpeller(ase.TreeVisitor):
             case rg.Generic(op, children):
                 memo[expr] = r = self.visit_Generic(op, tuple(map(lambda x: memo.get(x, x), children)))
                 assert r is not None
+            case rg.GenericList(op, children):
+                memo[expr] = r = list(map(lambda x: memo.get(x, x), children))
+                assert r is not None
             case NbOp_Type(str(name)):
                 memo[expr] = name
             case _:
@@ -624,14 +746,14 @@ class TypeSpeller(ase.TreeVisitor):
 
     def visit_Generic(self, op, children):
         match op, children:
-            case "ArrayShapeBuilder", ():
+            case "Shape", ():
                 return ()
             case 'Dim.symbolic', (name,):
                 return name
+            case 'Dim.fixed', (name,):
+                return name
             case '·.append', (asb, dim):
                 return asb + (dim,)
-            case '·.end', (asb,):
-                return asb
             case 'DataLayout.strided', ():
                 return 'A'
             case 'DataLayout.c_contiguous', ():
@@ -640,6 +762,8 @@ class TypeSpeller(ase.TreeVisitor):
                 return f'ArrayType({args})'
             case '·.toType', (ad,):
                 return ad
+            case "Shape.from_list", (vec,):
+                return vec
             case _:
                 raise ValueError(f"{op} {children}")
 
@@ -652,9 +776,6 @@ class TypeSpeller(ase.TreeVisitor):
 
 class StubBackend:
     def lower(self, root, argtypes):
-        from ch04_1_typeinfer_ifelse import Attributes
-        from sealir.rvsdg import format_rvsdg
-
         [func] = [child for child in root._args
                   if isinstance(child, rg.Func)]
 
@@ -662,7 +783,6 @@ class StubBackend:
 
         fname = func.fname
         beginnode = func.body.begin
-        from sealir import ase
         intypes = {}
         for argport in ase.search_parents(beginnode, lambda x: isinstance(x, rg.Unpack)):
             print('   .parent', argport)
@@ -683,7 +803,8 @@ class StubBackend:
 
         # attrs = Attributes(func.body.begin.attrs)
         # retty = attrs.get_return_type(func.body)
-        print("RETURN TYPE", argtypes, "->", retty)
+        print("ARGS", intypes)
+        print("RETURN TYPE", retty)
         return format_rvsdg(func)
 
     def jit_compile(self, module, extracted, export_name):

@@ -1013,8 +1013,6 @@ class MyCostModel(CostModel):
             return self.get_simple(float("1e9"))
         elif op.startswith("Nb_"):
             return self.get_simple(cost)
-        elif op == "ArrayDescSpec":
-            return self.get_simple(1)
         # Fallthrough to parent's cost function
         return super().get_cost_function(nodename, op, ty, cost, children)
 
