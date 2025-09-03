@@ -128,6 +128,13 @@ class Backend:
                 return self.f32
         raise NotImplementedError(f"unknown type: {ty}")
 
+    def get_return_types(self, root):
+        return (
+            self.lower_type(
+                Attributes(root.body.begin.attrs).get_return_type(root.body)
+            ),
+        )
+
     def lower(self, root: rg.Func, argtypes):
         """Expression Lowering
 
@@ -143,11 +150,7 @@ class Backend:
         self.module_body = module_body = ir.InsertionPoint(module.body)
         # Convert SealIR types to MLIR types.
         input_types = tuple([self.lower_type(x) for x in argtypes])
-        output_types = (
-            self.lower_type(
-                Attributes(root.body.begin.attrs).get_return_type(root.body)
-            ),
-        )
+        output_types = self.get_return_types(root)
 
         with context, loc, module_body:
             # Constuct a function that emits a callable C-interface.

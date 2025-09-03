@@ -1,7 +1,9 @@
 from __future__ import annotations
+import numpy as np
 import operator
 from functools import reduce
 from pprint import pprint
+from dataclasses import dataclass
 from types import FunctionType
 
 from ch04_1_typeinfer_ifelse import Type, TypeFloat64, TypeVar
@@ -651,16 +653,6 @@ def ruleset_type_infer_negate(
 ruleset_extra_builtin_operations = ruleset_type_infer_negate
 
 #######################################
-target_function = cgv.functions["softmax"]
-pprint(target_function)
-
-array_x_desc, array_x_infos = array_desc_rules(
-    "array_x", shape=("M", "N",), dtype=TypeFloat64, layout="c"
-)
-ruleset_array_facts = ruleset(
-    *array_x_infos,
-)
-
 
 class LLM_generic(NbOp_Base):
     desc: str
@@ -722,6 +714,14 @@ compiler_config["converter_class"] = ExtendEGraphToRVSDG
 compiler_config["cost_model"] = CostModel()
 
 
+
+@dataclass
+class BeArrayType:
+    ndim: int
+    dtype: str
+    shape: tuple[int, ...]
+    layout: str
+
 class TypeSpeller(ase.TreeVisitor):
 
     def __init__(self):
@@ -758,8 +758,8 @@ class TypeSpeller(ase.TreeVisitor):
                 return 'A'
             case 'DataLayout.c_contiguous', ():
                 return 'C'
-            case 'ArrayType', (*args,):
-                return f'ArrayType({args})'
+            case 'ArrayType', (nd, dtype, shape, layout,):
+                return BeArrayType(nd, dtype, tuple(shape), layout)
             case '·.toType', (ad,):
                 return ad
             case "Shape.from_list", (vec,):
@@ -811,7 +811,237 @@ class StubBackend:
         return module  # TODO
 
 
-compiler_config["backend"] = StubBackend()
+from llama_functions import Backend as LlamaBackend
+from ch06_mlir_backend import Backend as _ch06_MlirBackend, LowerStates
+
+class MlirBackend(_ch06_MlirBackend):
+    def __init__(self):
+        super().__init__()
+
+        self.codegen = LlamaBackend()
+
+    def lower(self, root, argtypes):
+        [func] = [child for child in root._args
+                  if isinstance(child, rg.Func)]
+
+        fname = func.fname
+        beginnode = func.body.begin
+        intypes = {}
+        for argport in ase.search_parents(beginnode, lambda x: isinstance(x, rg.Unpack)):
+            print('   .parent', argport)
+            idx = argport._args[1]
+            annos = list(ase.search_parents(argport, lambda x: isinstance(x, rg.Generic) and x._args[0]=='Annotate'))
+            if annos:
+                intypes[idx] = TypeSpeller.apply(annos[0]._args[2])
+        print(intypes)
+
+        # outtypes
+        outtypes = {}
+        for port in func.body.ports:
+            annos = list(ase.search_parents(port.value, lambda x: isinstance(x, rg.Generic) and x._args[0]=='Annotate'))
+            if annos:
+                outtypes[port.name] = TypeSpeller.apply(annos[0]._args[2])
+        retty = outtypes['!ret']
+        self._retty = retty  # TODO XXX ugly smelly code
+
+        # attrs = Attributes(func.body.begin.attrs)
+        # retty = attrs.get_return_type(func.body)
+        print("ARGS", intypes)
+        print("RETURN TYPE", retty)
+
+        argtypes = tuple(intypes.values())
+        print(argtypes)
+        print(format_rvsdg(func))
+
+        super().lower(func, argtypes)
+        return self.module
+
+    def get_return_types(self, root):
+        return (self.lower_type(self._retty),)
+
+    def lower_type(self, ty):
+        from mlir.ir import MemRefType, ShapedType, F64Type, Location
+        if isinstance(ty, BeArrayType):
+            # TODO: make this use static shape
+            assert ty.dtype == "Float64"
+            with self.context:
+                with Location.unknown():
+                    element_type = F64Type.get()
+                    return MemRefType.get([ShapedType.get_dynamic_size()] * ty.ndim, element_type)
+        else:
+            return super().lower_type(ty)
+
+    def lower_expr(self, expr: SExpr, state: LowerStates):
+        match expr:
+            case LLM_generic(desc=str(op), operands=tuple(operands)):
+                return self._lower_llm_ops(op, operands, state)
+            case _:
+                return super().lower_expr(expr, state)
+
+    def _get_func_by_name(self, fname: str):
+        for decl in self.module.body:
+            if decl.sym_name.value == fname:
+                return decl
+
+    def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
+        from mlir.dialects import arith, func, memref, linalg
+        from mlir import ir
+        be: LlamaBackend = self.codegen
+        match op, operands:
+            case "NpyOp_Max_Shaped<operand, axis, keepdims, outshape>", (operand, axis, True, outshape):
+                print("----", operands)
+                shape = TypeSpeller.apply(outshape)
+                nd = len(shape)
+                if axis < 0:
+                    axis = nd + axis
+                fname_reduce = be.gen_array_reduce(self.module, nd, (axis,), arith.maximumf, None)
+                fn_reduce = self._get_func_by_name(fname_reduce)
+                [operand_type, result_type] = fn_reduce.type.inputs
+                opval = (yield operand)
+
+                # Extract input dimensions for reduced result (all dims except the reduced one)
+                reduced_dims = []
+                for i in range(nd):
+                    if axis != i:
+                        idx = arith.ConstantOp(ir.IndexType.get(), i)
+                        reduced_dims.append(memref.DimOp(opval, idx))
+
+                dynshape = ir.ShapedType.get_dynamic_size()
+                reduced_shape = [dynshape] * (nd - 1)
+                memref_type = ir.MemRefType.get(reduced_shape, result_type.element_type)
+                result_reduced = memref.AllocOp(memref_type, reduced_dims, [])
+                func.call((), fname_reduce, [opval, result_reduced])
+
+                # broadcast - need to add dimension back at the axis position
+                print(result_type)
+                # Build final shape with keepdims=True (reduced dim becomes dynamic size)
+                # Need to add the size-1 dimension back for allocation
+                one_const = arith.ConstantOp(ir.IndexType.get(), 1)
+                final_dims = reduced_dims.copy()
+                final_dims.insert(axis, one_const)
+
+                final_shape = [dynshape] * nd
+                memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
+                result = memref.AllocOp(memref_type, final_dims, [])
+                linalg.broadcast(
+                    result_reduced,
+                    outs=[result],
+                    dimensions=[axis],
+                )
+                return result
+            case _:
+                raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
+
+    def jit_compile(self, llmod, func_node: rg.Func, func_name="func"):
+        print('>' * 80)
+        print(llmod.dump())
+        print('=' * 80)
+        optimized = self.codegen.run_passes(llmod)
+        print(optimized.dump())
+
+        input_shapes = [softmax_input_shape]
+        output_shapes = [softmax_input_shape[:-1] + (1,)]
+
+        in_types, out_types = [], []
+        shared_libs = None
+
+        module = self.module
+
+        from mlir import ir
+        with ir.InsertionPoint(module.body), ir.Location.unknown():
+            element_type = ir.F64Type.get()
+            for i in input_shapes:
+                if i is not None:
+                    in_types.append(ir.MemRefType.get(i, element_type))
+                else:
+                    in_types.append(element_type)
+
+            for j in output_shapes:
+                if j is not None:
+                    out_types.append(ir.MemRefType.get(j, element_type))
+                else:
+                    out_types.append(element_type)
+
+        if shared_libs is None:
+            shared_libs = []
+
+        if len(output_shapes) == 0:
+            out_types = (element_type,)
+
+        fn_jitted = self.jit_compile_extra(module, in_types, out_types, func_name, shared_libs=shared_libs)
+        return fn_jitted
+
+    def jit_compile_extra(
+        self,
+        llmod,
+        input_types,
+        output_types,
+        function_name="func",
+        exec_engine=None,
+        **execution_engine_params,
+    ):
+        from mlir import execution_engine, runtime, ir
+        import ctypes
+        # Converts the MLIR module into a JIT-callable function.
+        # Use MLIR's own internal execution engine
+        if exec_engine is None:
+            engine = execution_engine.ExecutionEngine(
+                llmod, **execution_engine_params
+            )
+        else:
+            engine = exec_engine
+
+        assert (
+            len(output_types) == 1
+        ), "Execution of functions with output arguments > 1 not supported"
+        [out_type] = output_types
+
+        # Build a wrapper function
+        def jit_func(*args):
+
+            input_args = args
+
+            assert len(input_args) == len(input_types)
+
+            input_exec_ptrs = [
+                self.get_exec_ptr(ty, val)[0]
+                for ty, val in zip(input_types, input_args)
+            ]
+
+            with self.context:
+                assert out_type.element_type == ir.F64Type.get()
+            res_val = runtime.make_nd_memref_descriptor(
+                rank=out_type.rank, dtype=ctypes.c_double
+            )()
+            res_ptr = ctypes.pointer(res_val)
+            engine.invoke(function_name, ctypes.byref(res_ptr), *input_exec_ptrs)
+
+            out = runtime.ranked_memref_to_numpy(res_ptr)
+            return out
+
+
+        return jit_func
+
+#######################################
+target_function = cgv.functions["softmax"]
+pprint(target_function)
+
+
+
+batch_size, seq_len, n_heads, dims, cache_size = 1, 5, 6, 288, 256
+n_local_heads, head_dim = n_heads, dims // n_heads
+softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
+print("softmax_input_shape", softmax_input_shape)
+
+array_x_desc, array_x_infos = array_desc_rules(
+    "array_x", shape=softmax_input_shape, dtype=TypeFloat64, layout="c"
+)
+ruleset_array_facts = ruleset(
+    *array_x_infos,
+)
+
+#######################################
+compiler_config["backend"] = MlirBackend()
 
 report = Report(default_expanded=True, enable_nested_metadata=True)
 try:
@@ -841,4 +1071,18 @@ finally:
     # report.display(view_html=True)
 
 print("OUTPUT".center(80, "-"))
-print(out.jit_func)
+
+
+def expected_func(x):
+    return np.max(x, axis=-1, keepdims=True)
+
+jf = out.jit_func
+print('jitfunc', jf)
+inary = np.arange(np.prod(softmax_input_shape), dtype=np.float64).reshape(softmax_input_shape)
+res = jf(inary)
+print(res)
+
+desired = expected_func(inary)
+print(res)
+print(desired)
+np.testing.assert_allclose(res, desired)
