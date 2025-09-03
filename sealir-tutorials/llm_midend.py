@@ -40,6 +40,7 @@ from egglog import (
     union,
     var,
     method,
+    Ruleset,
 )
 from sealir.eqsat.py_eqsat import (
     Py_AttrIO,
@@ -61,7 +62,7 @@ from utils import Report
 from pathlib import Path
 import os.path
 
-source_filename = Path(os.path.dirname(__file__)) / "llm.py"
+source_filename = Path(os.path.dirname(__file__)) / '..' / "examples" / "llama3" / "llama3.py"
 with open(source_filename, "r") as fin:
     source_code = fin.read()
 
@@ -128,13 +129,13 @@ def make_module_rule(gv_name: str, mod_name):
 
 
 def make_module_fact_ruleset(module_mapping: dict[str, str]):
-    facts = []
+    rs = Ruleset(name="module_fact_ruleset")
     for gv_name, mod_name in module_mapping.items():
-        facts.append(make_module_rule(gv_name, mod_name))
-    return facts
+        rs.register(make_module_rule(gv_name, mod_name))
+    return rs
 
 
-module_rules = ruleset(*make_module_fact_ruleset(cgv.imported))
+module_rules = make_module_fact_ruleset(cgv.imported)
 
 #######################################
 
@@ -546,8 +547,9 @@ def module_function_rule_lookup(modname: str):
 
 def make_function_rule(module_mapping: dict[str, str]):
     for modname in module_mapping.values():
-        rules = module_function_rule_lookup(modname)
-        yield ruleset(*rules, name=f"ruleset_module_{modname}")
+        if modname in loaded_module:
+            rules = module_function_rule_lookup(modname)
+            yield ruleset(*rules, name=f"ruleset_module_{modname}")
 
 
 module_rulesets = (
@@ -650,9 +652,7 @@ ruleset_extra_builtin_operations = ruleset_type_infer_negate
 
 #######################################
 target_function = cgv.functions["softmax"]
-# target_function = cgv.functions["smaller"]
 pprint(target_function)
-
 
 array_x_desc, array_x_infos = array_desc_rules(
     "array_x", shape=("M", "N",), dtype=TypeFloat64, layout="c"
