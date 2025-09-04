@@ -884,10 +884,61 @@ class MlirBackend(_ch06_MlirBackend):
                 return decl
 
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
-        from mlir.dialects import arith, func, memref, linalg
+        from mlir.dialects import arith, func, memref, linalg, math
         from mlir import ir
         be: LlamaBackend = self.codegen
         match op, operands:
+            case "NpyOp_Exp_Shaped<operand, outshape>", (operand, outshape):
+                print("----", operands)
+                shape = TypeSpeller.apply(outshape)
+                nd = len(shape)
+                fname_exp = be.gen_array_unary(self.module, nd, math.exp, None)
+                f_exp = self._get_func_by_name(fname_exp)
+                [op_ty, result_type] = f_exp.type.inputs
+                operand_val = (yield operand)
+
+                dynshape = ir.ShapedType.get_dynamic_size()
+                final_shape = [dynshape] * nd
+                memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
+                result = memref.AllocOp(memref_type, [memref.DimOp(operand_val, arith.ConstantOp(ir.IndexType.get(), i)) for i in range(nd)], [])
+                func.call((), fname_exp, [operand_val, result])
+
+                return result
+            case "NpyOp_Divide_Shaped<lhs, rhs, outshape>", (lhs, rhs, outshape):
+                # Implements np.max(operand, axis, keepdims=True)
+                print("----", operands)
+                shape = TypeSpeller.apply(outshape)
+                nd = len(shape)
+                fname_div = be.gen_array_binary(self.module, nd, nd, arith.divf, None)
+                f_div = self._get_func_by_name(fname_div)
+                [lhs_ty, rhs_ty, result_type] = f_div.type.inputs
+                lhsval = (yield lhs)
+                rhsval = (yield rhs)
+
+                dynshape = ir.ShapedType.get_dynamic_size()
+                final_shape = [dynshape] * nd
+                memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
+                result = memref.AllocOp(memref_type, [memref.DimOp(lhsval, arith.ConstantOp(ir.IndexType.get(), i)) for i in range(nd)], [])
+                func.call((), fname_div, [lhsval, rhsval, result])
+
+                return result
+            case "NpyOp_Subtract_Shaped<lhs, rhs, outshape>", (lhs, rhs, outshape):
+                print("----", operands)
+                shape = TypeSpeller.apply(outshape)
+                nd = len(shape)
+                fname_sub = be.gen_array_binary(self.module, nd, nd, arith.subf, None)
+                f_sub = self._get_func_by_name(fname_sub)
+                [lhs_ty, rhs_ty, result_type] = f_sub.type.inputs
+                lhsval = (yield lhs)
+                rhsval = (yield rhs)
+
+                dynshape = ir.ShapedType.get_dynamic_size()
+                final_shape = [dynshape] * nd
+                memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
+                result = memref.AllocOp(memref_type, [memref.DimOp(lhsval, arith.ConstantOp(ir.IndexType.get(), i)) for i in range(nd)], [])
+                func.call((), fname_sub, [lhsval, rhsval, result])
+
+                return result
             case "NpyOp_Max_Shaped<operand, axis, keepdims, outshape>", (operand, axis, True, outshape):
                 # Implements np.max(operand, axis, keepdims=True)
                 shape = TypeSpeller.apply(outshape)
@@ -895,6 +946,47 @@ class MlirBackend(_ch06_MlirBackend):
                 if axis < 0:
                     axis = nd + axis
                 fname_reduce = be.gen_array_reduce(self.module, nd, (axis,), arith.maximumf, None)
+                fn_reduce = self._get_func_by_name(fname_reduce)
+                [operand_type, result_type] = fn_reduce.type.inputs
+                opval = (yield operand)
+
+                # Extract input dimensions for reduced result (all dims except the reduced one)
+                reduced_dims = []
+                for i in range(nd):
+                    if axis != i:
+                        idx = arith.ConstantOp(ir.IndexType.get(), i)
+                        reduced_dims.append(memref.DimOp(opval, idx))
+
+                dynshape = ir.ShapedType.get_dynamic_size()
+                reduced_shape = [dynshape] * (nd - 1)
+                memref_type = ir.MemRefType.get(reduced_shape, result_type.element_type)
+                result_reduced = memref.AllocOp(memref_type, reduced_dims, [])
+                func.call((), fname_reduce, [opval, result_reduced])
+
+                # broadcast - need to add dimension back at the axis position
+                print(result_type)
+                # Build final shape with keepdims=True (reduced dim becomes dynamic size)
+                # Need to add the size-1 dimension back for allocation
+                one_const = arith.ConstantOp(ir.IndexType.get(), 5)
+                final_dims = reduced_dims.copy()
+                final_dims.insert(axis, one_const)
+
+                final_shape = [dynshape] * nd
+                memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
+                result = memref.AllocOp(memref_type, final_dims, [])
+                linalg.broadcast(
+                    result_reduced,
+                    outs=[result],
+                    dimensions=[axis],
+                )
+                return result
+            case "NpyOp_Sum_Shaped<operand, axis, keepdims, outshape>", (operand, axis, True, outshape):
+                print("----", operands)
+                shape = TypeSpeller.apply(outshape)
+                nd = len(shape)
+                if axis < 0:
+                    axis = nd + axis
+                fname_reduce = be.gen_array_reduce(self.module, nd, (axis,), arith.addf, None)
                 fn_reduce = self._get_func_by_name(fname_reduce)
                 [operand_type, result_type] = fn_reduce.type.inputs
                 opval = (yield operand)
@@ -1118,7 +1210,8 @@ print("OUTPUT".center(80, "-"))
 
 
 def expected_func(x):
-    return x - np.max(x, axis=-1, keepdims=True)
+    exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
+    return exp_x / np.sum(exp_x, axis=-1, keepdims=True)
 
 jf = out.jit_func
 print('jitfunc', jf)
