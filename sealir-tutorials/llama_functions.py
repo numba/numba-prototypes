@@ -1012,8 +1012,18 @@ ff_arr_matmul = backend.gen_array_matmul(module, 3, None)
 ff_arr_matmul_2 = backend.gen_array_matmul(module, 3, None)
 
 # RMSNorm
+rms_arr_square = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+rms_arr_sum_reduce = backend.gen_array_reduce(module, 3, (2,), arith.addf, None)
+rms_arr_broadcast = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, dims), broadcast_along=[2])
+rms_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
+rms_arr_fill = backend.gen_array_fill_value(module, 3, None)
+rms_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
+rms_arr_sqrt = backend.gen_array_unary(module, 3, math.sqrt, None)
+rms_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+rms_arr_broadcast_2 = backend.gen_array_broadcast(module, 1, (batch_size, seq_len, dims), broadcast_along=[0, 1])
 
-# Tansformer
+# Transformer
+tran_arr_add = backend.gen_array_binary(module, input_ndim, input_ndim, arith.addf, None)
 
 print("Generated MLIR:")
 print(str(module))
@@ -1137,8 +1147,19 @@ if __name__ == "__main__":
     ff_arr_matmul_2 = backend.jit_compile(module, ff_arr_matmul_2, ((batch_size, seq_len, silu_dims), (batch_size, silu_dims, dims)), ((batch_size, seq_len, dims),))
 
     # RMSNorm
+    rms_arr_square = backend.jit_compile(module, rms_arr_square, ((batch_size, seq_len, dims),(batch_size, seq_len, dims)), ((batch_size, seq_len, dims),), None)
+    rms_arr_sum_reduce = backend.jit_compile(module, rms_arr_sum_reduce, ((batch_size, seq_len, dims),), ((batch_size, seq_len),), None)
+    rms_arr_broadcast = backend.jit_compile(module, rms_arr_broadcast, ((batch_size, seq_len),), ((batch_size, seq_len, dims),), None)
+    rms_arr_div = backend.jit_compile(module, rms_arr_div, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),), None)
+    rms_arr_fill = backend.jit_compile(module, rms_arr_fill, (None,), ((batch_size, seq_len, dims),), None)
+    rms_arr_add = backend.jit_compile(module, rms_arr_add, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),), None)
+    rms_arr_sqrt = backend.jit_compile(module, rms_arr_sqrt, ((batch_size, seq_len, dims),), ((batch_size, seq_len, dims),), None)
+    rms_arr_mul = backend.jit_compile(module, rms_arr_mul, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),))
+    rms_arr_broadcast_2 = backend.jit_compile(module, rms_arr_broadcast_2, ((dims,),), ((batch_size, seq_len, dims),), None)
 
-    # Tansformer
+    # Transformer
+    tran_arr_add = backend.jit_compile(module, tran_arr_add, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),))
+    
 
     print("All functions compiled successfully!")
     print("\n" + "=" * 50 + "\n")
@@ -1424,9 +1445,9 @@ if __name__ == "__main__":
         return result
 
     def rmsnorm_mlir(x, weight, eps):
-        z_float = np.mean(x**2, -1, keepdims=True) + eps
-        z = x / np.sqrt(z_float)
-        result = z * weight
+        z_float = rms_arr_add(rms_arr_div(rms_arr_broadcast(rms_arr_sum_reduce(rms_arr_square(x, x))), rms_arr_fill(float(dims))), rms_arr_fill(float(eps)))
+        z = rms_arr_div(x, rms_arr_sqrt(z_float))
+        result = rms_arr_mul(z, rms_arr_broadcast_2(weight))
         return result
 
     print("Testing RMSNorm")
@@ -1442,8 +1463,8 @@ if __name__ == "__main__":
                                weight=weight,
                                eps=eps)
 
-    for res_np, res_mlir in zip(numpy_result, mlir_result):
-        assert np.allclose(res_np, res_mlir)
+    
+    assert np.allclose(numpy_result, mlir_result)
 
     print("Function executed succesfully.")
 
@@ -1501,10 +1522,10 @@ if __name__ == "__main__":
             cache_k,
             cache_v,
         )
-        z = x + h1
+        z = tran_arr_add(x, h1)
         norm_z = rmsnorm_mlir(z, post_norm_weight, norm_eps)
         h2 = feed_forward_mlir(norm_z, *ff_weights)
-        out = z + h2
+        out = tran_arr_add(z, h2)
         return out, cache_k, cache_v
 
     print("Testing Transformer Layer")
