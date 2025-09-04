@@ -112,13 +112,13 @@ class Backend:
                     in_types.append(MemRefType.get(i, element_type))
                 else:
                     in_types.append(element_type)
-        
+
             for j in output_shapes:
                 if j is not None:
                     out_types.append(MemRefType.get(j, element_type))
                 else:
                     out_types.append(element_type)
-        
+
         if shared_libs == None:
             shared_libs = []
         is_ufunc=True
@@ -147,7 +147,7 @@ class Backend:
         """
         if isinstance(mlir_ty, IntegerType):
             val = 0 if val is None else val
-            ptr = ctypes.pointer(ctypes.c_int64(val))        
+            ptr = ctypes.pointer(ctypes.c_int64(val))
         elif isinstance(mlir_ty, IndexType):
             val = 0 if val is None else val
             ptr = ctypes.pointer(ctypes.c_int64(val))
@@ -184,7 +184,7 @@ class Backend:
             return res_val
         else:
             return res_ptr.contents.value
-    
+
     def gen_fn_name(self, name_string):
         curr_counter = self.fn_counter.get(name_string, 0)
         fn_name = f"{name_string}_{str(curr_counter)}"
@@ -214,7 +214,7 @@ class Backend:
                         )
                     ])
                     iterator_types = ArrayAttr.get([Attribute.parse("#linalg.iterator_type<parallel>")])
-                    
+
                     generic_op = linalg.GenericOp(
                         result_tensors=[],
                         inputs=[],
@@ -264,7 +264,7 @@ class Backend:
                 body = generic_op.regions[0].blocks.append(
                     element_type, element_type
                 )
-        
+
                 with InsertionPoint(body):
                     linalg.YieldOp([op(body.arguments[0])])
 
@@ -275,7 +275,7 @@ class Backend:
     def gen_array_binary(self, module, num_axis_lhs, num_axis_rhs, op, dtype):
         # TODO: Differently shaped arrays misbehave and needs handling/broadcast implementations
         fn_name = self.gen_fn_name("binary")
-        
+
         if num_axis_lhs != num_axis_rhs:
             raise NotImplementedError("brodcasting for different dimensional arrays is not supported")
 
@@ -309,7 +309,7 @@ class Backend:
                 body = generic_op.regions[0].blocks.append(
                     element_type, element_type, element_type
                 )
-        
+
                 with InsertionPoint(body):
                     linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
 
@@ -342,7 +342,7 @@ class Backend:
                 body = reduce_op.regions[0].blocks.append(
                     element_type, element_type
                 )
-        
+
                 with InsertionPoint(body):
                     linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
 
@@ -371,7 +371,7 @@ class Backend:
                     outputs=[output_memref],
                     indexing_maps=ArrayAttr.get([
                         AffineMapAttr.get(AffineMap.get(dims + 1, 0, [AffineDimExpr.get(i) for i in range(dims)])),
-                        AffineMapAttr.get(AffineMap.get(dims + 1, 0, [AffineDimExpr.get(i) for i in range(dims-1)] + [AffineDimExpr.get(dims)])), 
+                        AffineMapAttr.get(AffineMap.get(dims + 1, 0, [AffineDimExpr.get(i) for i in range(dims-1)] + [AffineDimExpr.get(dims)])),
                         AffineMapAttr.get(AffineMap.get(dims + 1, 0, [AffineDimExpr.get(i) for i in range(dims + 1)]))
                     ]),
                     iterator_types=ArrayAttr.get([Attribute.parse("#linalg.iterator_type<parallel>")] * 2)
@@ -380,7 +380,7 @@ class Backend:
                 body = generic_op.regions[0].blocks.append(
                     element_type, element_type, element_type
                 )
-        
+
                 with InsertionPoint(body):
                     linalg.YieldOp([arith.mulf(body.arguments[0], body.arguments[1])])
 
@@ -504,7 +504,7 @@ class Backend:
         is_new_dim = [False] * final_ndim
         for ax in new_axes:
             is_new_dim[ax] = True
-        
+
         reassociation = []
         current_group = []
         for output_pos in range(final_ndim):
@@ -512,13 +512,13 @@ class Backend:
             if not is_new_dim[output_pos]:
                 reassociation.append(current_group)
                 current_group = []
-        
+
         # Convert to MLIR ArrayAttr
         attr_groups = []
         for group in reassociation:
             group_attrs = [IntegerAttr.get(IntegerType.get_signless(64), idx) for idx in group]
             attr_groups.append(ArrayAttr.get(group_attrs))
-        
+
         return ArrayAttr.get(attr_groups)
 
     def gen_array_expand_dims(self, module, dims, axes):
@@ -542,8 +542,8 @@ class Backend:
                 reassociation = Backend.build_mlir_reassociation(dims, axes)
                 output_shape = [memref.dim(func_op.arguments[0], arith.constant(index_type, i)) for i in range(dims)]
                 res = memref.expand_shape(memref_type_res,
-                    func_op.arguments[0], 
-                    reassociation=reassociation, 
+                    func_op.arguments[0],
+                    reassociation=reassociation,
                     output_shape=output_shape, # [2, 3, 4]
                     static_output_shape=DenseI64ArrayAttr.get(result_shape) # [dyn, dyn, 1, dyn, 1]
                 )
@@ -568,7 +568,7 @@ class Backend:
 
             with InsertionPoint(func_op.add_entry_block()):
                 input_memref, output_memref = func_op.arguments
-               
+
                 output_axes = [i for i in range(dims)]
                 output_axes.pop(axis)
                 max_memref = memref.AllocOp(memref_type_aux, [memref.dim(output_memref, arith.constant(index_type, i)) for i in range(dims - 1)], symbolOperands=[])
@@ -589,12 +589,12 @@ class Backend:
                 body = generic_op.regions[0].blocks.append(
                     element_type, element_type, index_type
                 )
-        
+
                 with InsertionPoint(body):
                     input_val, max_val, arg_val = body.arguments
 
                     reduction_idx = linalg.IndexOp(axis)
-                    is_greater = arith.CmpFOp(arith.CmpFPredicate.OGT, 
+                    is_greater = arith.CmpFOp(arith.CmpFPredicate.OGT,
                                             input_val, max_val)
                     new_max = arith.SelectOp(is_greater, input_val, max_val)
                     new_arg = arith.SelectOp(is_greater, reduction_idx.result, arg_val)
@@ -621,26 +621,26 @@ class Backend:
 
                 batch_exprs = [AffineExpr.get_dim(i) for i in range(dims - 2)]
                 m_expr = AffineExpr.get_dim(dims - 2)  # M dimension
-                n_expr = AffineExpr.get_dim(dims - 1)  # N dimension  
+                n_expr = AffineExpr.get_dim(dims - 1)  # N dimension
                 k_expr = AffineExpr.get_dim(dims)      # K dimension (reduction)
-                
+
                 map_a = AffineMap.get(total_dims, 0, batch_exprs + [m_expr, k_expr])
                 map_b = AffineMap.get(total_dims, 0, batch_exprs + [k_expr, n_expr])
                 map_c = AffineMap.get(total_dims, 0, batch_exprs + [m_expr, n_expr])
-                
+
                 indexing_maps = ArrayAttr.get([
                     AffineMapAttr.get(map_a),
                     AffineMapAttr.get(map_b),
                     AffineMapAttr.get(map_c)
                 ])
-                
+
                 iterator_types = ArrayAttr.get([
                     StringAttr.get("parallel") for _ in range(dims - 1)  # batch + M + N
                 ] + [StringAttr.get("reduction")])  # K
 
                 generic_op = linalg.generic(
                     inputs=[a, b], outputs=[c], result_tensors=[],
-                    indexing_maps=indexing_maps, 
+                    indexing_maps=indexing_maps,
                     iterator_types=iterator_types
                 )
 
@@ -650,7 +650,7 @@ class Backend:
                     mul = arith.mulf(a_val, b_val)
                     add = arith.addf(acc_val, mul)
                     linalg.yield_([add])
-                
+
                 func.ReturnOp([])
 
         return fn_name
@@ -724,7 +724,7 @@ class Backend:
                 body = generic_op.regions[0].blocks.append(
                     element_type, element_type
                 )
-        
+
                 with InsertionPoint(body):
                     i = arith.IndexCastOp(IndexType.get(), linalg.IndexOp(dims - 2))
                     j = arith.IndexCastOp(IndexType.get(), linalg.IndexOp(dims - 1))
@@ -749,7 +749,7 @@ class Backend:
             element_type = F64Type.get()
             index_type = IndexType.get()
             memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
-            
+
             out_strides = [ShapedType.get_dynamic_stride_or_offset()] * dims
             out_strides[axis] = 1
             out_layout = StridedLayoutAttr.get(slice_idx, out_strides)
@@ -950,6 +950,9 @@ n_local_heads, head_dim = n_heads, dims // n_heads
 input_shape = (batch_size, seq_len, dims)
 softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
 
+silu_dims = 768
+norm_eps = 1e-06
+
 input_ndim = len(input_shape)
 softmax_ndim = len(softmax_input_shape)
 
@@ -991,6 +994,36 @@ arr_fill = backend.gen_array_fill_value(module, 4, None)
 arr_sqrt = backend.gen_array_unary(module, 4, math.sqrt, None)
 arr_div_2 = backend.gen_array_binary(module, 4, 4, arith.divf, None)
 
+# SILU
+silu_arr_neg = backend.gen_array_unary(module, 3, arith.negf, None)
+silu_arr_exp = backend.gen_array_unary(module, 3, math.exp, None)
+silu_arr_fill = backend.gen_array_fill_value(module, 3, None)
+silu_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
+silu_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+silu_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
+
+# Feed forward
+ff_arr_transpose = backend.gen_array_transpose(module, 2)
+ff_arr_transpose_2 = backend.gen_array_transpose(module, 2)
+ff_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+ff_arr_broadcast = backend.gen_array_broadcast(module, 2, (batch_size, dims, silu_dims), broadcast_along=[0])
+ff_arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, silu_dims, dims), broadcast_along=[0])
+ff_arr_matmul = backend.gen_array_matmul(module, 3, None)
+ff_arr_matmul_2 = backend.gen_array_matmul(module, 3, None)
+
+# RMSNorm
+rms_arr_square = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+rms_arr_sum_reduce = backend.gen_array_reduce(module, 3, (2,), arith.addf, None)
+rms_arr_broadcast = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, dims), broadcast_along=[2])
+rms_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
+rms_arr_fill = backend.gen_array_fill_value(module, 3, None)
+rms_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
+rms_arr_sqrt = backend.gen_array_unary(module, 3, math.sqrt, None)
+rms_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+rms_arr_broadcast_2 = backend.gen_array_broadcast(module, 1, (batch_size, seq_len, dims), broadcast_along=[0, 1])
+
+# Transformer
+tran_arr_add = backend.gen_array_binary(module, input_ndim, input_ndim, arith.addf, None)
 
 print("Generated MLIR:")
 print(str(module))
@@ -1003,7 +1036,7 @@ if _VERIFY:
     verifier = MLIRVerifier(module)
 
     verifier.verify(
-        [   
+        [
             "lower-affine",
             "convert-linalg-to-loops",
             "expand-strided-metadata",
@@ -1018,292 +1051,525 @@ if _VERIFY:
         "outs"
     )
 
+if __name__ == "__main__":
 
-if _FUZZ:
-    from utils import PassFuzzer
-    pass_manager = PassManager(context=module.context)
 
-    # TODO: Figure out why this is required, the weird string parse issue?
-    pass_manager.add("convert-linalg-to-loops")
-    pass_manager.run(module.operation)
+    if _FUZZ:
+        from utils import PassFuzzer
+        pass_manager = PassManager(context=module.context)
 
-    passes = [
-            "convert-linalg-to-loops",
-            "expand-strided-metadata",
-            "convert-scf-to-cf",
-            "convert-math-to-libm",
-            "reconcile-unrealized-casts",
-            "finalize-memref-to-llvm",
-            "convert-func-to-llvm",
-            "convert-index-to-llvm",
-        ]
-    print("Fuzzing MLIR Passes...")
+        # TODO: Figure out why this is required, the weird string parse issue?
+        pass_manager.add("convert-linalg-to-loops")
+        pass_manager.run(module.operation)
 
-    fuzzer = PassFuzzer(module, passes)
+        passes = [
+                "convert-linalg-to-loops",
+                "expand-strided-metadata",
+                "convert-scf-to-cf",
+                "convert-math-to-libm",
+                "reconcile-unrealized-casts",
+                "finalize-memref-to-llvm",
+                "convert-func-to-llvm",
+                "convert-index-to-llvm",
+            ]
+        print("Fuzzing MLIR Passes...")
 
-    sequence = fuzzer.find_effective_pass_sequence()
+        fuzzer = PassFuzzer(module, passes)
 
-    print("Effective Pass Sequence:")
-    print(sequence)
+        sequence = fuzzer.find_effective_pass_sequence()
 
-backend.run_passes(module)
+        print("Effective Pass Sequence:")
+        print(sequence)
 
-print("After lowering to LLVM:")
-print(str(module))
-print("\n" + "="*50 + "\n")
+    backend.run_passes(module)
 
-shared_libs = ("mlir_c_runner_utils",
-            "mlir_runner_utils")
+    print("After lowering to LLVM:")
+    print(str(module))
+    print("\n" + "="*50 + "\n")
 
-arr_max_reduce = backend.jit_compile(module, arr_max_reduce, (softmax_input_shape,), (softmax_input_shape[:-1],))
-arr_sub = backend.jit_compile(module, arr_sub, (softmax_input_shape, softmax_input_shape), (softmax_input_shape,))
-arr_exp = backend.jit_compile(module, arr_exp, (softmax_input_shape,), (softmax_input_shape,))
-arr_sum_reduce = backend.jit_compile(module, arr_sum_reduce, (softmax_input_shape,), (softmax_input_shape[:-1],))
-arr_div = backend.jit_compile(module, arr_div, (softmax_input_shape, softmax_input_shape), (softmax_input_shape,))
-arr_broadcast = backend.jit_compile(module, arr_broadcast, (softmax_input_shape[:-1],), (softmax_input_shape,))
+    shared_libs = ("mlir_c_runner_utils",
+                "mlir_runner_utils")
 
-arr_transpose = backend.jit_compile(module, arr_transpose, ((dims, dims),), ((dims, dims),))
-arr_expand = backend.jit_compile(module, arr_expand, ((dims, dims),), ((batch_size, dims, dims),))
-arr_reshape_exp_1 = backend.jit_compile(module, arr_reshape_exp_1, ((dims, dims),), ((batch_size, dims, dims),))
-arr_matmul = backend.jit_compile(module, arr_matmul, ((batch_size, seq_len, dims), (batch_size, dims, dims)), ((batch_size, seq_len, dims),))
-arr_reshape = backend.jit_compile(module, arr_reshape, ((batch_size, seq_len, dims),), ((batch_size, seq_len, n_local_heads, head_dim),))
+    arr_max_reduce = backend.jit_compile(module, arr_max_reduce, (softmax_input_shape,), (softmax_input_shape[:-1],))
+    arr_sub = backend.jit_compile(module, arr_sub, (softmax_input_shape, softmax_input_shape), (softmax_input_shape,))
+    arr_exp = backend.jit_compile(module, arr_exp, (softmax_input_shape,), (softmax_input_shape,))
+    arr_sum_reduce = backend.jit_compile(module, arr_sum_reduce, (softmax_input_shape,), (softmax_input_shape[:-1],))
+    arr_div = backend.jit_compile(module, arr_div, (softmax_input_shape, softmax_input_shape), (softmax_input_shape,))
+    arr_broadcast = backend.jit_compile(module, arr_broadcast, (softmax_input_shape[:-1],), (softmax_input_shape,))
 
-arr_reshape_2 = backend.jit_compile(module, arr_reshape_2, ((batch_size, seq_len, n_local_heads, head_dim),), ((batch_size, seq_len, n_local_heads, head_dim // 2, 2),))
-arr_take_0 = backend.jit_compile(module, arr_take_0, ((batch_size, seq_len, n_local_heads, head_dim // 2, 2),), ((batch_size, seq_len, n_local_heads, head_dim // 2, 1),), shared_libs=[find_library(x) for x in shared_libs])
-arr_take_1 = backend.jit_compile(module, arr_take_1, ((batch_size, seq_len, n_local_heads, head_dim // 2, 2),), ((batch_size, seq_len, n_local_heads, head_dim // 2, 1),), shared_libs=[find_library(x) for x in shared_libs])
-arr_reshape_3 = backend.jit_compile(module, arr_reshape_3, ((batch_size, seq_len, n_local_heads, head_dim // 2, 1),), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
-arr_expand_2 = backend.jit_compile(module, arr_expand_2, ((dims, dims),), ((batch_size, dims, dims),))
-arr_broadcast_2 = backend.jit_compile(module, arr_broadcast_2, ((seq_len, head_dim // 2),), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
-arr_mul = backend.jit_compile(module, arr_mul, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
-arr_sub_1 = backend.jit_compile(module, arr_sub_1, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
-arr_add = backend.jit_compile(module, arr_add, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
-arr_stack = backend.jit_compile(module, arr_stack, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim),), shared_libs=[find_library(x) for x in shared_libs])
+    arr_transpose = backend.jit_compile(module, arr_transpose, ((dims, dims),), ((dims, dims),))
+    arr_expand = backend.jit_compile(module, arr_expand, ((dims, dims),), ((batch_size, dims, dims),))
+    arr_reshape_exp_1 = backend.jit_compile(module, arr_reshape_exp_1, ((dims, dims),), ((batch_size, dims, dims),))
+    arr_matmul = backend.jit_compile(module, arr_matmul, ((batch_size, seq_len, dims), (batch_size, dims, dims)), ((batch_size, seq_len, dims),))
+    arr_reshape = backend.jit_compile(module, arr_reshape, ((batch_size, seq_len, dims),), ((batch_size, seq_len, n_local_heads, head_dim),))
 
-arr_transpose_2 = backend.jit_compile(module, arr_transpose_2, ((batch_size, seq_len, n_local_heads, head_dim),), ((batch_size, n_local_heads, seq_len, head_dim),))
-arr_setitem = backend.jit_compile(module, arr_setitem, ((batch_size, cache_size, n_heads, head_dim), (batch_size, seq_len, n_heads, head_dim)), (), shared_libs=[find_library(x) for x in shared_libs])
-arr_getitem = backend.jit_compile(module, arr_getitem, ((batch_size, cache_size, n_heads, head_dim),), ((batch_size, seq_len, n_heads, head_dim),), shared_libs=[find_library(x) for x in shared_libs])
-arr_transpose_3 = backend.jit_compile(module, arr_transpose_3, ((batch_size, n_local_heads, seq_len, head_dim),), ((batch_size, n_local_heads, head_dim, seq_len),))
-arr_matmul_1 = backend.jit_compile(module, arr_matmul_1, ((batch_size, n_local_heads, seq_len, head_dim), (batch_size, n_local_heads, head_dim, seq_len)), ((batch_size, n_local_heads, seq_len, seq_len),))
-arr_broadcast_3 = backend.jit_compile(module, arr_broadcast_3, ((seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),))
-arr_add_2 = backend.jit_compile(module, arr_add_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, seq_len)), ((batch_size, n_local_heads, seq_len, seq_len),))
-arr_matmul_2 = backend.jit_compile(module, arr_matmul_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, head_dim)), ((batch_size, n_local_heads, seq_len, head_dim),))
-arr_transpose_4 = backend.jit_compile(module, arr_transpose_4, ((batch_size, n_local_heads, seq_len, head_dim),), ((batch_size, seq_len, n_local_heads, head_dim),))
-arr_reshape_4 = backend.jit_compile(module, arr_reshape_4, ((batch_size, seq_len, n_local_heads, head_dim),), ((batch_size, seq_len, dims),))
-arr_fill = backend.jit_compile(module, arr_fill, (None,), ((batch_size, n_local_heads, seq_len, seq_len),), None)
-arr_sqrt = backend.jit_compile(module, arr_sqrt, ((batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),), None)
-arr_div_2 = backend.jit_compile(module, arr_div_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),))
+    arr_reshape_2 = backend.jit_compile(module, arr_reshape_2, ((batch_size, seq_len, n_local_heads, head_dim),), ((batch_size, seq_len, n_local_heads, head_dim // 2, 2),))
+    arr_take_0 = backend.jit_compile(module, arr_take_0, ((batch_size, seq_len, n_local_heads, head_dim // 2, 2),), ((batch_size, seq_len, n_local_heads, head_dim // 2, 1),), shared_libs=[find_library(x) for x in shared_libs])
+    arr_take_1 = backend.jit_compile(module, arr_take_1, ((batch_size, seq_len, n_local_heads, head_dim // 2, 2),), ((batch_size, seq_len, n_local_heads, head_dim // 2, 1),), shared_libs=[find_library(x) for x in shared_libs])
+    arr_reshape_3 = backend.jit_compile(module, arr_reshape_3, ((batch_size, seq_len, n_local_heads, head_dim // 2, 1),), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
+    arr_expand_2 = backend.jit_compile(module, arr_expand_2, ((dims, dims),), ((batch_size, dims, dims),))
+    arr_broadcast_2 = backend.jit_compile(module, arr_broadcast_2, ((seq_len, head_dim // 2),), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
+    arr_mul = backend.jit_compile(module, arr_mul, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
+    arr_sub_1 = backend.jit_compile(module, arr_sub_1, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
+    arr_add = backend.jit_compile(module, arr_add, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim // 2),))
+    arr_stack = backend.jit_compile(module, arr_stack, ((batch_size, seq_len, n_local_heads, head_dim // 2), (batch_size, seq_len, n_local_heads, head_dim // 2)), ((batch_size, seq_len, n_local_heads, head_dim),), shared_libs=[find_library(x) for x in shared_libs])
 
-print("Function compiled successfully!")
+    arr_transpose_2 = backend.jit_compile(module, arr_transpose_2, ((batch_size, seq_len, n_local_heads, head_dim),), ((batch_size, n_local_heads, seq_len, head_dim),))
+    arr_setitem = backend.jit_compile(module, arr_setitem, ((batch_size, cache_size, n_heads, head_dim), (batch_size, seq_len, n_heads, head_dim)), (), shared_libs=[find_library(x) for x in shared_libs])
+    arr_getitem = backend.jit_compile(module, arr_getitem, ((batch_size, cache_size, n_heads, head_dim),), ((batch_size, seq_len, n_heads, head_dim),), shared_libs=[find_library(x) for x in shared_libs])
+    arr_transpose_3 = backend.jit_compile(module, arr_transpose_3, ((batch_size, n_local_heads, seq_len, head_dim),), ((batch_size, n_local_heads, head_dim, seq_len),))
+    arr_matmul_1 = backend.jit_compile(module, arr_matmul_1, ((batch_size, n_local_heads, seq_len, head_dim), (batch_size, n_local_heads, head_dim, seq_len)), ((batch_size, n_local_heads, seq_len, seq_len),))
+    arr_broadcast_3 = backend.jit_compile(module, arr_broadcast_3, ((seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),))
+    arr_add_2 = backend.jit_compile(module, arr_add_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, seq_len)), ((batch_size, n_local_heads, seq_len, seq_len),))
+    arr_matmul_2 = backend.jit_compile(module, arr_matmul_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, head_dim)), ((batch_size, n_local_heads, seq_len, head_dim),))
+    arr_transpose_4 = backend.jit_compile(module, arr_transpose_4, ((batch_size, n_local_heads, seq_len, head_dim),), ((batch_size, seq_len, n_local_heads, head_dim),))
+    arr_reshape_4 = backend.jit_compile(module, arr_reshape_4, ((batch_size, seq_len, n_local_heads, head_dim),), ((batch_size, seq_len, dims),))
+    arr_fill = backend.jit_compile(module, arr_fill, (None,), ((batch_size, n_local_heads, seq_len, seq_len),), None)
+    arr_sqrt = backend.jit_compile(module, arr_sqrt, ((batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),), None)
+    arr_div_2 = backend.jit_compile(module, arr_div_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),))
 
-def softmax(x):
-    """Compute softmax values for each sets of scores in x."""
-    e_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
-    return e_x / np.sum(e_x, axis=-1, keepdims=True)
+    # SILU
+    silu_arr_neg = backend.jit_compile(module, silu_arr_neg, ((batch_size, seq_len, silu_dims),), ((batch_size, seq_len, silu_dims),), None) 
+    silu_arr_exp = backend.jit_compile(module, silu_arr_exp, ((batch_size, seq_len, silu_dims),), ((batch_size, seq_len, silu_dims),), None)
+ 
+    silu_arr_fill = backend.jit_compile(module, silu_arr_fill, (None,), ((batch_size, seq_len, silu_dims),), None)
+    silu_arr_add =  backend.jit_compile(module, silu_arr_add, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    silu_arr_mul =  backend.jit_compile(module, silu_arr_mul, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    silu_arr_div =  backend.jit_compile(module, silu_arr_div, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
 
-def softmax_mlir(x):
-    e_x = arr_exp(arr_sub(x, arr_broadcast(arr_max_reduce(x))))
-    return arr_div(e_x, arr_broadcast(arr_sum_reduce(e_x)))
+    # Feed forward
+    ff_arr_transpose = backend.jit_compile(module, ff_arr_transpose, ((dims, silu_dims),), ((silu_dims, dims),))
+    ff_arr_transpose_2 = backend.jit_compile(module, ff_arr_transpose_2, ((silu_dims, dims),), ((dims, silu_dims),))
+    ff_arr_mul = backend.jit_compile(module, ff_arr_mul, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    ff_arr_broadcast = backend.jit_compile(module, ff_arr_broadcast, ((dims, silu_dims),), ((batch_size, dims, silu_dims),))
+    ff_arr_broadcast_2 = backend.jit_compile(module, ff_arr_broadcast_2, ((silu_dims, dims),), ((batch_size, silu_dims, dims),))
+    ff_arr_matmul = backend.jit_compile(module, ff_arr_matmul, ((batch_size, seq_len, dims), (batch_size, dims, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    ff_arr_matmul_2 = backend.jit_compile(module, ff_arr_matmul_2, ((batch_size, seq_len, silu_dims), (batch_size, silu_dims, dims)), ((batch_size, seq_len, dims),))
 
-# print("Testing Softmax")
+    # RMSNorm
+    rms_arr_square = backend.jit_compile(module, rms_arr_square, ((batch_size, seq_len, dims),(batch_size, seq_len, dims)), ((batch_size, seq_len, dims),), None)
+    rms_arr_sum_reduce = backend.jit_compile(module, rms_arr_sum_reduce, ((batch_size, seq_len, dims),), ((batch_size, seq_len),), None)
+    rms_arr_broadcast = backend.jit_compile(module, rms_arr_broadcast, ((batch_size, seq_len),), ((batch_size, seq_len, dims),), None)
+    rms_arr_div = backend.jit_compile(module, rms_arr_div, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),), None)
+    rms_arr_fill = backend.jit_compile(module, rms_arr_fill, (None,), ((batch_size, seq_len, dims),), None)
+    rms_arr_add = backend.jit_compile(module, rms_arr_add, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),), None)
+    rms_arr_sqrt = backend.jit_compile(module, rms_arr_sqrt, ((batch_size, seq_len, dims),), ((batch_size, seq_len, dims),), None)
+    rms_arr_mul = backend.jit_compile(module, rms_arr_mul, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),))
+    rms_arr_broadcast_2 = backend.jit_compile(module, rms_arr_broadcast_2, ((dims,),), ((batch_size, seq_len, dims),), None)
 
-# Random input data
-softmax_input = np.random.random(softmax_input_shape)
-# NumPy execution
-numpy_result = softmax(softmax_input)
-# SealIR execution
-mlir_result = softmax_mlir(softmax_input)
-
-# Check Results
-assert np.allclose(numpy_result, mlir_result)
-print("Function executed and verified succesfully.")
-
-def apply_rotary_emb(xq, xk, freqs_cos, freqs_sin):
-    xqri = xq.reshape(*xq.shape[:-1], -1, 2)
-    xkri = xk.reshape(*xk.shape[:-1], -1, 2)
-
-    xq_r = xqri[..., 0]
-    xq_i = xqri[..., 1]
-    xk_r = xkri[..., 0]
-    xk_i = xkri[..., 1]
-    freqs_cos = np.broadcast_to(np.expand_dims(freqs_cos, axis=(0, 2)), (1, 5, 6, 24))
-    freqs_sin = np.broadcast_to(np.expand_dims(freqs_sin, axis=(0, 2)), (1, 5, 6, 24))
-    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
-    xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
-    xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin
-    xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
-
-    # Combine real and imaginary parts
-    xq_out = np.stack([xq_out_r, xq_out_i], axis=-1).reshape(
-        xq_out_r.shape[:-1] + (-1,)
-    )
-    xk_out = np.stack([xk_out_r, xk_out_i], axis=-1).reshape(
-        xk_out_r.shape[:-1] + (-1,)
-    )
-
-    return xq_out, xk_out
-
-def apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin):
-    xqri = arr_reshape_2(xq)
-    xkri = arr_reshape_2(xk)
+    # Transformer
+    tran_arr_add = backend.jit_compile(module, tran_arr_add, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),))
     
-    xq_r = arr_reshape_3(arr_take_0(xqri))
-    xq_i = arr_reshape_3(arr_take_1(xqri))
-    xk_r = arr_reshape_3(arr_take_0(xkri))
-    xk_i = arr_reshape_3(arr_take_1(xkri))
 
-    freqs_cos = arr_broadcast_2(freqs_cos)
-    freqs_sin = arr_broadcast_2(freqs_sin)
+    print("All functions compiled successfully!")
+    print("\n" + "=" * 50 + "\n")
 
-    xq_out_r = arr_sub_1(arr_mul(xq_r, freqs_cos), arr_mul(xq_i, freqs_sin))
-    xq_out_i = arr_add(arr_mul(xq_r, freqs_sin), arr_mul(xq_i, freqs_cos))
-    xk_out_r = arr_sub_1(arr_mul(xk_r, freqs_cos), arr_mul(xk_i, freqs_sin))
-    xk_out_i = arr_add(arr_mul(xk_r, freqs_sin), arr_mul(xk_i, freqs_cos))
+    def softmax(x):
+        """Compute softmax values for each sets of scores in x."""
+        e_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
+        return e_x / np.sum(e_x, axis=-1, keepdims=True)
 
-    # TODO: Combine real and imaginary parts
-    xq_out = arr_stack(xq_out_r, xq_out_i)
-    xk_out = arr_stack(xk_out_r, xk_out_i)
+    def softmax_mlir(x):
+        e_x = arr_exp(arr_sub(x, arr_broadcast(arr_max_reduce(x))))
+        return arr_div(e_x, arr_broadcast(arr_sum_reduce(e_x)))
 
-    return xq_out, xk_out
+    print("Testing Softmax")
 
-print("Testing Apply Rotatory Embeddings")
+    # Random input data
+    softmax_input = np.random.random(softmax_input_shape)
+    # NumPy execution
+    numpy_result = softmax(softmax_input)
+    # SealIR execution
+    mlir_result = softmax_mlir(softmax_input)
 
-# Generate random data
-xq = np.random.random((batch_size, seq_len, n_local_heads, head_dim))
-xk = np.random.random((batch_size, seq_len, n_local_heads, head_dim))
-freqs_cos = np.random.random((seq_len, head_dim // 2))
-freqs_sin = np.random.random((seq_len, head_dim // 2))
+    # Check Results
+    assert np.allclose(numpy_result, mlir_result)
+    print("Function executed and verified succesfully.")
+    print("\n" + "=" * 50 + "\n")
 
-# NumPy execution
-numpy_result = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
-# SealIR execution
-mlir_result = apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin)
+    def apply_rotary_emb(xq, xk, freqs_cos, freqs_sin):
+        xqri = xq.reshape(*xq.shape[:-1], -1, 2)
+        xkri = xk.reshape(*xk.shape[:-1], -1, 2)
 
-# Check Results
-assert np.allclose(numpy_result, mlir_result)
-print("Function executed and verified succesfully.")
+        xq_r = xqri[..., 0]
+        xq_i = xqri[..., 1]
+        xk_r = xkri[..., 0]
+        xk_i = xkri[..., 1]
+        freqs_cos = np.broadcast_to(np.expand_dims(freqs_cos, axis=(0, 2)), (1, 5, 6, 24))
+        freqs_sin = np.broadcast_to(np.expand_dims(freqs_sin, axis=(0, 2)), (1, 5, 6, 24))
+        xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
+        xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
+        xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin
+        xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
 
-def attention(
-    x, # shape = (1, 5, 288)
-    start_pos, # 0
-    mask, # shape = (5, 5)
-    freqs_cos, # shape = (5, 24)
-    freqs_sin, # shape = (5, 24)
-    attn_weights, # 4 arrays of shape = (288, 288)
-    cache_k, # shape = (1, 256, 6, 48)
-    cache_v, # shape = (1, 256, 6, 48)
-):
-    q_weight, k_weight, v_weight, o_weight = [w.T for w in attn_weights]
+        # Combine real and imaginary parts
+        xq_out = np.stack([xq_out_r, xq_out_i], axis=-1).reshape(
+            xq_out_r.shape[:-1] + (-1,)
+        )
+        xk_out = np.stack([xk_out_r, xk_out_i], axis=-1).reshape(
+            xk_out_r.shape[:-1] + (-1,)
+        )
 
-    n_local_heads = n_heads # 6
-    head_dim = dims // n_heads # 288/ 6 = 48
+        return xq_out, xk_out
 
-    batch_size, seq_len, _ = x.shape
+    def apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin):
+        xqri = arr_reshape_2(xq)
+        xkri = arr_reshape_2(xk)
 
-    xq = x @ q_weight
-    xk = x @ k_weight
-    xv = x @ v_weight
+        xq_r = arr_reshape_3(arr_take_0(xqri))
+        xq_i = arr_reshape_3(arr_take_1(xqri))
+        xk_r = arr_reshape_3(arr_take_0(xkri))
+        xk_i = arr_reshape_3(arr_take_1(xkri))
 
-    xq = xq.reshape(batch_size, seq_len, n_local_heads, head_dim)
-    xk = xk.reshape(batch_size, seq_len, n_local_heads, head_dim)
-    xv = xv.reshape(batch_size, seq_len, n_local_heads, head_dim)
+        freqs_cos = arr_broadcast_2(freqs_cos)
+        freqs_sin = arr_broadcast_2(freqs_sin)
 
-    xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
+        xq_out_r = arr_sub_1(arr_mul(xq_r, freqs_cos), arr_mul(xq_i, freqs_sin))
+        xq_out_i = arr_add(arr_mul(xq_r, freqs_sin), arr_mul(xq_i, freqs_cos))
+        xk_out_r = arr_sub_1(arr_mul(xk_r, freqs_cos), arr_mul(xk_i, freqs_sin))
+        xk_out_i = arr_add(arr_mul(xk_r, freqs_sin), arr_mul(xk_i, freqs_cos))
 
-    cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
-    cache_v[:batch_size, start_pos : start_pos + seq_len] = xv
-    ks = cache_k[:batch_size, : start_pos + seq_len]
-    vs = cache_v[:batch_size, : start_pos + seq_len]
+        # TODO: Combine real and imaginary parts
+        xq_out = arr_stack(xq_out_r, xq_out_i)
+        xk_out = arr_stack(xk_out_r, xk_out_i)
 
-    xq = xq.transpose(0, 2, 1, 3)
-    xk = ks.transpose(0, 2, 1, 3)
-    xv = vs.transpose(0, 2, 1, 3)
+        return xq_out, xk_out
 
-    attention_scores = (xq @ xk.transpose(0, 1, 3, 2)) / pymath.sqrt(head_dim)
-    if mask is not None:
-        attention_scores = attention_scores + mask[None, None, :, :]
-    attn = softmax(attention_scores)
-    output = attn @ xv
-    output = output.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, -1)
-    output = output @ o_weight
-    return output, cache_k, cache_v
+    print("Testing Apply Rotatory Embeddings")
 
-def attention_mlir(
-    x, # shape = (1, 5, 288)
-    start_pos, # 0
-    mask, # shape = (5, 5)
-    freqs_cos, # shape = (5, 24)
-    freqs_sin, # shape = (5, 24)
-    attn_weights, # 4 arrays of shape = (288, 288)
-    cache_k, # shape = (1, 256, 6, 48)
-    cache_v, # shape = (1, 256, 6, 48)
-):  
-    q_weight, k_weight, v_weight, o_weight = [arr_transpose(w) for w in attn_weights]
+    # Generate random data
+    xq = np.random.random((batch_size, seq_len, n_local_heads, head_dim))
+    xk = np.random.random((batch_size, seq_len, n_local_heads, head_dim))
+    freqs_cos = np.random.random((seq_len, head_dim // 2))
+    freqs_sin = np.random.random((seq_len, head_dim // 2))
 
-    xq = arr_matmul(x, arr_reshape_exp_1(q_weight))
-    xk = arr_matmul(x, arr_reshape_exp_1(k_weight))
-    xv = arr_matmul(x, arr_reshape_exp_1(v_weight))
+    # NumPy execution
+    numpy_result = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
+    # SealIR execution
+    mlir_result = apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin)
 
-    xq = arr_reshape(xq)
-    xk = arr_reshape(xk)
-    xv = arr_reshape(xv)
+    # Check Results
+    assert np.allclose(numpy_result, mlir_result)
+    print("Function executed and verified succesfully.")
+    print("\n" + "=" * 50 + "\n")
 
-    xq, xk = apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin)
+    def attention(
+        x, # shape = (1, 5, 288)
+        start_pos, # 0
+        mask, # shape = (5, 5)
+        freqs_cos, # shape = (5, 24)
+        freqs_sin, # shape = (5, 24)
+        attn_weights, # 4 arrays of shape = (288, 288)
+        cache_k, # shape = (1, 256, 6, 48)
+        cache_v, # shape = (1, 256, 6, 48)
+    ):
+        q_weight, k_weight, v_weight, o_weight = [w.T for w in attn_weights]
 
-    arr_setitem(cache_k, xk)
-    arr_setitem(cache_v, xv)
-    ks = arr_getitem(cache_k)
-    vs = arr_getitem(cache_v)
+        n_local_heads = n_heads # 6
+        head_dim = dims // n_heads # 288/ 6 = 48
 
-    xq = arr_transpose_2(xq)
-    xk = arr_transpose_2(ks)
-    xv = arr_transpose_2(vs)
+        batch_size, seq_len, _ = x.shape
 
-    attention_scores = arr_div_2(arr_matmul_1(xq, arr_transpose_3(xk)), arr_sqrt(arr_fill(head_dim)))
+        xq = x @ q_weight
+        xk = x @ k_weight
+        xv = x @ v_weight
 
-    if mask is not None:
-        attention_scores = arr_add_2(attention_scores, arr_broadcast_3(mask))
+        xq = xq.reshape(batch_size, seq_len, n_local_heads, head_dim)
+        xk = xk.reshape(batch_size, seq_len, n_local_heads, head_dim)
+        xv = xv.reshape(batch_size, seq_len, n_local_heads, head_dim)
 
-    attn = softmax_mlir(attention_scores)
+        xq, xk = apply_rotary_emb(xq, xk, freqs_cos, freqs_sin)
 
-    output = arr_matmul_2(attn, xv)
-    output = arr_reshape_4(arr_transpose_4(output))
+        cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
+        cache_v[:batch_size, start_pos : start_pos + seq_len] = xv
+        ks = cache_k[:batch_size, : start_pos + seq_len]
+        vs = cache_v[:batch_size, : start_pos + seq_len]
 
-    output = arr_matmul(output, arr_reshape_exp_1(o_weight))
+        xq = xq.transpose(0, 2, 1, 3)
+        xk = ks.transpose(0, 2, 1, 3)
+        xv = vs.transpose(0, 2, 1, 3)
 
-    return output, cache_k, cache_v
+        attention_scores = (xq @ xk.transpose(0, 1, 3, 2)) / pymath.sqrt(head_dim)
+        if mask is not None:
+            attention_scores = attention_scores + mask[None, None, :, :]
+        attn = softmax(attention_scores)
+        output = attn @ xv
+        output = output.transpose(0, 2, 1, 3).reshape(batch_size, seq_len, -1)
+        output = output @ o_weight
+        return output, cache_k, cache_v
 
-print("Testing Attention layer")
+    def attention_mlir(
+        x, # shape = (1, 5, 288)
+        start_pos, # 0
+        mask, # shape = (5, 5)
+        freqs_cos, # shape = (5, 24)
+        freqs_sin, # shape = (5, 24)
+        attn_weights, # 4 arrays of shape = (288, 288)
+        cache_k, # shape = (1, 256, 6, 48)
+        cache_v, # shape = (1, 256, 6, 48)
+    ):
+        q_weight, k_weight, v_weight, o_weight = [arr_transpose(w) for w in attn_weights]
 
-attention_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
-attention_weights = [np.random.random(dims*dims).reshape(dims, dims) for _ in range(4)]
-mask = np.random.random(seq_len * seq_len).reshape(seq_len, seq_len)
-freqs_cos = np.random.random(seq_len * head_dim // 2).reshape(seq_len, head_dim // 2)
-freqs_sin = np.random.random(seq_len * head_dim // 2).reshape(seq_len, head_dim // 2)
-cache_k = np.zeros((batch_size, cache_size, n_heads, head_dim))
-cache_v = np.zeros((batch_size, cache_size, n_heads, head_dim))
-cache_k_copy = cache_k.copy()
-cache_v_copy = cache_v.copy()
+        xq = arr_matmul(x, arr_reshape_exp_1(q_weight))
+        xk = arr_matmul(x, arr_reshape_exp_1(k_weight))
+        xv = arr_matmul(x, arr_reshape_exp_1(v_weight))
 
-numpy_result = attention(x=attention_input,
-                         start_pos=0,
-                         mask=mask,
-                         freqs_cos=freqs_cos,
-                         freqs_sin=freqs_sin,
-                         attn_weights=attention_weights,
-                         cache_k=cache_k,
-                         cache_v=cache_v)
-mlir_result = attention_mlir(x=attention_input,
-                         start_pos=0,
-                         mask=mask,
-                         freqs_cos=freqs_cos,
-                         freqs_sin=freqs_sin,
-                         attn_weights=attention_weights,
-                         cache_k=cache_k_copy,
-                         cache_v=cache_v_copy)
+        xq = arr_reshape(xq)
+        xk = arr_reshape(xk)
+        xv = arr_reshape(xv)
 
-for res_np, res_mlir in zip(numpy_result, mlir_result):
-    assert np.allclose(res_np, res_mlir)
+        xq, xk = apply_rotary_emb_mlir(xq, xk, freqs_cos, freqs_sin)
 
-print("Function executed succesfully.")
+        arr_setitem(cache_k, xk)
+        arr_setitem(cache_v, xv)
+        ks = arr_getitem(cache_k)
+        vs = arr_getitem(cache_v)
 
-print("\n" + "=" * 50 + "\n")
+        xq = arr_transpose_2(xq)
+        xk = arr_transpose_2(ks)
+        xv = arr_transpose_2(vs)
+
+        attention_scores = arr_div_2(arr_matmul_1(xq, arr_transpose_3(xk)), arr_sqrt(arr_fill(head_dim)))
+
+        if mask is not None:
+            attention_scores = arr_add_2(attention_scores, arr_broadcast_3(mask))
+
+        attn = softmax_mlir(attention_scores)
+
+        output = arr_matmul_2(attn, xv)
+        output = arr_reshape_4(arr_transpose_4(output))
+
+        output = arr_matmul(output, arr_reshape_exp_1(o_weight))
+
+        return output, cache_k, cache_v
+
+    print("Testing Attention layer")
+
+    attention_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+    attention_weights = [np.random.random(dims*dims).reshape(dims, dims) for _ in range(4)]
+    mask = np.random.random(seq_len * seq_len).reshape(seq_len, seq_len)
+    freqs_cos = np.random.random(seq_len * head_dim // 2).reshape(seq_len, head_dim // 2)
+    freqs_sin = np.random.random(seq_len * head_dim // 2).reshape(seq_len, head_dim // 2)
+    cache_k = np.zeros((batch_size, cache_size, n_heads, head_dim))
+    cache_v = np.zeros((batch_size, cache_size, n_heads, head_dim))
+    cache_k_copy = cache_k.copy()
+    cache_v_copy = cache_v.copy()
+
+    numpy_result = attention(x=attention_input,
+                            start_pos=0,
+                            mask=mask,
+                            freqs_cos=freqs_cos,
+                            freqs_sin=freqs_sin,
+                            attn_weights=attention_weights,
+                            cache_k=cache_k,
+                            cache_v=cache_v)
+    mlir_result = attention_mlir(x=attention_input,
+                            start_pos=0,
+                            mask=mask,
+                            freqs_cos=freqs_cos,
+                            freqs_sin=freqs_sin,
+                            attn_weights=attention_weights,
+                            cache_k=cache_k_copy,
+                            cache_v=cache_v_copy)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def silu(x):
+        result = x * (1 / (1 + np.exp(-x)))
+        return result
+
+    def silu_mlir(x):
+        result = silu_arr_mul(x, silu_arr_div(silu_arr_fill(1.0), (silu_arr_add(silu_arr_fill(1.0), silu_arr_exp(silu_arr_neg(x))))))
+        return result
+
+    print("Testing SILU")
+
+    silu_input = np.random.random(batch_size * seq_len * silu_dims).reshape(batch_size, seq_len, silu_dims)
+
+    numpy_result = silu(x=silu_input)
+    mlir_result = silu_mlir(x=silu_input)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def feed_forward(x, up_weight, gate_weight, down_weight):
+        swish = silu(x @ gate_weight.T)
+        x_v = x @ up_weight.T
+        x_ff = swish * x_v
+        x_out = x_ff @ down_weight.T
+        return x_out
+
+    def feed_forward_mlir(x, up_weight, gate_weight, down_weight):
+        swish = silu_mlir(ff_arr_matmul(x, ff_arr_broadcast(ff_arr_transpose_2(gate_weight))))
+        x_v = ff_arr_matmul(x, ff_arr_broadcast(ff_arr_transpose_2(up_weight)))
+        x_ff = ff_arr_mul(swish, x_v)
+        x_out = ff_arr_matmul_2(x_ff, ff_arr_broadcast_2(ff_arr_transpose(down_weight)))
+        return x_out
+
+    print("Testing feed forward")
+
+    x_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+    up_weight = np.random.random(silu_dims * dims).reshape(silu_dims, dims)
+    gate_weight = np.random.random(silu_dims * dims).reshape(silu_dims, dims)
+    down_weight = np.random.random(dims * silu_dims).reshape(dims, silu_dims)
+
+    numpy_result = feed_forward(x=x_input,
+                                up_weight=up_weight,
+                                gate_weight=gate_weight,
+                                down_weight=down_weight)
+    mlir_result = feed_forward_mlir(x=x_input,
+                                up_weight=up_weight,
+                                gate_weight=gate_weight,
+                                down_weight=down_weight)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def rmsnorm(x, weight, eps):
+        z_float = np.mean(x**2, -1, keepdims=True) + eps
+        z = x / np.sqrt(z_float)
+        result = z * weight
+        return result
+
+    def rmsnorm_mlir(x, weight, eps):
+        z_float = rms_arr_add(rms_arr_div(rms_arr_broadcast(rms_arr_sum_reduce(rms_arr_square(x, x))), rms_arr_fill(float(dims))), rms_arr_fill(float(eps)))
+        z = rms_arr_div(x, rms_arr_sqrt(z_float))
+        result = rms_arr_mul(z, rms_arr_broadcast_2(weight))
+        return result
+
+    print("Testing RMSNorm")
+
+    x_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+    weight = np.random.random(dims).reshape(dims)
+    eps = 1e-06
+
+    numpy_result = rmsnorm(x=x_input,
+                           weight=weight,
+                           eps=eps)
+    mlir_result = rmsnorm_mlir(x=x_input,
+                               weight=weight,
+                               eps=eps)
+
+    
+    assert np.allclose(numpy_result, mlir_result)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def transformer_block(
+        x,
+        start_pos,
+        mask,
+        freqs_cos,
+        freqs_sin,
+        block_weights,
+        cache_k,
+        cache_v,
+    ):
+        attn_weights, ff_weights, in_norm_weight, post_norm_weight = block_weights
+
+        norm_x = rmsnorm(x, in_norm_weight, norm_eps)
+        h1, cache_k, cache_v = attention(
+            norm_x,
+            start_pos,
+            mask,
+            freqs_cos,
+            freqs_sin,
+            attn_weights,
+            cache_k,
+            cache_v,
+        )
+        z = x + h1
+        norm_z = rmsnorm(z, post_norm_weight, norm_eps)
+        h2 = feed_forward(norm_z, *ff_weights)
+        out = z + h2
+        return out, cache_k, cache_v
+
+    def transformer_block_mlir(
+        x,
+        start_pos,
+        mask,
+        freqs_cos,
+        freqs_sin,
+        block_weights,
+        cache_k,
+        cache_v,
+    ):
+        attn_weights, ff_weights, in_norm_weight, post_norm_weight = block_weights
+
+        norm_x = rmsnorm_mlir(x, in_norm_weight, norm_eps)
+        h1, cache_k, cache_v = attention_mlir(
+            norm_x,
+            start_pos,
+            mask,
+            freqs_cos,
+            freqs_sin,
+            attn_weights,
+            cache_k,
+            cache_v,
+        )
+        z = tran_arr_add(x, h1)
+        norm_z = rmsnorm_mlir(z, post_norm_weight, norm_eps)
+        h2 = feed_forward_mlir(norm_z, *ff_weights)
+        out = tran_arr_add(z, h2)
+        return out, cache_k, cache_v
+
+    print("Testing Transformer Layer")
+
+    x_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+    start_pos = 0
+    mask = np.random.random(seq_len * seq_len).reshape(seq_len, seq_len)
+    freqs_cos = np.random.random(seq_len * head_dim // 2).reshape(seq_len, head_dim // 2)
+    freqs_sin = np.random.random(seq_len * head_dim // 2).reshape(seq_len, head_dim // 2)
+    block_weights = [
+        [np.random.random(dims*dims).reshape(dims, dims) for _ in range(4)],
+        [
+            np.random.random(silu_dims * dims).reshape(silu_dims, dims),
+            np.random.random(silu_dims * dims).reshape(silu_dims, dims),
+            np.random.random(silu_dims * dims).reshape(dims, silu_dims),
+        ],
+        np.random.random(dims).reshape(dims),
+        np.random.random(dims).reshape(dims),
+    ]
+
+    cache_k = np.random.random(batch_size * cache_size * n_heads * head_dim).reshape(batch_size, cache_size, n_heads, head_dim)
+    cache_v = np.random.random(batch_size * cache_size * n_heads * head_dim).reshape(batch_size, cache_size, n_heads, head_dim)
+    
+    numpy_result = transformer_block(x=x_input,
+                                     start_pos=start_pos,
+                                     mask=mask,
+                                     freqs_cos=freqs_cos,
+                                     freqs_sin=freqs_sin,
+                                     block_weights=block_weights,
+                                     cache_k=cache_k,
+                                     cache_v=cache_v)
+
+    mlir_result = transformer_block_mlir(x=x_input,
+                                     start_pos=start_pos,
+                                     mask=mask,
+                                     freqs_cos=freqs_cos,
+                                     freqs_sin=freqs_sin,
+                                     block_weights=block_weights,
+                                     cache_k=cache_k,
+                                     cache_v=cache_v)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
