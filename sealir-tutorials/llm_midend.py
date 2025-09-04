@@ -1,4 +1,5 @@
 from __future__ import annotations
+import pytest
 import numpy as np
 import operator
 from functools import reduce
@@ -661,6 +662,9 @@ class LLM_generic(NbOp_Base):
 
 class CostModel(_ch05_MyCostModel):
     def get_cost_function(self, nodename, op, ty, cost, children):
+        match op:
+            case "·.getType" if nodename.endswith("-TypeVar_getType"):
+                return self.get_simple(float('inf'))
         cost = super().get_cost_function(nodename, op, ty, cost, children)
         return cost
 
@@ -795,7 +799,6 @@ class StubBackend:
         # outtypes
         outtypes = {}
         for port in func.body.ports:
-
             annos = list(ase.search_parents(port.value, lambda x: isinstance(x, rg.Generic) and x._args[0]=='Annotate'))
             if annos:
                 outtypes[port.name] = TypeSpeller.apply(annos[0]._args[2])
@@ -824,6 +827,7 @@ class MlirBackend(_ch06_MlirBackend):
         [func] = [child for child in root._args
                   if isinstance(child, rg.Func)]
 
+        print(format_rvsdg(func))
         fname = func.fname
         beginnode = func.body.begin
         intypes = {}
@@ -834,6 +838,7 @@ class MlirBackend(_ch06_MlirBackend):
             if annos:
                 intypes[idx] = TypeSpeller.apply(annos[0]._args[2])
         print(intypes)
+        self._argtys = tuple(intypes.values())
 
         # outtypes
         outtypes = {}
@@ -851,7 +856,6 @@ class MlirBackend(_ch06_MlirBackend):
 
         argtypes = tuple(intypes.values())
         print(argtypes)
-        print(format_rvsdg(func))
 
         super().lower(func, argtypes)
         return self.module
@@ -889,7 +893,6 @@ class MlirBackend(_ch06_MlirBackend):
         be: LlamaBackend = self.codegen
         match op, operands:
             case "NpyOp_Exp_Shaped<operand, outshape>", (operand, outshape):
-                print("----", operands)
                 shape = TypeSpeller.apply(outshape)
                 nd = len(shape)
                 fname_exp = be.gen_array_unary(self.module, nd, math.exp, None)
@@ -906,7 +909,6 @@ class MlirBackend(_ch06_MlirBackend):
                 return result
             case "NpyOp_Divide_Shaped<lhs, rhs, outshape>", (lhs, rhs, outshape):
                 # Implements np.max(operand, axis, keepdims=True)
-                print("----", operands)
                 shape = TypeSpeller.apply(outshape)
                 nd = len(shape)
                 fname_div = be.gen_array_binary(self.module, nd, nd, arith.divf, None)
@@ -923,7 +925,6 @@ class MlirBackend(_ch06_MlirBackend):
 
                 return result
             case "NpyOp_Subtract_Shaped<lhs, rhs, outshape>", (lhs, rhs, outshape):
-                print("----", operands)
                 shape = TypeSpeller.apply(outshape)
                 nd = len(shape)
                 fname_sub = be.gen_array_binary(self.module, nd, nd, arith.subf, None)
@@ -967,9 +968,10 @@ class MlirBackend(_ch06_MlirBackend):
                 print(result_type)
                 # Build final shape with keepdims=True (reduced dim becomes dynamic size)
                 # Need to add the size-1 dimension back for allocation
-                one_const = arith.ConstantOp(ir.IndexType.get(), 5)
+                print("***HACK***")
+                axis_shape = memref.DimOp(opval, arith.ConstantOp(ir.IndexType.get(), axis))
                 final_dims = reduced_dims.copy()
-                final_dims.insert(axis, one_const)
+                final_dims.insert(axis, axis_shape)
 
                 final_shape = [dynshape] * nd
                 memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
@@ -981,7 +983,6 @@ class MlirBackend(_ch06_MlirBackend):
                 )
                 return result
             case "NpyOp_Sum_Shaped<operand, axis, keepdims, outshape>", (operand, axis, True, outshape):
-                print("----", operands)
                 shape = TypeSpeller.apply(outshape)
                 nd = len(shape)
                 if axis < 0:
@@ -1004,13 +1005,10 @@ class MlirBackend(_ch06_MlirBackend):
                 result_reduced = memref.AllocOp(memref_type, reduced_dims, [])
                 func.call((), fname_reduce, [opval, result_reduced])
 
-                # broadcast - need to add dimension back at the axis position
-                print(result_type)
-                # Build final shape with keepdims=True (reduced dim becomes dynamic size)
-                # Need to add the size-1 dimension back for allocation
-                one_const = arith.ConstantOp(ir.IndexType.get(), 5)
+                print("***HACK***")
+                axis_shape = memref.DimOp(opval, arith.ConstantOp(ir.IndexType.get(), axis))
                 final_dims = reduced_dims.copy()
-                final_dims.insert(axis, one_const)
+                final_dims.insert(axis, axis_shape)
 
                 final_shape = [dynshape] * nd
                 memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
@@ -1046,17 +1044,6 @@ class MlirBackend(_ch06_MlirBackend):
                         target_dims.append(arith.ConstantOp(ir.IndexType.get(), dim_size))
                     else:
                         assert False, 'not supported' # TODO
-                # # Broadcast lhs to output shape (even if it's already the right shape)
-                # lhs_broadcasted = memref.AllocOp(memref_type, target_dims, [])
-                # # Determine dimensions to broadcast - compare lhs shape with target shape
-                # lhs_broadcast_dims = list(range(nd))
-                # linalg.broadcast(lhs_val, outs=[lhs_broadcasted], dimensions=lhs_broadcast_dims)
-
-                # # Broadcast rhs to output shape
-                # rhs_broadcasted = memref.AllocOp(memref_type, target_dims, [])
-
-                # broadcast from (1, 6, 5, 1) to (1, 6, 5,5)
-                # linalg.broadcast(rhs_val, outs=[rhs_broadcasted], dimensions=[])
 
                 # Allocate result memref
                 result = memref.AllocOp(memref_type, target_dims, [])
@@ -1069,42 +1056,28 @@ class MlirBackend(_ch06_MlirBackend):
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
     def jit_compile(self, llmod, func_node: rg.Func, func_name="func"):
-        print('>' * 80)
-        print(llmod.dump())
-        print('=' * 80)
+        from mlir import ir
         optimized = self.codegen.run_passes(llmod)
-        print(optimized.dump())
-
-        input_shapes = [softmax_input_shape]
-        output_shapes = [softmax_input_shape]
 
         in_types, out_types = [], []
-        shared_libs = None
+        shared_libs = []
 
         module = self.module
 
-        from mlir import ir
+
         with ir.InsertionPoint(module.body), ir.Location.unknown():
             element_type = ir.F64Type.get()
-            for i in input_shapes:
-                if i is not None:
-                    in_types.append(ir.MemRefType.get(i, element_type))
-                else:
-                    in_types.append(element_type)
+            # self._argtys and self._retty are from `.lower()`
+            # TODO: ^ not good
+            for aty in self._argtys:
+                assert aty.dtype == "Float64"
+                in_types.append(ir.MemRefType.get(aty.shape, element_type))
 
-            for j in output_shapes:
-                if j is not None:
-                    out_types.append(ir.MemRefType.get(j, element_type))
-                else:
-                    out_types.append(element_type)
+            aty = self._retty
+            assert aty.dtype == "Float64"
+            out_types.append(ir.MemRefType.get(aty.shape, element_type))
 
-        if shared_libs is None:
-            shared_libs = []
-
-        if len(output_shapes) == 0:
-            out_types = (element_type,)
-
-        fn_jitted = self.jit_compile_extra(module, in_types, out_types, func_name, shared_libs=shared_libs)
+        fn_jitted = self.jit_compile_extra(optimized, in_types, out_types, func_name, shared_libs=shared_libs)
         return fn_jitted
 
     def jit_compile_extra(
@@ -1158,69 +1131,150 @@ class MlirBackend(_ch06_MlirBackend):
 
         return jit_func
 
-#######################################
-target_function = cgv.functions["softmax"]
-pprint(target_function)
-
-
-
-batch_size, seq_len, n_heads, dims, cache_size = 1, 5, 6, 288, 256
-n_local_heads, head_dim = n_heads, dims // n_heads
-softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
-print("softmax_input_shape", softmax_input_shape)
-
-array_x_desc, array_x_infos = array_desc_rules(
-    "array_x", shape=softmax_input_shape, dtype=TypeFloat64, layout="c"
-)
-ruleset_array_facts = ruleset(
-    *array_x_infos,
-)
-
-#######################################
 compiler_config["backend"] = MlirBackend()
 
-report = Report(default_expanded=True, enable_nested_metadata=True)
-try:
-    out = jit_compiler(
-        fn=target_function.ast,
-        argtypes=(array_x_desc.toType(),),
-        ruleset=(
-            base_ruleset
-            | py_eqsat_rules()
-            | ruleset_broadcasting
-            | setup_argtypes(array_x_desc.toType())
-            | ruleset_array_facts
-            | module_rules
-            | module_rulesets
-            | ruleset_extra_builtin_operations
-            | ruleset_ufunc_reduce_array_desc
-            | ruleset_explain_array_desc
-            | ruleset_typevar_annotate
-        ),
-        pipeline_report=report,
-        pipeline_debug=False,
-        **compiler_config,
-    )
-finally:
-    pass
-    # print(report.display())
-    # report.display(view_html=True)
+##########COMPILER##############
 
-print("OUTPUT".center(80, "-"))
+def run_compiler(target_function, args):
+    assert len(args) == 1
+    input_shapes = []
+    input_types = []
+    input_type_rules = []
+
+    for i, a in enumerate(args):
+        assert a.dtype == np.float64
+        assert a.flags.c_contiguous
+        input_shapes.append(a.shape)
+        desc, eg_facts = array_desc_rules(
+            f"array_{i}", shape=a.shape, dtype=TypeFloat64, layout="c"
+        )
+        input_types.append(desc.toType())
+        input_type_rules.extend(eg_facts)
+
+    ruleset_array_facts = ruleset(*input_type_rules)
+
+    report = Report(default_expanded=True, enable_nested_metadata=True)
+    try:
+        out = jit_compiler(
+            fn=target_function,
+            argtypes=tuple(input_types),
+            ruleset=(
+                base_ruleset
+                | py_eqsat_rules()
+                | ruleset_broadcasting
+                | setup_argtypes(*input_types)
+                | ruleset_array_facts
+                | module_rules
+                | module_rulesets
+                | ruleset_extra_builtin_operations
+                | ruleset_ufunc_reduce_array_desc
+                | ruleset_explain_array_desc
+                | ruleset_typevar_annotate
+            ),
+            pipeline_report=report,
+            pipeline_debug=False,
+            **compiler_config,
+        )
+    finally:
+        pass
+        # print(report.display())
+        # report.display(view_html=True)
+
+    return out
+
+###########TESTING###############
+
+
+def softmax_max(x):
+    return np.max(x, axis=-1, keepdims=True)
+
+
+@pytest.mark.xfail(reason="reduce broadcast is a hack",
+                   raises=AssertionError)
+def test_softmax_max():
+    np.random.seed(0)
+    _run_array_unary_test(softmax_max, np.random.random((3, 5)))
+
+
+
+def softmax_x_minus_max(x):
+    return x - np.max(x, axis=-1, keepdims=True)
+
+
+@pytest.mark.xfail(reason="1d error",
+                   raises=AssertionError)
+def test_softmax_x_minux_max_1d():
+    np.random.seed(0)
+    _run_array_unary_test(softmax_x_minus_max, np.random.random(4))
+
+
+def test_softmax_x_minux_max():
+    np.random.seed(0)
+    _run_array_unary_test(softmax_x_minus_max, np.random.random((1, 4)))
+    _run_array_unary_test(softmax_x_minus_max, np.random.random((1, 2, 6, 4)))
+
+
+def softmax_full(x):
+    exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
+    return exp_x / np.sum(exp_x, axis=-1, keepdims=True)
+
+
+def test_softmax_full():
+    np.random.seed(0)
+    _run_array_unary_test(softmax_full, np.random.random((1, 4)))
+    _run_array_unary_test(softmax_full, np.random.random((1, 2, 6, 4)))
+
+
+
+#######################################
+
+DEBUG = True
+
+def _run_array_unary_test(target_function, inary):
+    cres = run_compiler(target_function, [inary])
+    jit_func = cres.jit_func
+
+    got = jit_func(inary)
+    desired = target_function(inary)
+    if DEBUG:
+        print("GOT".center(80, '-'))
+        print(got)
+        print("DESIRED".center(80, '-'))
+        print(desired)
+    np.testing.assert_allclose(got, desired)
 
 
 def expected_func(x):
     exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
     return exp_x / np.sum(exp_x, axis=-1, keepdims=True)
 
-jf = out.jit_func
-print('jitfunc', jf)
-inary = np.arange(np.prod(softmax_input_shape), dtype=np.float64).reshape(softmax_input_shape)
-res = jf(inary)
 
-desired = expected_func(inary)
-print("GOT".center(80, '-'))
-print(res)
-print("DESIRED".center(80, '-'))
-print(desired)
-np.testing.assert_allclose(res, desired)
+
+def main():
+    ### Use the commented out code to compile from `llama3.py`
+    # target_function = cgv.functions["softmax"]
+    # pprint(target_function)
+    target_function = expected_func
+
+    batch_size, seq_len, n_heads, dims, cache_size = 1, 5, 6, 288, 256
+    n_local_heads, head_dim = n_heads, dims // n_heads
+    softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
+    print("softmax_input_shape", softmax_input_shape)
+
+    inary = np.arange(np.prod(softmax_input_shape), dtype=np.float64).reshape(softmax_input_shape)
+    cres = run_compiler(target_function, [inary])
+
+    jf = cres.jit_func
+    print('jitfunc', jf)
+    res = jf(inary)
+
+    desired = target_function(inary)
+    if DEBUG:
+        print("GOT".center(80, '-'))
+        print(res)
+        print("DESIRED".center(80, '-'))
+        print(desired)
+    np.testing.assert_allclose(res, desired)
+
+if __name__ == "__main__":
+    main()
