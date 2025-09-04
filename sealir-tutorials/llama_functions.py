@@ -950,6 +950,9 @@ n_local_heads, head_dim = n_heads, dims // n_heads
 input_shape = (batch_size, seq_len, dims)
 softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
 
+silu_dims = 768
+norm_eps = 1e-06
+
 input_ndim = len(input_shape)
 softmax_ndim = len(softmax_input_shape)
 
@@ -991,6 +994,19 @@ arr_fill = backend.gen_array_fill_value(module, 4, None)
 arr_sqrt = backend.gen_array_unary(module, 4, math.sqrt, None)
 arr_div_2 = backend.gen_array_binary(module, 4, 4, arith.divf, None)
 
+# SILU
+silu_arr_neg = backend.gen_array_unary(module, 3, arith.negf, None)
+silu_arr_exp = backend.gen_array_unary(module, 3, math.exp, None)
+silu_arr_fill = backend.gen_array_fill_value(module, 3, None)
+silu_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
+silu_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+silu_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
+
+# Feed forward
+
+# RMSNorm
+
+# Tansformer
 
 print("Generated MLIR:")
 print(str(module))
@@ -1095,7 +1111,23 @@ if __name__ == "__main__":
     arr_sqrt = backend.jit_compile(module, arr_sqrt, ((batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),), None)
     arr_div_2 = backend.jit_compile(module, arr_div_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),))
 
-    print("Function compiled successfully!")
+    # SILU
+    silu_arr_neg = backend.jit_compile(module, silu_arr_neg, ((batch_size, seq_len, silu_dims),), ((batch_size, seq_len, silu_dims),), None) 
+    silu_arr_exp = backend.jit_compile(module, silu_arr_exp, ((batch_size, seq_len, silu_dims),), ((batch_size, seq_len, silu_dims),), None)
+ 
+    silu_arr_fill = backend.jit_compile(module, silu_arr_fill, (None,), ((batch_size, seq_len, silu_dims),), None)
+    silu_arr_add =  backend.jit_compile(module, silu_arr_add, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    silu_arr_mul =  backend.jit_compile(module, silu_arr_mul, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    silu_arr_div =  backend.jit_compile(module, silu_arr_div, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+
+    # Feed forward
+
+    # RMSNorm
+
+    # Tansformer
+
+    print("All functions compiled successfully!")
+    print("\n" + "=" * 50 + "\n")
 
     def softmax(x):
         """Compute softmax values for each sets of scores in x."""
@@ -1106,7 +1138,7 @@ if __name__ == "__main__":
         e_x = arr_exp(arr_sub(x, arr_broadcast(arr_max_reduce(x))))
         return arr_div(e_x, arr_broadcast(arr_sum_reduce(e_x)))
 
-    # print("Testing Softmax")
+    print("Testing Softmax")
 
     # Random input data
     softmax_input = np.random.random(softmax_input_shape)
@@ -1118,6 +1150,7 @@ if __name__ == "__main__":
     # Check Results
     assert np.allclose(numpy_result, mlir_result)
     print("Function executed and verified succesfully.")
+    print("\n" + "=" * 50 + "\n")
 
     def apply_rotary_emb(xq, xk, freqs_cos, freqs_sin):
         xqri = xq.reshape(*xq.shape[:-1], -1, 2)
@@ -1183,6 +1216,7 @@ if __name__ == "__main__":
     # Check Results
     assert np.allclose(numpy_result, mlir_result)
     print("Function executed and verified succesfully.")
+    print("\n" + "=" * 50 + "\n")
 
     def attention(
         x, # shape = (1, 5, 288)
@@ -1302,6 +1336,201 @@ if __name__ == "__main__":
                             attn_weights=attention_weights,
                             cache_k=cache_k_copy,
                             cache_v=cache_v_copy)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def silu(x):
+        result = x * (1 / (1 + np.exp(-x)))
+        return result
+
+    def silu_mlir(x):
+        result = silu_arr_mul(x, silu_arr_div(silu_arr_fill(1.0), (silu_arr_add(silu_arr_fill(1.0), silu_arr_exp(silu_arr_neg(x))))))
+        return result
+
+    print("Testing SILU")
+
+    silu_input = np.random.random(batch_size * seq_len * silu_dims).reshape(batch_size, seq_len, silu_dims)
+
+    numpy_result = silu(x=silu_input)
+    mlir_result = silu_mlir(x=silu_input)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def feed_forward(x, up_weight, gate_weight, down_weight):
+        swish = silu(x @ gate_weight.T)
+        x_v = x @ up_weight.T
+        x_ff = swish * x_v
+        x_out = x_ff @ down_weight.T
+        return x_out
+
+    def feed_forward_mlir(x, up_weight, gate_weight, down_weight):
+        swish = silu_mlir(x @ gate_weight.T)
+        x_v = x @ up_weight.T
+        x_ff = swish * x_v
+        x_out = x_ff @ down_weight.T
+        return x_out
+
+    print("Testing feed forward")
+
+    x_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+    up_weight = np.random.random(silu_dims * dims).reshape(silu_dims, dims)
+    gate_weight = np.random.random(silu_dims * dims).reshape(silu_dims, dims)
+    down_weight = np.random.random(dims * silu_dims).reshape(dims, silu_dims)
+
+    numpy_result = feed_forward(x=x_input,
+                                up_weight=up_weight,
+                                gate_weight=gate_weight,
+                                down_weight=down_weight)
+    mlir_result = feed_forward_mlir(x=x_input,
+                                up_weight=up_weight,
+                                gate_weight=gate_weight,
+                                down_weight=down_weight)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def rmsnorm(x, weight, eps):
+        z_float = np.mean(x**2, -1, keepdims=True) + eps
+        z = x / np.sqrt(z_float)
+        result = z * weight
+        return result
+
+    def rmsnorm_mlir(x, weight, eps):
+        z_float = np.mean(x**2, -1, keepdims=True) + eps
+        z = x / np.sqrt(z_float)
+        result = z * weight
+        return result
+
+    print("Testing RMSNorm")
+
+    x_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+    weight = np.random.random(dims).reshape(dims)
+    eps = 1e-06
+
+    numpy_result = rmsnorm(x=x_input,
+                           weight=weight,
+                           eps=eps)
+    mlir_result = rmsnorm_mlir(x=x_input,
+                               weight=weight,
+                               eps=eps)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def transformer_block(
+        x,
+        start_pos,
+        mask,
+        freqs_cos,
+        freqs_sin,
+        block_weights,
+        cache_k,
+        cache_v,
+    ):
+        attn_weights, ff_weights, in_norm_weight, post_norm_weight = block_weights
+
+        norm_x = rmsnorm(x, in_norm_weight, norm_eps)
+        h1, cache_k, cache_v = attention(
+            norm_x,
+            start_pos,
+            mask,
+            freqs_cos,
+            freqs_sin,
+            attn_weights,
+            cache_k,
+            cache_v,
+        )
+        z = x + h1
+        norm_z = rmsnorm(z, post_norm_weight, norm_eps)
+        h2 = feed_forward(norm_z, *ff_weights)
+        out = z + h2
+        return out, cache_k, cache_v
+
+    def transformer_block_mlir(
+        x,
+        start_pos,
+        mask,
+        freqs_cos,
+        freqs_sin,
+        block_weights,
+        cache_k,
+        cache_v,
+    ):
+        attn_weights, ff_weights, in_norm_weight, post_norm_weight = block_weights
+
+        norm_x = rmsnorm_mlir(x, in_norm_weight, norm_eps)
+        h1, cache_k, cache_v = attention_mlir(
+            norm_x,
+            start_pos,
+            mask,
+            freqs_cos,
+            freqs_sin,
+            attn_weights,
+            cache_k,
+            cache_v,
+        )
+        z = x + h1
+        norm_z = rmsnorm_mlir(z, post_norm_weight, norm_eps)
+        h2 = feed_forward_mlir(norm_z, *ff_weights)
+        out = z + h2
+        return out, cache_k, cache_v
+
+    print("Testing Transformer Layer")
+
+    x_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+    start_pos = 0
+    mask = np.random.random(seq_len * seq_len).reshape(seq_len, seq_len)
+    freqs_cos = np.random.random(seq_len * head_dim // 2).reshape(seq_len, head_dim // 2)
+    freqs_sin = np.random.random(seq_len * head_dim // 2).reshape(seq_len, head_dim // 2)
+    block_weights = [
+        [np.random.random(dims*dims).reshape(dims, dims) for _ in range(4)],
+        [
+            np.random.random(silu_dims * dims).reshape(silu_dims, dims),
+            np.random.random(silu_dims * dims).reshape(silu_dims, dims),
+            np.random.random(silu_dims * dims).reshape(dims, silu_dims),
+        ],
+        np.random.random(dims).reshape(dims),
+        np.random.random(dims).reshape(dims),
+    ]
+
+    cache_k = np.random.random(batch_size * cache_size * n_heads * head_dim).reshape(batch_size, cache_size, n_heads, head_dim)
+    cache_v = np.random.random(batch_size * cache_size * n_heads * head_dim).reshape(batch_size, cache_size, n_heads, head_dim)
+    
+    numpy_result = transformer_block(x=x_input,
+                                     start_pos=start_pos,
+                                     mask=mask,
+                                     freqs_cos=freqs_cos,
+                                     freqs_sin=freqs_sin,
+                                     block_weights=block_weights,
+                                     cache_k=cache_k,
+                                     cache_v=cache_v)
+
+    mlir_result = transformer_block_mlir(x=x_input,
+                                     start_pos=start_pos,
+                                     mask=mask,
+                                     freqs_cos=freqs_cos,
+                                     freqs_sin=freqs_sin,
+                                     block_weights=block_weights,
+                                     cache_k=cache_k,
+                                     cache_v=cache_v)
 
     for res_np, res_mlir in zip(numpy_result, mlir_result):
         assert np.allclose(res_np, res_mlir)
