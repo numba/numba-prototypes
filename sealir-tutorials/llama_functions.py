@@ -1003,6 +1003,13 @@ silu_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
 silu_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
 
 # Feed forward
+ff_arr_transpose = backend.gen_array_transpose(module, 2)
+ff_arr_transpose_2 = backend.gen_array_transpose(module, 2)
+ff_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+ff_arr_broadcast = backend.gen_array_broadcast(module, 2, (batch_size, dims, silu_dims), broadcast_along=[0])
+ff_arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, silu_dims, dims), broadcast_along=[0])
+ff_arr_matmul = backend.gen_array_matmul(module, 3, None)
+ff_arr_matmul_2 = backend.gen_array_matmul(module, 3, None)
 
 # RMSNorm
 
@@ -1121,6 +1128,13 @@ if __name__ == "__main__":
     silu_arr_div =  backend.jit_compile(module, silu_arr_div, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
 
     # Feed forward
+    ff_arr_transpose = backend.jit_compile(module, ff_arr_transpose, ((dims, silu_dims),), ((silu_dims, dims),))
+    ff_arr_transpose_2 = backend.jit_compile(module, ff_arr_transpose_2, ((silu_dims, dims),), ((dims, silu_dims),))
+    ff_arr_mul = backend.jit_compile(module, ff_arr_mul, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    ff_arr_broadcast = backend.jit_compile(module, ff_arr_broadcast, ((dims, silu_dims),), ((batch_size, dims, silu_dims),))
+    ff_arr_broadcast_2 = backend.jit_compile(module, ff_arr_broadcast_2, ((silu_dims, dims),), ((batch_size, silu_dims, dims),))
+    ff_arr_matmul = backend.jit_compile(module, ff_arr_matmul, ((batch_size, seq_len, dims), (batch_size, dims, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    ff_arr_matmul_2 = backend.jit_compile(module, ff_arr_matmul_2, ((batch_size, seq_len, silu_dims), (batch_size, silu_dims, dims)), ((batch_size, seq_len, dims),))
 
     # RMSNorm
 
@@ -1374,10 +1388,10 @@ if __name__ == "__main__":
         return x_out
 
     def feed_forward_mlir(x, up_weight, gate_weight, down_weight):
-        swish = silu_mlir(x @ gate_weight.T)
-        x_v = x @ up_weight.T
-        x_ff = swish * x_v
-        x_out = x_ff @ down_weight.T
+        swish = silu_mlir(ff_arr_matmul(x, ff_arr_broadcast(ff_arr_transpose_2(gate_weight))))
+        x_v = ff_arr_matmul(x, ff_arr_broadcast(ff_arr_transpose_2(up_weight)))
+        x_ff = ff_arr_mul(swish, x_v)
+        x_out = ff_arr_matmul_2(x_ff, ff_arr_broadcast_2(ff_arr_transpose(down_weight)))
         return x_out
 
     print("Testing feed forward")
