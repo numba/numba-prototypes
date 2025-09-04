@@ -889,7 +889,7 @@ class MlirBackend(_ch06_MlirBackend):
         be: LlamaBackend = self.codegen
         match op, operands:
             case "NpyOp_Max_Shaped<operand, axis, keepdims, outshape>", (operand, axis, True, outshape):
-                print("----", operands)
+                # Implements np.max(operand, axis, keepdims=True)
                 shape = TypeSpeller.apply(outshape)
                 nd = len(shape)
                 if axis < 0:
@@ -916,7 +916,7 @@ class MlirBackend(_ch06_MlirBackend):
                 print(result_type)
                 # Build final shape with keepdims=True (reduced dim becomes dynamic size)
                 # Need to add the size-1 dimension back for allocation
-                one_const = arith.ConstantOp(ir.IndexType.get(), 1)
+                one_const = arith.ConstantOp(ir.IndexType.get(), 5)
                 final_dims = reduced_dims.copy()
                 final_dims.insert(axis, one_const)
 
@@ -929,6 +929,50 @@ class MlirBackend(_ch06_MlirBackend):
                     dimensions=[axis],
                 )
                 return result
+            case "NpyOp_Subtract_Shaped<lhs, rhs, outshape>", (lhs, rhs, outshape):
+                # This implements np.subtract(lhs, rhs) with broadcasting
+                shape = TypeSpeller.apply(outshape)
+                nd = len(shape)
+                fname_binary = be.gen_array_binary(self.module, nd, nd, arith.subf, None)
+                fn_binary = self._get_func_by_name(fname_binary)
+                [lhs_type, rhs_type, result_type] = fn_binary.type.inputs
+                lhs_val = (yield lhs)
+                rhs_val = (yield rhs)
+
+                # Get output dimensions from outshape - use the largest operand to determine target size
+                dynshape = ir.ShapedType.get_dynamic_size()
+                result_shape = [dynshape] * nd
+                memref_type = ir.MemRefType.get(result_shape, result_type.element_type)
+
+                # Get target dimensions from outshape
+                target_dims = []
+                for i in range(nd):
+                    # Convert each dimension from the outshape to an MLIR dimension value
+                    dim_size = shape[i]
+                    if isinstance(dim_size, int):
+                        # Static dimension
+                        target_dims.append(arith.ConstantOp(ir.IndexType.get(), dim_size))
+                    else:
+                        assert False, 'not supported' # TODO
+                # # Broadcast lhs to output shape (even if it's already the right shape)
+                # lhs_broadcasted = memref.AllocOp(memref_type, target_dims, [])
+                # # Determine dimensions to broadcast - compare lhs shape with target shape
+                # lhs_broadcast_dims = list(range(nd))
+                # linalg.broadcast(lhs_val, outs=[lhs_broadcasted], dimensions=lhs_broadcast_dims)
+
+                # # Broadcast rhs to output shape
+                # rhs_broadcasted = memref.AllocOp(memref_type, target_dims, [])
+
+                # broadcast from (1, 6, 5, 1) to (1, 6, 5,5)
+                # linalg.broadcast(rhs_val, outs=[rhs_broadcasted], dimensions=[])
+
+                # Allocate result memref
+                result = memref.AllocOp(memref_type, target_dims, [])
+
+                # Call the generated binary function with broadcasted operands
+                func.call((), fname_binary, [lhs_val, rhs_val, result])
+                return result
+
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -940,7 +984,7 @@ class MlirBackend(_ch06_MlirBackend):
         print(optimized.dump())
 
         input_shapes = [softmax_input_shape]
-        output_shapes = [softmax_input_shape[:-1] + (1,)]
+        output_shapes = [softmax_input_shape]
 
         in_types, out_types = [], []
         shared_libs = None
@@ -1074,15 +1118,16 @@ print("OUTPUT".center(80, "-"))
 
 
 def expected_func(x):
-    return np.max(x, axis=-1, keepdims=True)
+    return x - np.max(x, axis=-1, keepdims=True)
 
 jf = out.jit_func
 print('jitfunc', jf)
 inary = np.arange(np.prod(softmax_input_shape), dtype=np.float64).reshape(softmax_input_shape)
 res = jf(inary)
-print(res)
 
 desired = expected_func(inary)
+print("GOT".center(80, '-'))
 print(res)
+print("DESIRED".center(80, '-'))
 print(desired)
 np.testing.assert_allclose(res, desired)
