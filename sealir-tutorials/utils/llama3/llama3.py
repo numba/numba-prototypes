@@ -4,9 +4,9 @@ import time
 
 import numpy as np
 
-from config import ModelArgs
-from tokenizer import Tokenizer
-from utils import load_parameters
+from .config import ModelArgs
+from .tokenizer import Tokenizer
+from .utils import load_parameters
 
 np.random.seed(42)
 

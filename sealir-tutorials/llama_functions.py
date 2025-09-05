@@ -1710,7 +1710,7 @@ if __name__ == "__main__":
         output_id_mlir = id_val_mlir[0].tolist()
         if output_id_mlir[-1] in [tokenizer.eos_id, tokenizer.bos_id]:
             break
-        print("MLIR Output Token: ", output_id, tokenizer.decode(output_id_mlir))
+        print("MLIR Output Token: ", output_id_mlir, tokenizer.decode(output_id_mlir))
         break
 
     print("Function executed succesfully.")
