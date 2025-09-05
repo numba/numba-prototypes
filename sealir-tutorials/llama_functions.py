@@ -800,7 +800,6 @@ class Backend:
                 continue
             elif isinstance(index, int):
                 out_shape[index] = 1
-                # out_strides[index] = 1
                 offsets[axis] = index
                 modified_axes.append(axis)
             elif isinstance(index, slice):
@@ -813,7 +812,6 @@ class Backend:
                     index_stop = index.stop
 
                 out_shape[axis] = (index_stop - index_start) // index_step
-                # out_strides[axis] = index_step
                 offsets[axis] = index_start
                 modified_axes.append(axis)
             else:
@@ -954,6 +952,7 @@ softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
 
 silu_dims = 768
 norm_eps = 1e-06
+weight_size = 32000
 
 input_ndim = len(input_shape)
 softmax_ndim = len(softmax_input_shape)
@@ -1026,6 +1025,16 @@ rms_arr_broadcast_2 = backend.gen_array_broadcast(module, 1, (batch_size, seq_le
 
 # Transformer
 tran_arr_add = backend.gen_array_binary(module, input_ndim, input_ndim, arith.addf, None)
+
+# Llama forward
+llm_arr_getitem = backend.gen_array_getitem(module, 2, (slice(0, seq_len),))
+llm_arr_fill = backend.gen_array_fill_value(module, 2, None)
+llm_arr_triu = backend.gen_array_triu(module, 2, None)
+llm_arr_matmul = backend.gen_array_matmul(module, 3, None)
+llm_arr_expand_2 = backend.gen_array_broadcast(module, 2, (batch_size, batch_size, dims), broadcast_along=[0])
+
+# Llama generate
+
 
 print("Generated MLIR:")
 print(str(module))
@@ -1162,6 +1171,14 @@ if __name__ == "__main__":
     # Transformer
     tran_arr_add = backend.jit_compile(module, tran_arr_add, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),))
     
+    # Llama forward
+    llm_arr_getitem = backend.jit_compile(module, llm_arr_getitem, ((cache_size, head_dim // 2),), ((seq_len, head_dim // 2),), shared_libs=[find_library(x) for x in shared_libs])
+    llm_arr_fill = backend.jit_compile(module, llm_arr_fill, (None,), ((seq_len, seq_len),), None)
+    llm_arr_triu = backend.jit_compile(module, llm_arr_triu, ((seq_len, seq_len), None), ((seq_len, seq_len),), None)
+    llm_arr_matmul = backend.jit_compile(module, llm_arr_matmul, ((batch_size, batch_size, dims), (batch_size, dims, weight_size)), ((batch_size, batch_size, weight_size),))
+    llm_arr_expand_2 = backend.jit_compile(module, llm_arr_expand_2, ((dims, weight_size),), ((batch_size, dims, weight_size),))
+
+    # Llama generate
 
     print("All functions compiled successfully!")
     print("\n" + "=" * 50 + "\n")
@@ -1634,24 +1651,35 @@ if __name__ == "__main__":
     def llama_forward_mlir(model, input_ids, start_pos):
         args = model["args"]
         dtype = model["dtype"]
+        tok_embedding = model["tok_embedding"]
+        freqs_cos = model["freqs_cos"]
+        freqs_sin = model["freqs_sin"]
+        caches_k = model["caches_k"]
+        caches_v = model["caches_v"]
+        layer_blocks = model["layer_blocks"]
+        norm_weight = model["norm_weight"]
+        lm_head_weight = model["lm_head_weight"]
 
         _, seq_len = input_ids.shape
-        h = model["tok_embedding"][input_ids]
+        h = tok_embedding[input_ids]
 
-        freqs_cos = model["freqs_cos"][start_pos : start_pos + seq_len]
-        freqs_sin = model["freqs_sin"][start_pos : start_pos + seq_len]
+        freqs_cos = llm_arr_getitem(freqs_cos)
+        freqs_sin = llm_arr_getitem(freqs_sin)
 
         mask = None
         if seq_len > 1:
-            mask = np.full((seq_len, seq_len), float("-inf"), dtype=dtype)
-            mask = np.triu(mask, k=1)
-            zeros_shape = (seq_len, start_pos)
-            mask = np.concatenate([np.zeros(zeros_shape, dtype=dtype), mask], axis=1)
+            mask = llm_arr_fill(float("-inf"))
+            mask = llm_arr_triu(mask, 1)
+            # TODO: On first iteration start pos is zero so this evaliates to shape (5, 0)
+            # which we can't really handle in MLIR as of now
 
-        caches_k = model["caches_k"]
-        caches_v = model["caches_v"]
+            # zeros_shape = (seq_len, start_pos)
+            # mask = np.concatenate([np.zeros(zeros_shape, dtype=dtype), mask], axis=1)
 
-        for i, block in enumerate(model["layer_blocks"]):
+        for i, block in enumerate(layer_blocks):
+            # TODO: Right now we index at compile time, this is a runtime index,
+            # will need handling seperately, but mid-end should be able to take care of this
+            # particular case depending upon how we implement
             h, caches_k[i], caches_v[i] = transformer_block_mlir(
                 h,
                 start_pos,
@@ -1663,8 +1691,11 @@ if __name__ == "__main__":
                 caches_v[i],
             )
 
-        h = rmsnorm_mlir(h, model["norm_weight"], args.norm_eps)
-        logit = h[:, [-1], :] @ model["lm_head_weight"]
+        h = rmsnorm_mlir(h, norm_weight, args.norm_eps)
+        # TODO: We don't support this kind of indexing yet
+        h_input = h[:, [-1], :]
+
+        logit = llm_arr_matmul(h_input, llm_arr_expand_2(lm_head_weight))
         return logit
 
     def llama_generate_mlir(model, input_ids, max_new_tokens):
@@ -1680,7 +1711,10 @@ if __name__ == "__main__":
                 current_input_ids = next_id
                 pos = current_pos - 1
             logits = llama_forward_mlir(model, current_input_ids, pos)
-            next_id = np.argmax(logits[:, -1, :], axis=-1, keepdims=True).astype(np.int32)
+            # TODO: We don't support this kind of indexing yet
+            argmax_inp = logits[:, -1, :]
+            # TODO: We will need argmax support
+            next_id = np.argmax(argmax_inp, axis=-1, keepdims=True).astype(np.int32)
             yield next_id
             current_len += 1
             if current_len >= model["args"].max_seq_len:
