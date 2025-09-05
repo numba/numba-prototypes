@@ -36,6 +36,7 @@ from egglog import (
     i64,
     i64Like,
     rewrite,
+    birewrite,
     rule,
     ruleset,
     set_,
@@ -44,6 +45,7 @@ from egglog import (
     var,
     method,
     Ruleset,
+    panic,
 )
 from sealir.eqsat.py_eqsat import (
     Py_AttrIO,
@@ -53,9 +55,13 @@ from sealir.eqsat.py_eqsat import (
     Py_LoadGlobal,
     Py_NegIO,
     Py_SubIO,
+    Py_SliceIO,
+    Py_SubscriptIO,
+    Py_Tuple,
+    Py_AddIO,
 )
 from sealir.eqsat.py_eqsat import make_rules as py_eqsat_rules
-from sealir.eqsat.rvsdg_eqsat import Term, TermDict, TermList, termlist
+from sealir.eqsat.rvsdg_eqsat import Term, TermDict, TermList, termlist, DynInt
 from sealir.rvsdg.grammar import SExpr
 import sealir.rvsdg.grammar as rg
 from sealir import ase
@@ -140,6 +146,56 @@ def make_module_fact_ruleset(module_mapping: dict[str, str]):
 
 module_rules = make_module_fact_ruleset(cgv.imported)
 
+
+#######################################
+
+
+
+@function
+def TypeTuple(size: i64Like) -> Type: ...
+
+
+@function
+def tuple_slice_upper(tup: Term, upper_amt: i64Like) -> Term: ...
+
+@function
+def tuple_add(lhs: Term, rhs: Term) -> Term: ...
+
+
+@ruleset
+def ruleset_tuple(tuptype: Type, expr: Term, io: Term, amt: i64,
+                  obj: Term, size: i64, elems: TermList, termVec: Vec[Term],
+                  slice: Term, io2: Term,
+                  lhs: Term, rhs: Term,
+                  lhs_size: i64, rhs_size: i64):
+    from egglog import panic
+    yield rule(
+        # handle value_tuple[:-1]
+        slice == Py_SliceIO(io, Term.LiteralNone(), Term.LiteralI64(amt), Term.LiteralNone()),
+        expr == Py_SubscriptIO(io2, obj, slice.getPort(1)),
+        TypeVar(obj).getType() == TypeTuple(size),
+    ).then(
+        union(expr.getPort(0)).with_(io),
+        union(expr.getPort(0)).with_(io2),
+        union(expr.getPort(1)).with_(tuple_slice_upper(obj, amt))
+    )
+    # tuple building
+    yield rule(
+        expr == Py_Tuple(TermList(termVec)),
+        size == termVec.length(),
+    ).then(
+        set_(TypeVar(expr).getType()).to(TypeTuple(size))
+    )
+    # tuple adding
+    yield rule(
+        expr == Py_AddIO(io, lhs, rhs),
+        TypeVar(lhs).getType() == TypeTuple(lhs_size),
+        TypeVar(rhs).getType() == TypeTuple(rhs_size),
+    ).then(
+        union(expr.getPort(1)).with_(tuple_add(lhs, rhs)),
+        union(expr.getPort(0)).with_(io),
+    )
+
 #######################################
 
 # Install numpy function rules
@@ -179,6 +235,14 @@ def NpyOp_Divide(lhs: Term, rhs: Term) -> Term: ...
 
 @function
 def NpyOp_Divide_Shaped(lhs: Term, rhs: Term, outshape: Shape) -> Term: ...
+
+
+@function(cost=1000)
+def NpyOp_Reshape(ary: Term, src_nd: i64Like, new_shape: Term) -> Term: ...
+
+
+@function
+def NpyOp_Reshape_Shaped(ary: Term, src_nd: i64Like, outshape: Shape) -> Term: ...
 
 
 @function
@@ -300,6 +364,12 @@ class Shape(Expr):
 
     def append(self, dim: Dim) -> Shape: ...
 
+    def toTuple(self) -> Term: ...
+
+    @property
+    def size(self) -> i64: ...
+
+    def __add__(self, rhs: Shape) -> Shape: ...
 
 
 class NumPyRules:
@@ -521,6 +591,281 @@ def ruleset_numpy_promote_binop(
         yield promote_subtract(operand, "divide", Py_DivIO)
 
 
+@ruleset
+def ruleset_numpy_reshape(
+    ary: Term, io: Term, args: Vec[Term],
+    callee: Term,
+    new_shape: Shape,
+    old_shape: Shape,
+    shape: Shape,
+    target: Term,
+    dtype: Type,
+    ndim: i64,
+    size: i64,
+    n: i64,
+    layout: DataLayout,
+    dimVec: Vec[Dim],
+    ad: ArrayDesc,
+):
+    from sealir.eqsat.rvsdg_eqsat import wildcard as _wc
+
+    # match operation
+    yield rule(
+        target == Py_Call(func=callee.getPort(1),
+                          io=callee.getPort(0),
+                          args=TermList(args)),
+        callee == Py_AttrIO(io, ary, "reshape"),
+        args.length() == i64(1),  # expect one argument
+        TypeVar(ary).getType() == ad.toType(),
+        ndim == ad.ndim,
+    ).then(
+        union(target.getPort(1)).with_(NpyOp_Reshape(ary, ndim, args[0])),
+        # shortcut io
+        union(target.getPort(0)).with_(io),
+        union(target.getPort(0)).with_(callee.getPort(0)),
+    )
+    # promote
+    yield rewrite(
+        target
+    ).to(
+        NpyOp_Reshape_Shaped(ary, ndim, shape),
+        # when
+        target == NpyOp_Reshape(ary, ndim, _wc(Term)),
+        TypeVar(target).getType() == ArrayType(_wc(i64), _wc(Type), shape, _wc(DataLayout)).toType(),
+    )
+    # type & shape inference
+
+    @function
+    def _normalize_shape_for_reshape(new_shape: Shape, size: i64Like) -> Shape: ...
+    @function
+    def _norm_shape_step(shape: Shape, size: i64Like, out_shape: Shape) -> Shape: ...
+
+    yield rule(
+        target == NpyOp_Reshape(ary, _wc(i64), new_shape.toTuple()),
+        TypeVar(new_shape.toTuple()).getType() == TypeTuple(ndim),
+        ArrayType(_wc(i64), dtype, old_shape, layout).toType() == TypeVar(ary).getType(),
+        size == old_shape.size,
+        new_shape.size >= 0,
+    ).then(
+        set_(TypeVar(target).getType()).to(
+            ArrayType(
+                ndim,
+                dtype,
+                new_shape,
+                layout
+            ).toType()
+        ),
+    )
+    yield rule(
+        target == NpyOp_Reshape(ary, _wc(i64), new_shape.toTuple()),
+        TypeVar(new_shape.toTuple()).getType() == TypeTuple(ndim),
+        ArrayType(_wc(i64), dtype, old_shape, layout).toType() == TypeVar(ary).getType(),
+        size == old_shape.size,
+        new_shape.size < 0,
+    ).then(
+        set_(TypeVar(target).getType()).to(
+            ArrayType(
+                ndim,
+                dtype,
+                _normalize_shape_for_reshape(new_shape, size),
+                layout
+            ).toType()
+        ),
+    )
+
+    yield rewrite(
+        _normalize_shape_for_reshape(shape, size)
+    ).to(
+        _norm_shape_step(shape, size, Shape())
+    )
+    yield rewrite(
+        _norm_shape_step(Shape.from_list(dimVec), size, new_shape),
+    ).to(
+        _norm_shape_step(Shape.from_list(dimVec.remove(0)), size / n, new_shape.append(dimVec[0])),
+        # when
+        dimVec[0] == Dim.fixed(n),
+        n > 0,  # positive
+        dimVec.length() > 0,
+    )
+
+    yield rule(
+        shape == _norm_shape_step(Shape.from_list(dimVec), size, new_shape),
+        # when
+        dimVec[0] == Dim.fixed(-1), # dynamic size
+        dimVec.length() > 0,
+        n == Shape.from_list(dimVec).size,
+    ).then(
+        union(shape).with_(new_shape.append(Dim.fixed(size / (i64(0)-n))) + Shape.from_list(dimVec.remove(0)))
+    )
+
+
+
+@ruleset
+def ruleset_numpy_shape(
+    ary: Term,
+    shape: Shape,
+    shape1: Shape,
+    shape2: Shape,
+    io: Term, ad: ArrayDesc,
+    ndim: i64, dtype: Type, layout: DataLayout,
+    target: Term,
+    dimVec: Vec[Dim],
+    dimVec2: Vec[Dim],
+    amt: i64,
+    idx: i64,
+    dim: Dim,
+    elems: Vec[Term]):
+    yield rule(
+        target == Py_AttrIO(io, ary, "shape"),
+        ad.toType() == TypeVar(ary).getType(),
+        ad == ArrayType(ndim, dtype, shape, layout),
+    ).then(
+        union(target.getPort(1)).with_(shape.toTuple()),
+        # shortcut io
+        union(io).with_(target.getPort(0))
+    )
+    # shape.toTuple typing
+    yield rule(
+        target == shape.toTuple(),
+        shape == Shape.from_list(dimVec),
+        ndim == dimVec.length(),
+    ).then(
+        set_(TypeVar(target).getType()).to(TypeTuple(ndim))
+    )
+    # slicing shape[:-1]
+    yield rewrite(
+        tuple_slice_upper(Shape.from_list(dimVec).toTuple(), -1)
+    ).to(
+        Shape.from_list(dimVec.pop()).toTuple()
+    )
+    # shape + shape
+    @function(cost=1000000)
+    def _convert_term_tuple_to_shape(elems: Vec[Term]) -> Term: ...
+
+    yield rule(
+        target == Py_Tuple(TermList(elems)),
+        tuple_add(Shape.from_list(dimVec).toTuple(),
+                  target),
+    ).then(
+        union(target).with_(_convert_term_tuple_to_shape(elems)),
+    )
+
+    yield rewrite(
+        # non-zero lengths
+        _convert_term_tuple_to_shape(elems)
+    ).to(
+        tuple_add(
+            _convert_term_tuple_to_shape(elems.pop()),
+            Shape().append(Dim.fixed(amt)).toTuple(),
+        ),
+        # where
+        elems.length() > i64(0),
+        Term.LiteralI64(amt) == elems[elems.length() - 1],
+    )
+
+
+    yield rewrite(
+        # zero length
+        _convert_term_tuple_to_shape(elems)
+    ).to(
+        Shape().toTuple(),
+        # where
+        elems.length() == i64(0),
+    )
+
+    yield rewrite(
+        # add two tuple of shape
+        tuple_add(shape1.toTuple(), shape2.toTuple())
+    ).to(
+        (shape1 + shape2).toTuple()
+    )
+
+    # empty shape is the same as shape from_list([])
+    yield birewrite(Shape()).to(Shape.from_list(Vec[Dim].empty()))
+
+    # shape.size
+
+    @function(cost=10000)
+    def _shape_compute_size(dimVec: Vec[Dim]) -> DynInt: ...
+
+
+    yield rule(
+        shape == Shape.from_list(dimVec)
+    ).then(
+        _shape_compute_size(dimVec)
+    )
+
+    yield rule(
+        shape == Shape.from_list(dimVec),
+        amt == _shape_compute_size(dimVec).get(),
+    ).then(
+        set_(shape.size).to(amt),
+    )
+    yield rewrite(
+        _shape_compute_size(dimVec),
+    ).to(
+        DynInt(amt) * _shape_compute_size(dimVec.remove(0)),
+        # when
+        Dim.fixed(amt) == dimVec[0],
+        dimVec.length() > i64(1)
+    )
+
+    yield rewrite(
+        _shape_compute_size(dimVec),
+    ).to(
+        amt,
+        # when
+        Dim.fixed(amt) == dimVec[0],
+        dimVec.length() == i64(1)
+    )
+    yield rewrite(
+        _shape_compute_size(dimVec),
+    ).to(
+        DynInt(0),
+        # when
+        dimVec.length() == i64(0)
+    )
+
+    # Shape building
+    yield rewrite(
+        shape.to_append(ad, idx, ndim)
+    ).to(
+        shape.append(dim).to_append(ad, idx + 1, ndim),
+        dim == ad.dim(idx),
+        idx < ndim,
+    )
+    yield rewrite(
+        shape.to_append(ad, ndim, ndim)
+    ).to(
+        shape
+    )
+    yield rewrite(Shape.from_arraydesc(ad), subsume=True).to(
+        Shape().to_append(ad, 0, ndim),
+        ndim == ad.ndim
+    )
+    yield rewrite(Shape().append(dim)).to(
+        Shape.from_list(Vec[Dim](dim))
+    )
+    yield rewrite(
+        Shape.from_list(dimVec).append(dim)
+    ).to(
+        Shape.from_list(dimVec.append(Vec[Dim](dim)))
+    )
+
+    # shape + shape
+    yield rewrite(Shape.from_list(dimVec) + Shape.from_list(dimVec2)).to(
+        Shape.from_list(dimVec.append(dimVec2))
+    )
+
+
+
+
+numpy_rulesset = (
+    ruleset_numpy_reshape
+    | ruleset_numpy_promote_binop
+    | ruleset_numpy_shape
+)
+
 @function
 def npy_unary_ufunc(name: StringLike) -> Term: ...
 
@@ -557,7 +902,7 @@ def make_function_rule(module_mapping: dict[str, str]):
 
 module_rulesets = (
     reduce(operator.or_, make_function_rule(cgv.imported))
-    | ruleset_numpy_promote_binop
+    | numpy_rulesset
 )
 
 ######################################
@@ -568,6 +913,7 @@ module_rulesets = (
 @function(cost=1)
 def ArrayType(ndim: i64Like, dtype: Type, shape: Shape, layout: DataLayout) -> ArrayDesc:
     ...
+
 
 @ruleset
 def ruleset_explain_array_desc(ad: ArrayDesc, ndim: i64, dtype: Type, shape: Shape, dim: Dim, idx: i64,
@@ -583,32 +929,6 @@ def ruleset_explain_array_desc(ad: ArrayDesc, ndim: i64, dtype: Type, shape: Sha
             shape=Shape().to_append(ad, 0, ndim),
             layout=layout,
         ))
-    )
-
-    # Shape building
-    yield rewrite(
-        shape.to_append(ad, idx, ndim)
-    ).to(
-        shape.append(dim).to_append(ad, idx + 1, ndim),
-        dim == ad.dim(idx),
-        idx < ndim,
-    )
-    yield rewrite(
-        shape.to_append(ad, ndim, ndim)
-    ).to(
-        shape
-    )
-    yield rewrite(Shape.from_arraydesc(ad), subsume=True).to(
-        Shape().to_append(ad, 0, ndim),
-        ndim == ad.ndim
-    )
-    yield rewrite(Shape().append(dim)).to(
-        Shape.from_list(Vec[Dim](dim))
-    )
-    yield rewrite(
-        Shape.from_list(dimVec).append(dim)
-    ).to(
-        Shape.from_list(dimVec.append(Vec[Dim](dim)))
     )
 
 
@@ -741,6 +1061,9 @@ class TypeSpeller(ase.TreeVisitor):
             case rg.GenericList(op, children):
                 memo[expr] = r = list(map(lambda x: memo.get(x, x), children))
                 assert r is not None
+            # case LLM_generic(desc, operands):
+            #     memo[expr] = r = self.visit_Generic(desc, tuple(map(lambda x: memo.get(x, x), operands)))
+            #     assert r is not None
             case NbOp_Type(str(name)):
                 memo[expr] = name
             case _:
@@ -757,7 +1080,7 @@ class TypeSpeller(ase.TreeVisitor):
             case 'Dim.fixed', (name,):
                 return name
             case '·.append', (asb, dim):
-                return asb + (dim,)
+                return asb + [dim]
             case 'DataLayout.strided', ():
                 return 'A'
             case 'DataLayout.c_contiguous', ():
@@ -768,6 +1091,8 @@ class TypeSpeller(ase.TreeVisitor):
                 return ad
             case "Shape.from_list", (vec,):
                 return vec
+            # case "·.toTuple<self>", (vec,):
+            #     return vec
             case _:
                 raise ValueError(f"{op} {children}")
 
@@ -1051,7 +1376,31 @@ class MlirBackend(_ch06_MlirBackend):
                 # Call the generated binary function with broadcasted operands
                 func.call((), fname_binary, [lhs_val, rhs_val, result])
                 return result
+            case "NpyOp_Reshape_Shaped<ary, src_nd, outshape>", (ary, nd, outshape):
+                shape = TypeSpeller.apply(outshape)
+                out_nd = len(shape)
+                fname_reshape = be.gen_array_reshape(self.module, nd, shape)
+                fn_reshape = self._get_func_by_name(fname_reshape)
+                [src_type, result_type] = fn_reshape.type.inputs
+                ary_val = (yield ary)
 
+                # Get output dimensions from outshape - use fixed shape
+                result_shape = shape  # Use the actual shape values, not dynamic
+                memref_type = ir.MemRefType.get(result_shape, result_type.element_type)
+
+                # Allocate result memref
+                result = memref.AllocOp(memref_type, [], [])
+
+                # Call the generated reshape function
+
+                func.call((), fname_reshape, [ary_val, result])
+
+                # Cast result to dynamic shaped type to match function signature
+                out_type = ir.MemRefType.get(
+                    [ir.ShapedType.get_dynamic_size()] * out_nd,
+                    result_type.element_type
+                )
+                return memref.CastOp(out_type, result)
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -1170,11 +1519,14 @@ def run_compiler(target_function, args):
                 | ruleset_ufunc_reduce_array_desc
                 | ruleset_explain_array_desc
                 | ruleset_typevar_annotate
+                | ruleset_tuple
             ),
             pipeline_report=report,
             pipeline_debug=False,
+            # display_egraph=True,
             **compiler_config,
         )
+
     finally:
         pass
         # print(report.display())
@@ -1225,6 +1577,15 @@ def test_softmax_full():
     _run_array_unary_test(softmax_full, np.random.random((1, 2, 6, 4)))
 
 
+def apply_rotary_emb_reshape(xq):
+    xqri = xq.reshape(xq.shape[:-1] + (-1, 2))
+    return xqri
+
+
+def test_apply_rotary_emb_reshape():
+    np.random.seed(0)
+    _run_array_unary_test(apply_rotary_emb_reshape, np.random.random((1, 2, 3, 4)))
+
 
 #######################################
 
@@ -1244,10 +1605,11 @@ def _run_array_unary_test(target_function, inary):
     np.testing.assert_allclose(got, desired)
 
 
+
+
 def expected_func(x):
     exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
     return exp_x / np.sum(exp_x, axis=-1, keepdims=True)
-
 
 
 def main():
