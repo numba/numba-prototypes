@@ -552,11 +552,14 @@ def pipeline_egraph_extraction(
     converter_class,
     cost_model,
     pipeline_report=Report.Sink(),
+    display_egraph=False,
 ) -> EGraphExtractionOutput:
     with pipeline_report.nest(
         "EGraph Extraction", default_expanded=True
     ) as report:
         stats = {}
+        if display_egraph:
+            egraph.display()
         try:
             # This is the same as ch4.1
             cost, extracted = egraph_extraction(

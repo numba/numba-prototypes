@@ -71,6 +71,9 @@ from utils import Report
 from pathlib import Path
 import os.path
 
+from sealir.eqsat.rvsdg_eqsat import wildcard as _wc
+
+
 source_filename = Path(os.path.dirname(__file__)) / '..' / "examples" / "llama3" / "llama3.py"
 with open(source_filename, "r") as fin:
     source_code = fin.read()
@@ -245,6 +248,13 @@ def NpyOp_Reshape(ary: Term, src_nd: i64Like, new_shape: Term) -> Term: ...
 def NpyOp_Reshape_Shaped(ary: Term, src_nd: i64Like, outshape: Shape) -> Term: ...
 
 
+@function(cost=1000)
+def NpyOp_Take_one_index(ary: Term, index: i64Like, axis: i64Like) -> Term: ...
+
+@function
+def NpyOp_Take_Shaped_one_index(ary: Term, index: i64Like, axis: i64Like, src_nd: i64Like, outshape: Shape) -> Term: ...
+
+
 @function
 def get_ufunc_reduce_array_desc(
     in_array: ArrayDesc, axis: i64Like, keepdims: BoolLike
@@ -370,6 +380,11 @@ class Shape(Expr):
     def size(self) -> i64: ...
 
     def __add__(self, rhs: Shape) -> Shape: ...
+
+
+@function(cost=1)
+def ArrayType(ndim: i64Like, dtype: Type, shape: Shape, layout: DataLayout) -> ArrayDesc:
+    ...
 
 
 class NumPyRules:
@@ -572,6 +587,64 @@ class NumPyRules:
         yield rewrite(orig, subsume=True).to(npy_binary_ufunc("divide"))
         yield from NumPyRules._make_binary_rules("divide", NpyOp_Divide, NpyOp_Divide_Shaped)
 
+    @staticmethod
+    def take(orig: Term):
+        yield rewrite(orig, subsume=True).to(npy_take())
+
+        io = var("io", Term)
+        obj = var("obj", Term)
+        res = var("res", Term)
+        args = var("args", TermList)
+        kwargs = var("kwargs", TermDict)
+        callee = Py_CallKwargs(
+            func=npy_take(), io=io, args=args, kwargs=kwargs
+        )
+        index_val = var("index", i64)
+        axis_val = var("axis_val", i64)
+        ndim = var("ndim", i64)
+        dtype = var("dtype", Type)
+        layout = var("layout", DataLayout)
+        shape = var("shape", Shape)
+        dimVec = var("dimVec", Vec[Dim])
+        dim = var("dim", Dim)
+
+        yield rule(callee).then(
+            kwargs.lookup("axis"), args[1]
+        )
+        yield rewrite(callee.getPort(1)).to(
+            NpyOp_Take_one_index(args[0], index_val, axis=axis_val),
+            # when
+            Term.LiteralI64(axis_val) == kwargs.get("axis"),
+            Term.LiteralI64(index_val) == args[1],
+        )
+        # make it pure
+        yield rewrite(callee.getPort(0)).to(io)
+
+        # Typing & Shaping
+        yield rule(
+            res == NpyOp_Take_one_index(obj, index_val, axis=-1),
+            TypeVar(obj).getType() == ArrayType(ndim, dtype, shape, layout).toType(),
+            shape == Shape.from_list(dimVec)
+        ).then(
+            set_(TypeVar(res).getType()).to(
+                ArrayType(
+                    ndim - 1,
+                    dtype,
+                    Shape.from_list(dimVec.pop()),
+                    layout
+                ).toType()
+            )
+        )
+        # promote
+        yield rule(
+            res == NpyOp_Take_one_index(obj, index_val, axis_val),
+            TypeVar(res).getType() == ArrayType(_wc(i64), _wc(Type), shape, _wc(DataLayout)).toType(),
+            TypeVar(obj).getType() == ArrayType(ndim, _wc(Type), _wc(Shape), _wc(DataLayout)).toType(),
+        ).then(
+            union(res).with_(NpyOp_Take_Shaped_one_index(obj, index_val, axis_val, ndim, shape))
+        )
+
+
 
 @ruleset
 def ruleset_numpy_promote_binop(
@@ -607,8 +680,6 @@ def ruleset_numpy_reshape(
     dimVec: Vec[Dim],
     ad: ArrayDesc,
 ):
-    from sealir.eqsat.rvsdg_eqsat import wildcard as _wc
-
     # match operation
     yield rule(
         target == Py_Call(func=callee.getPort(1),
@@ -877,6 +948,9 @@ def npy_binary_ufunc(name: StringLike) -> Term: ...
 @function
 def npy_reduce(name: StringLike) -> Term: ...
 
+@function
+def npy_take() -> Term: ...
+
 
 loaded_module = {
     "numpy": NumPyRules,
@@ -907,12 +981,6 @@ module_rulesets = (
 
 ######################################
 # Explain array desc
-
-
-
-@function(cost=1)
-def ArrayType(ndim: i64Like, dtype: Type, shape: Shape, layout: DataLayout) -> ArrayDesc:
-    ...
 
 
 @ruleset
@@ -1212,6 +1280,34 @@ class MlirBackend(_ch06_MlirBackend):
             if decl.sym_name.value == fname:
                 return decl
 
+    def _handle_reshape(self, ary_val, nd, outshape):
+        from mlir.dialects import arith, func, memref
+        from mlir import ir
+        be: LlamaBackend = self.codegen
+
+        shape = TypeSpeller.apply(outshape)
+        out_nd = len(shape)
+        fname_reshape = be.gen_array_reshape(self.module, nd, shape)
+        fn_reshape = self._get_func_by_name(fname_reshape)
+        [src_type, result_type] = fn_reshape.type.inputs
+
+        # Get output dimensions from outshape - use fixed shape
+        result_shape = shape  # Use the actual shape values, not dynamic
+        memref_type = ir.MemRefType.get(result_shape, result_type.element_type)
+
+        # Allocate result memref
+        result = memref.AllocOp(memref_type, [], [])
+
+        # Call the generated reshape function
+        func.call((), fname_reshape, [ary_val, result])
+
+        # Cast result to dynamic shaped type to match function signature
+        out_type = ir.MemRefType.get(
+            [ir.ShapedType.get_dynamic_size()] * out_nd,
+            result_type.element_type
+        )
+        return memref.CastOp(out_type, result)
+
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
         from mlir.dialects import arith, func, memref, linalg, math
         from mlir import ir
@@ -1377,30 +1473,44 @@ class MlirBackend(_ch06_MlirBackend):
                 func.call((), fname_binary, [lhs_val, rhs_val, result])
                 return result
             case "NpyOp_Reshape_Shaped<ary, src_nd, outshape>", (ary, nd, outshape):
+                ary_val = (yield ary)
+                return self._handle_reshape(ary_val, nd, outshape)
+            case "NpyOp_Take_Shaped_one_index<ary, index, axis, src_nd, outshape>", (ary, index, -1, src_nd, outshape):
+                # This is implementing np.take(ary, index, axis=-1)
+                # src_nd is the ary.ndim
+                # outshape is the shape of the output
                 shape = TypeSpeller.apply(outshape)
                 out_nd = len(shape)
-                fname_reshape = be.gen_array_reshape(self.module, nd, shape)
-                fn_reshape = self._get_func_by_name(fname_reshape)
-                [src_type, result_type] = fn_reshape.type.inputs
+                fname_take = be.gen_array_take(self.module, src_nd, -1, index)
+                fn_take = self._get_func_by_name(fname_take)
+                [src_type, result_type] = fn_take.type.inputs
+
                 ary_val = (yield ary)
 
-                # Get output dimensions from outshape - use fixed shape
-                result_shape = shape  # Use the actual shape values, not dynamic
+                # Get output dimensions from outshape - use the largest operand to determine target size
+                dynshape = ir.ShapedType.get_dynamic_size()
+                result_shape = [dynshape] * (out_nd + 1)
                 memref_type = ir.MemRefType.get(result_shape, result_type.element_type)
 
-                # Allocate result memref
-                result = memref.AllocOp(memref_type, [], [])
+                # Get target dimensions from outshape
+                target_dims = []
+                for dim_size in [*shape, 1]:
+                    # Convert each dimension from the outshape to an MLIR dimension value
+                    if isinstance(dim_size, int):
+                        # Static dimension
+                        target_dims.append(arith.ConstantOp(ir.IndexType.get(), dim_size))
+                    else:
+                        assert False, 'not supported' # TODO# Allocate result memref
+                result = memref.AllocOp(memref_type, target_dims, [])
 
-                # Call the generated reshape function
+                # Cast result to match the function signature
+                casted_result = memref.CastOp(result_type, result)
 
-                func.call((), fname_reshape, [ary_val, result])
+                # Call the generated function
+                func.call((), fname_take, [ary_val, casted_result])
 
-                # Cast result to dynamic shaped type to match function signature
-                out_type = ir.MemRefType.get(
-                    [ir.ShapedType.get_dynamic_size()] * out_nd,
-                    result_type.element_type
-                )
-                return memref.CastOp(out_type, result)
+                return self._handle_reshape(result, out_nd + 1, outshape)
+
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -1409,7 +1519,10 @@ class MlirBackend(_ch06_MlirBackend):
         optimized = self.codegen.run_passes(llmod)
 
         in_types, out_types = [], []
-        shared_libs = []
+
+        from ctypes.util import find_library
+        needed_shared_libs = ("mlir_c_runner_utils", "mlir_runner_utils")
+        shared_libs = [find_library(x) for x in needed_shared_libs]
 
         module = self.module
 
@@ -1522,7 +1635,7 @@ def run_compiler(target_function, args):
                 | ruleset_tuple
             ),
             pipeline_report=report,
-            pipeline_debug=False,
+            # pipeline_debug=True,
             # display_egraph=True,
             **compiler_config,
         )
@@ -1585,6 +1698,25 @@ def apply_rotary_emb_reshape(xq):
 def test_apply_rotary_emb_reshape():
     np.random.seed(0)
     _run_array_unary_test(apply_rotary_emb_reshape, np.random.random((1, 2, 3, 4)))
+
+
+
+def test_apply_rotary_emb_fancy_index_equiv():
+    np.random.seed(0)
+    arr = np.random.random((1, 2, 3, 4))
+    np.testing.assert_equal(arr[..., 0], np.take(arr, 0, axis=-1))
+
+
+def apply_rotary_emb_fancy_index(xqri):
+    # xq_r = xqri[..., 0]
+    xq_r = np.take(xqri, 0, axis=-1)
+    return xq_r
+
+
+def test_apply_rotary_emb_fancy_index():
+    np.random.seed(0)
+    _run_array_unary_test(apply_rotary_emb_fancy_index,
+                          np.random.random((1, 2, 3, 4)))
 
 
 #######################################
