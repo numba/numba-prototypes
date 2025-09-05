@@ -7,6 +7,8 @@ import mlir.execution_engine as execution_engine
 import mlir.runtime as runtime
 import ctypes
 from ctypes.util import find_library
+from utils.llama3.llama3 import ModelArgs, Tokenizer, llama_init
+from copy import deepcopy
 
 import math as pymath
 
@@ -1569,6 +1571,147 @@ if __name__ == "__main__":
 
     for res_np, res_mlir in zip(numpy_result, mlir_result):
         assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def llama_forward(model, input_ids, start_pos):
+        args = model["args"]
+        dtype = model["dtype"]
+
+        _, seq_len = input_ids.shape
+        h = model["tok_embedding"][input_ids]
+
+        freqs_cos = model["freqs_cos"][start_pos : start_pos + seq_len]
+        freqs_sin = model["freqs_sin"][start_pos : start_pos + seq_len]
+
+        mask = None
+        if seq_len > 1:
+            mask = np.full((seq_len, seq_len), float("-inf"), dtype=dtype)
+            mask = np.triu(mask, k=1)
+            zeros_shape = (seq_len, start_pos)
+            mask = np.concatenate([np.zeros(zeros_shape, dtype=dtype), mask], axis=1)
+
+        caches_k = model["caches_k"]
+        caches_v = model["caches_v"]
+
+        for i, block in enumerate(model["layer_blocks"]):
+            h, caches_k[i], caches_v[i] = transformer_block(
+                h,
+                start_pos,
+                mask,
+                freqs_cos,
+                freqs_sin,
+                block,
+                caches_k[i],
+                caches_v[i],
+            )
+
+        h = rmsnorm(h, model["norm_weight"], args.norm_eps)
+        logit = h[:, [-1], :] @ model["lm_head_weight"]
+        return logit
+
+    def llama_generate(model, input_ids, max_new_tokens):
+        batch_size, prompt_len = input_ids.shape
+        current_len = prompt_len
+        next_id = None  # Initialize next_id to avoid undefined variable error
+        for i in range(max_new_tokens):
+            current_pos = prompt_len + i
+            if i == 0:
+                current_input_ids = input_ids
+                pos = 0
+            else:
+                current_input_ids = next_id
+                pos = current_pos - 1
+            logits = llama_forward(model, current_input_ids, pos)
+            next_id = np.argmax(logits[:, -1, :], axis=-1, keepdims=True).astype(np.int32)
+            yield next_id
+            current_len += 1
+            if current_len >= model["args"].max_seq_len:
+                break
+
+    def llama_forward_mlir(model, input_ids, start_pos):
+        args = model["args"]
+        dtype = model["dtype"]
+
+        _, seq_len = input_ids.shape
+        h = model["tok_embedding"][input_ids]
+
+        freqs_cos = model["freqs_cos"][start_pos : start_pos + seq_len]
+        freqs_sin = model["freqs_sin"][start_pos : start_pos + seq_len]
+
+        mask = None
+        if seq_len > 1:
+            mask = np.full((seq_len, seq_len), float("-inf"), dtype=dtype)
+            mask = np.triu(mask, k=1)
+            zeros_shape = (seq_len, start_pos)
+            mask = np.concatenate([np.zeros(zeros_shape, dtype=dtype), mask], axis=1)
+
+        caches_k = model["caches_k"]
+        caches_v = model["caches_v"]
+
+        for i, block in enumerate(model["layer_blocks"]):
+            h, caches_k[i], caches_v[i] = transformer_block_mlir(
+                h,
+                start_pos,
+                mask,
+                freqs_cos,
+                freqs_sin,
+                block,
+                caches_k[i],
+                caches_v[i],
+            )
+
+        h = rmsnorm_mlir(h, model["norm_weight"], args.norm_eps)
+        logit = h[:, [-1], :] @ model["lm_head_weight"]
+        return logit
+
+    def llama_generate_mlir(model, input_ids, max_new_tokens):
+        batch_size, prompt_len = input_ids.shape
+        current_len = prompt_len
+        next_id = None  # Initialize next_id to avoid undefined variable error
+        for i in range(max_new_tokens):
+            current_pos = prompt_len + i
+            if i == 0:
+                current_input_ids = input_ids
+                pos = 0
+            else:
+                current_input_ids = next_id
+                pos = current_pos - 1
+            logits = llama_forward_mlir(model, current_input_ids, pos)
+            next_id = np.argmax(logits[:, -1, :], axis=-1, keepdims=True).astype(np.int32)
+            yield next_id
+            current_len += 1
+            if current_len >= model["args"].max_seq_len:
+                break
+
+
+    print("Testing Llama Generate")
+
+    args = ModelArgs()
+    print(f"Using precision: {args.dtype}")
+    tokenizer = Tokenizer("/home/kc611/Desktop/Workspaces/base/llama3.np/tokenizer.model.np")
+    model = llama_init("/home/kc611/Desktop/Workspaces/base/llama3.np/stories15M.model.npz", args)
+
+    prompt = "Once upon a time"
+
+    print("Prompt", f"\n{prompt}")
+    input_ids = np.array([tokenizer.encode(prompt)])
+
+    model_mlir = deepcopy(model)
+
+    for id_val, id_val_mlir in zip(llama_generate(model, input_ids, args.max_new_tokens), llama_generate_mlir(model_mlir, input_ids, args.max_new_tokens)):
+        output_id = id_val[0].tolist()
+        if output_id[-1] in [tokenizer.eos_id, tokenizer.bos_id]:
+            break
+        print("Numpy Output Token: ", output_id, tokenizer.decode(output_id))
+
+        output_id_mlir = id_val_mlir[0].tolist()
+        if output_id_mlir[-1] in [tokenizer.eos_id, tokenizer.bos_id]:
+            break
+        print("MLIR Output Token: ", output_id, tokenizer.decode(output_id_mlir))
+        break
 
     print("Function executed succesfully.")
 
