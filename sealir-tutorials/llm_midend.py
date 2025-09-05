@@ -1706,6 +1706,13 @@ def test_apply_rotary_emb_fancy_index_equiv():
     arr = np.random.random((1, 2, 3, 4))
     np.testing.assert_equal(arr[..., 0], np.take(arr, 0, axis=-1))
 
+def test_apply_rotary_emb_broadcast_to_expanddims_equiv():
+    seq_len, head_dim = 5, 24
+    freqs_cos = np.random.random((seq_len, head_dim))
+    desired = np.broadcast_to(np.expand_dims(freqs_cos, axis=(0, 2)), (1, 5, 6, 24))
+    got = np.broadcast_to(freqs_cos.reshape(1, freqs_cos.shape[0], 1, freqs_cos.shape[1]), (1, 5, 6, 24))
+    np.testing.assert_equal(got, desired)
+
 
 def apply_rotary_emb_fancy_index(xqri):
     # xq_r = xqri[..., 0]
@@ -1717,6 +1724,19 @@ def test_apply_rotary_emb_fancy_index():
     np.random.seed(0)
     _run_array_unary_test(apply_rotary_emb_fancy_index,
                           np.random.random((1, 2, 3, 4)))
+
+
+def apply_rotary_emb_expand_dims(freqs_cos):
+    # np.expand_dims(freqs_cos, axis=(0, 2))
+    # TODO actually support np.expand_dims
+    return freqs_cos.reshape((1,) + (freqs_cos.shape[0],) + (1,) + (freqs_cos.shape[1],))
+
+
+def test_apply_rotary_emb_expand_dims():
+    np.random.seed(0)
+    seq_len, head_dim = 5, 24
+    freqs_cos = np.random.random((seq_len, head_dim))
+    _run_array_unary_test(apply_rotary_emb_fancy_index, freqs_cos)
 
 
 #######################################
