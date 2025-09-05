@@ -167,7 +167,10 @@ def tuple_add(lhs: Term, rhs: Term) -> Term: ...
 
 @ruleset
 def ruleset_tuple(tuptype: Type, expr: Term, io: Term, amt: i64,
-                  obj: Term, size: i64, elems: TermList, termVec: Vec[Term],
+                  target: Term,
+                  obj: Term, size: i64, elems: TermList,
+                  termVec: Vec[Term],
+                  termVec2: Vec[Term],
                   slice: Term, io2: Term,
                   lhs: Term, rhs: Term,
                   lhs_size: i64, rhs_size: i64):
@@ -197,6 +200,20 @@ def ruleset_tuple(tuptype: Type, expr: Term, io: Term, amt: i64,
     ).then(
         union(expr.getPort(1)).with_(tuple_add(lhs, rhs)),
         union(expr.getPort(0)).with_(io),
+    )
+    # tuple __getitem__
+    yield rule(
+        target == Py_SubscriptIO(io, expr, Term.LiteralI64(amt)),
+        expr == Py_Tuple(TermList(termVec)),
+    ).then(
+        union(target.getPort(1)).with_(termVec[amt]),
+        # io
+        union(io).with_(target.getPort(0)),
+    )
+    yield rewrite(
+        tuple_add(Py_Tuple(TermList(termVec)), Py_Tuple(TermList(termVec2)))
+    ).to(
+        Py_Tuple(TermList(termVec.append(termVec2)))
     )
 
 #######################################
@@ -678,6 +695,7 @@ def ruleset_numpy_reshape(
     n: i64,
     layout: DataLayout,
     dimVec: Vec[Dim],
+    termVec: Vec[Term],
     ad: ArrayDesc,
 ):
     # match operation
@@ -744,6 +762,31 @@ def ruleset_numpy_reshape(
         ),
     )
 
+    @function(cost=1000)
+    def _shape_from_tuple(termVec: Vec[Term]) -> Shape: ...
+
+    yield rule(
+        NpyOp_Reshape(ary, _wc(i64), Py_Tuple(TermList(termVec))),
+    ).then(
+        union(Py_Tuple(TermList(termVec))).with_(_shape_from_tuple(termVec).toTuple())
+    )
+
+    yield rewrite(
+        _shape_from_tuple(termVec)
+    ).to(
+        Shape().append(Dim.fixed(n)) + _shape_from_tuple(termVec.remove(0)),
+        # when
+        termVec[0] == Term.LiteralI64(n)
+    )
+    yield rewrite(
+        _shape_from_tuple(termVec)
+    ).to(
+        Shape(),
+        # when
+        termVec.length() == i64(0)
+    )
+
+
     yield rewrite(
         _normalize_shape_for_reshape(shape, size)
     ).to(
@@ -785,7 +828,9 @@ def ruleset_numpy_shape(
     amt: i64,
     idx: i64,
     dim: Dim,
-    elems: Vec[Term]):
+    elems: Vec[Term],
+    termlist: TermList,
+):
     yield rule(
         target == Py_AttrIO(io, ary, "shape"),
         ad.toType() == TypeVar(ary).getType(),
@@ -928,6 +973,27 @@ def ruleset_numpy_shape(
         Shape.from_list(dimVec.append(dimVec2))
     )
 
+    # shape.toTuple()
+    yield rule(
+        target == Shape.from_list(dimVec).toTuple(),
+        Dim.fixed(amt) == dimVec[0],
+    ).then(
+        union(target).with_(
+            tuple_add(
+                Py_Tuple(
+                    TermList(Vec[Term](Term.LiteralI64(amt)))
+                ),
+                Shape.from_list(dimVec.remove(0)).toTuple(),
+            )
+        ),
+    )
+    yield rule(
+        target == Shape().toTuple(),
+    ).then(
+        union(target).with_(
+            Py_Tuple(TermList(Vec[Term].empty()))
+        ),
+    )
 
 
 
@@ -1736,7 +1802,7 @@ def test_apply_rotary_emb_expand_dims():
     np.random.seed(0)
     seq_len, head_dim = 5, 24
     freqs_cos = np.random.random((seq_len, head_dim))
-    _run_array_unary_test(apply_rotary_emb_fancy_index, freqs_cos)
+    _run_array_unary_test(apply_rotary_emb_expand_dims, freqs_cos)
 
 
 #######################################
