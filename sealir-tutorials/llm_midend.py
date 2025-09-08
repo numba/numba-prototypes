@@ -272,12 +272,23 @@ def NpyOp_Take_one_index(ary: Term, index: i64Like, axis: i64Like) -> Term: ...
 def NpyOp_Take_Shaped_one_index(ary: Term, index: i64Like, axis: i64Like, src_nd: i64Like, outshape: Shape) -> Term: ...
 
 
+@function(cost=1000)
+def NpyOp_Broadcast_To(ary: Term, shape: Term) -> Term: ...
+
+
+@function
+def NpyOp_Broadcast_To_Shaped(ary: Term, outshape: Shape) -> Term: ...
+
+
 @function
 def get_ufunc_reduce_array_desc(
     in_array: ArrayDesc, axis: i64Like, keepdims: BoolLike
 ) -> ArrayDesc: ...
 
 
+
+@function(cost=1000)
+def _shape_from_tuple(termVec: Vec[Term]) -> Shape: ...
 
 
 @ruleset
@@ -661,13 +672,75 @@ class NumPyRules:
             union(res).with_(NpyOp_Take_Shaped_one_index(obj, index_val, axis_val, ndim, shape))
         )
 
+    def broadcast_to(orig: Term):
+        yield rewrite(orig, subsume=True).to(npy_broadcast_to())
+
+        io = var("io", Term)
+        call = var("call", Term)
+        obj = var("obj", Term)
+        shape_tup = var("shape_tup", Term)
+        res = var("res", Term)
+        argVec = var("argVec", Vec[Term])
+        ndim = var("ndim", i64)
+        shape = var("shape", Shape)
+        dimVec = var("dimVec", Vec[Dim])
+        termVec = var("termVec", Vec[Term])
+        ad = var("ad", ArrayDesc)
+
+        yield rule(
+            call == Py_Call(
+                func=npy_broadcast_to(), io=io, args=TermList(argVec)
+            ),
+            argVec.length() == i64(2),
+        ).then(
+            union(call.getPort(0)).with_(io),
+            union(call.getPort(1)).with_(
+                NpyOp_Broadcast_To(argVec[0], argVec[1]),
+            ),
+        )
+
+        # Typing & Shaping
+
+        yield rewrite(
+            Py_Tuple(TermList(termVec)),
+        ).to(
+            _shape_from_tuple(termVec).toTuple(),
+            # when
+            NpyOp_Broadcast_To(obj, shape_tup),
+        )
+
+        yield rule(
+            res == NpyOp_Broadcast_To(obj, shape_tup),
+            TypeVar(obj).getType() == ad.toType(),  # obj is an array
+            shape == Shape.from_list(dimVec),
+            shape_tup == shape.toTuple(),
+            ndim == dimVec.length(),
+        ).then(
+            set_(TypeVar(res).getType()).to(
+                ArrayType(
+                    ndim,
+                    ad.dtype,
+                    shape,
+                    ad.dataLayout,
+                ).toType()
+            )
+        )
+        # promote
+        yield rewrite(
+            NpyOp_Broadcast_To(obj, shape_tup),
+        ).to(
+            NpyOp_Broadcast_To_Shaped(obj, shape),
+            # when
+            shape == Shape.from_list(dimVec),
+            shape_tup == shape.toTuple(),
+        )
 
 
 @ruleset
 def ruleset_numpy_promote_binop(
     op: Term, lhs: Term, rhs: Term, io: Term, arraydesc: ArrayDesc
 ):
-    def promote_subtract(operand, opname, py_op):
+    def promote_ops(operand, opname, py_op):
         return rewrite(py_op(io, lhs, rhs)).to(
             Py_Call(
                 ModuleGetAttr(Module("numpy"), opname), io, termlist(lhs, rhs)
@@ -677,8 +750,8 @@ def ruleset_numpy_promote_binop(
         )
 
     for operand in [lhs, rhs]:
-        yield promote_subtract(operand, "subtract", Py_SubIO)
-        yield promote_subtract(operand, "divide", Py_DivIO)
+        yield promote_ops(operand, "subtract", Py_SubIO)
+        yield promote_ops(operand, "divide", Py_DivIO)
 
 
 @ruleset
@@ -761,9 +834,6 @@ def ruleset_numpy_reshape(
             ).toType()
         ),
     )
-
-    @function(cost=1000)
-    def _shape_from_tuple(termVec: Vec[Term]) -> Shape: ...
 
     yield rule(
         NpyOp_Reshape(ary, _wc(i64), Py_Tuple(TermList(termVec))),
@@ -1016,6 +1086,9 @@ def npy_reduce(name: StringLike) -> Term: ...
 
 @function
 def npy_take() -> Term: ...
+
+@function
+def npy_broadcast_to() -> Term: ...
 
 
 loaded_module = {
@@ -1577,6 +1650,14 @@ class MlirBackend(_ch06_MlirBackend):
 
                 return self._handle_reshape(result, out_nd + 1, outshape)
 
+            case "NpyOp_Broadcast_To_Shaped<ary, outshape>", (ary, outshape):
+                # This is implementing np.broacast_to(ary, outshape)
+                # outshape is the shape of the output
+                shape = TypeSpeller.apply(outshape)
+                ary_val = (yield ary)
+                print(shape, ary_val)
+                raise NotImplementedError(f"TODO: {ary_val} :: {shape}")
+
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -1795,7 +1876,8 @@ def test_apply_rotary_emb_fancy_index():
 def apply_rotary_emb_expand_dims(freqs_cos):
     # np.expand_dims(freqs_cos, axis=(0, 2))
     # TODO actually support np.expand_dims
-    return freqs_cos.reshape((1,) + (freqs_cos.shape[0],) + (1,) + (freqs_cos.shape[1],))
+    # return freqs_cos.reshape((1,) + (freqs_cos.shape[0],) + (1,) + (freqs_cos.shape[1],))
+    return freqs_cos.reshape((1,) + freqs_cos.shape)
 
 
 def test_apply_rotary_emb_expand_dims():
@@ -1803,6 +1885,20 @@ def test_apply_rotary_emb_expand_dims():
     seq_len, head_dim = 5, 24
     freqs_cos = np.random.random((seq_len, head_dim))
     _run_array_unary_test(apply_rotary_emb_expand_dims, freqs_cos)
+
+
+def apply_rotary_emb_broadcast_to(freqs_cos_expanded):
+    return np.broadcast_to(freqs_cos_expanded, (1, 5, 6, 24))
+
+
+@pytest.mark.xfail(reason="TODO",
+                   raises=NotImplementedError)
+def test_apply_rotary_emb_broadcast_to():
+    np.random.seed(0)
+    seq_len, head_dim = 5, 24
+    freqs_cos_expanded = np.random.random((1, seq_len, 1, head_dim))
+    _run_array_unary_test(apply_rotary_emb_broadcast_to, freqs_cos_expanded)
+
 
 
 #######################################
@@ -1821,8 +1917,6 @@ def _run_array_unary_test(target_function, inary):
         print("DESIRED".center(80, '-'))
         print(desired)
     np.testing.assert_allclose(got, desired)
-
-
 
 
 def expected_func(x):
