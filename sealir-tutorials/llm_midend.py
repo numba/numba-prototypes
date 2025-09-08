@@ -55,6 +55,7 @@ from sealir.eqsat.py_eqsat import (
     Py_LoadGlobal,
     Py_NegIO,
     Py_SubIO,
+    Py_MulIO,
     Py_SliceIO,
     Py_SubscriptIO,
     Py_Tuple,
@@ -243,11 +244,28 @@ def NpyOp_Exp_Shaped(operand: Term, outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
+def NpyOp_Add(lhs: Term, rhs: Term) -> Term: ...
+
+
+@function
+def NpyOp_Add_Shaped(lhs: Term, rhs: Term, outshape: Shape) -> Term: ...
+
+
+
+@function(cost=1000)
 def NpyOp_Subtract(lhs: Term, rhs: Term) -> Term: ...
 
 
 @function
 def NpyOp_Subtract_Shaped(lhs: Term, rhs: Term, outshape: Shape) -> Term: ...
+
+
+@function(cost=1000)
+def NpyOp_Multiply(lhs: Term, rhs: Term) -> Term: ...
+
+
+@function
+def NpyOp_Multiply_Shaped(lhs: Term, rhs: Term, outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
@@ -606,9 +624,20 @@ class NumPyRules:
         yield from NumPyRules._make_reduce_op_rules("sum", NpyOp_Sum, NpyOp_Sum_Shaped)
 
     @staticmethod
+    def add(orig: Term):
+        yield rewrite(orig, subsume=True).to(npy_binary_ufunc("add"))
+        yield from NumPyRules._make_binary_rules("add", NpyOp_Add, NpyOp_Add_Shaped)
+
+    @staticmethod
     def subtract(orig: Term):
         yield rewrite(orig, subsume=True).to(npy_binary_ufunc("subtract"))
         yield from NumPyRules._make_binary_rules("subtract", NpyOp_Subtract, NpyOp_Subtract_Shaped)
+
+
+    @staticmethod
+    def multiply(orig: Term):
+        yield rewrite(orig, subsume=True).to(npy_binary_ufunc("multiply"))
+        yield from NumPyRules._make_binary_rules("multiply", NpyOp_Multiply, NpyOp_Multiply_Shaped)
 
     @staticmethod
     def divide(orig: Term):
@@ -750,7 +779,9 @@ def ruleset_numpy_promote_binop(
         )
 
     for operand in [lhs, rhs]:
+        yield promote_ops(operand, "add", Py_AddIO)
         yield promote_ops(operand, "subtract", Py_SubIO)
+        yield promote_ops(operand, "multiply", Py_MulIO)
         yield promote_ops(operand, "divide", Py_DivIO)
 
 
@@ -1447,6 +1478,25 @@ class MlirBackend(_ch06_MlirBackend):
         )
         return memref.CastOp(out_type, result)
 
+
+    def _handle_binop_ufunc(self, lhs_val, rhs_val, outshape, op):
+        from mlir.dialects import arith, func, memref, linalg, math
+        from mlir import ir
+        be: LlamaBackend = self.codegen
+        shape = TypeSpeller.apply(outshape)
+        nd = len(shape)
+        fname_sub = be.gen_array_binary(self.module, nd, nd, op, None)
+        f_sub = self._get_func_by_name(fname_sub)
+        [lhs_ty, rhs_ty, result_type] = f_sub.type.inputs
+
+        dynshape = ir.ShapedType.get_dynamic_size()
+        final_shape = [dynshape] * nd
+        memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
+        result = memref.AllocOp(memref_type, [memref.DimOp(lhs_val, arith.ConstantOp(ir.IndexType.get(), i)) for i in range(nd)], [])
+        func.call((), fname_sub, [lhs_val, rhs_val, result])
+
+        return result
+
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
         from mlir.dialects import arith, func, memref, linalg, math
         from mlir import ir
@@ -1484,22 +1534,19 @@ class MlirBackend(_ch06_MlirBackend):
                 func.call((), fname_div, [lhsval, rhsval, result])
 
                 return result
+
+            case "NpyOp_Add_Shaped<lhs, rhs, outshape>", (lhs, rhs, outshape):
+                return self._handle_binop_ufunc((yield lhs), (yield rhs), outshape, op=arith.addf)
+
             case "NpyOp_Subtract_Shaped<lhs, rhs, outshape>", (lhs, rhs, outshape):
-                shape = TypeSpeller.apply(outshape)
-                nd = len(shape)
-                fname_sub = be.gen_array_binary(self.module, nd, nd, arith.subf, None)
-                f_sub = self._get_func_by_name(fname_sub)
-                [lhs_ty, rhs_ty, result_type] = f_sub.type.inputs
-                lhsval = (yield lhs)
-                rhsval = (yield rhs)
+                return self._handle_binop_ufunc((yield lhs), (yield rhs), outshape, op=arith.subf)
 
-                dynshape = ir.ShapedType.get_dynamic_size()
-                final_shape = [dynshape] * nd
-                memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
-                result = memref.AllocOp(memref_type, [memref.DimOp(lhsval, arith.ConstantOp(ir.IndexType.get(), i)) for i in range(nd)], [])
-                func.call((), fname_sub, [lhsval, rhsval, result])
+            case "NpyOp_Multiply_Shaped<lhs, rhs, outshape>", (lhs, rhs, outshape):
+                return self._handle_binop_ufunc((yield lhs), (yield rhs), outshape, op=arith.mulf)
 
-                return result
+            case "NpyOp_Divide_Shaped<lhs, rhs, outshape>", (lhs, rhs, outshape):
+                return self._handle_binop_ufunc((yield lhs), (yield rhs), outshape, op=arith.divf)
+
             case "NpyOp_Max_Shaped<operand, axis, keepdims, outshape>", (operand, axis, True, outshape):
                 # Implements np.max(operand, axis, keepdims=True)
                 shape = TypeSpeller.apply(outshape)
@@ -1745,7 +1792,6 @@ compiler_config["backend"] = MlirBackend()
 ##########COMPILER##############
 
 def run_compiler(target_function, args):
-    assert len(args) == 1
     input_shapes = []
     input_types = []
     input_type_rules = []
@@ -1900,17 +1946,35 @@ def test_apply_rotary_emb_broadcast_to():
     _run_array_unary_test(apply_rotary_emb_broadcast_to, freqs_cos_expanded)
 
 
+def apply_rotary_emb_ufuncs(xq_r, xq_i, freqs_cos, freqs_sin):
+    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin  # adjusted
+    xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
+    return xq_out_r + xq_out_i
+
+def test_apply_rotary_emb_ufuncs():
+    np.random.seed(0)
+    shape = 1, 5, 6, 24
+    xq_r = np.random.random(shape)
+    xq_i = np.random.random(shape)
+    freqs_cos = np.random.random(shape)
+    freqs_sin = np.random.random(shape)
+    _run_array_test(apply_rotary_emb_ufuncs, (xq_r, xq_i, freqs_cos, freqs_sin))
+
 
 #######################################
 
 DEBUG = True
 
 def _run_array_unary_test(target_function, inary):
-    cres = run_compiler(target_function, [inary])
+    return _run_array_test(target_function, [inary])
+
+
+def _run_array_test(target_function, args):
+    cres = run_compiler(target_function, args)
     jit_func = cres.jit_func
 
-    got = jit_func(inary)
-    desired = target_function(inary)
+    got = jit_func(*args)
+    desired = target_function(*args)
     if DEBUG:
         print("GOT".center(80, '-'))
         print(got)
