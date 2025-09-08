@@ -75,6 +75,9 @@ import os.path
 from sealir.eqsat.rvsdg_eqsat import wildcard as _wc
 
 
+class TodoException(NotImplementedError): ...
+
+
 source_filename = Path(os.path.dirname(__file__)) / '..' / "examples" / "llama3" / "llama3.py"
 with open(source_filename, "r") as fin:
     source_code = fin.read()
@@ -296,6 +299,14 @@ def NpyOp_Broadcast_To(ary: Term, shape: Term) -> Term: ...
 
 @function
 def NpyOp_Broadcast_To_Shaped(ary: Term, outshape: Shape) -> Term: ...
+
+
+@function(cost=1000)
+def NpyOp_Stack_2(ary1: Term, ary2: Term, axis: i64Like) -> Term: ...
+
+
+@function
+def NpyOp_Stack_2_Shaped(ary1: Term, ary2: Term, axis: i64Like, outshape: Shape) -> Term: ...
 
 
 @function
@@ -663,7 +674,6 @@ class NumPyRules:
         layout = var("layout", DataLayout)
         shape = var("shape", Shape)
         dimVec = var("dimVec", Vec[Dim])
-        dim = var("dim", Dim)
 
         yield rule(callee).then(
             kwargs.lookup("axis"), args[1]
@@ -701,6 +711,7 @@ class NumPyRules:
             union(res).with_(NpyOp_Take_Shaped_one_index(obj, index_val, axis_val, ndim, shape))
         )
 
+    @staticmethod
     def broadcast_to(orig: Term):
         yield rewrite(orig, subsume=True).to(npy_broadcast_to())
 
@@ -764,6 +775,124 @@ class NumPyRules:
             shape_tup == shape.toTuple(),
         )
 
+    @staticmethod
+    def stack(orig: Term):
+        yield rewrite(orig, subsume=True).to(npy_stack())
+
+        io = var("io", Term)
+        res = var("res", Term)
+        ary1 = var("ary1", Term)
+        ary2 = var("ary2", Term)
+        arrayVec = var("arrayVec", Vec[Term])
+        args = var("args", TermList)
+        kwargs = var("kwargs", TermDict)
+        callee = Py_CallKwargs(
+            func=npy_stack(), io=io, args=args, kwargs=kwargs
+        )
+        axis_val = var("axis_val", i64)
+        ndim = var("ndim", i64)
+        dtype = var("dtype", Type)
+        layout = var("layout", DataLayout)
+        shape1 = var("shape1", Shape)
+        shape2 = var("shape2", Shape)
+        dimVec1 = var("dimVec1", Vec[Dim])
+        dimVec2 = var("dimVec2", Vec[Dim])
+        m = var("m", i64)
+        n = var("n", i64)
+
+        yield rule(callee).then(
+            kwargs.lookup("axis"), args[0]
+        )
+        yield rewrite(callee.getPort(1)).to(
+            NpyOp_Stack_2(ary1, ary2, axis=axis_val),
+            # when
+            Term.LiteralI64(axis_val) == kwargs.get("axis"),
+            args[0] == Py_Tuple(TermList(arrayVec)),
+            ary1 == arrayVec[0],
+            ary2 == arrayVec[1],
+        )
+        # make it pure
+        yield rewrite(callee.getPort(0)).to(io)
+
+        # Typing & Shaping
+        # FIXME: only does stack of two arrays using recursion
+
+        @function(cost=1000)
+        def _shape_stack_at_axis(shape1: Shape, shape2: Shape, axis_val: i64Like, ndim: i64Like) -> Shape: ...
+        @function(cost=1000)
+        def _shape_stack_at_axis_normalized(dimVec1: Vec[Dim], dimVec2: Vec[Dim], axis_val: i64Like) -> Shape: ...
+
+        yield rule(
+            res == NpyOp_Stack_2(ary1, ary2, axis=axis_val),
+            TypeVar(ary1).getType() == ArrayType(ndim, dtype, shape1, layout).toType(),
+            TypeVar(ary2).getType() == ArrayType(ndim, dtype, shape2, layout).toType(),
+            shape1 == Shape.from_list(dimVec1),
+            shape2 == Shape.from_list(dimVec2)
+        ).then(
+            set_(TypeVar(res).getType()).to(
+                ArrayType(
+                    ndim,
+                    dtype,
+                    _shape_stack_at_axis(shape1, shape2, axis_val, ndim),
+                    layout
+                ).toType()
+            )
+        )
+        yield rewrite(res).to(
+            NpyOp_Stack_2_Shaped(ary1, ary2, axis_val, shape1),
+            # when
+            res == NpyOp_Stack_2(ary1, ary2, axis_val),
+            TypeVar(res).getType() == ArrayType(_wc(i64), _wc(Type), shape1, _wc(DataLayout)).toType(),
+        )
+
+        yield rewrite(
+            _shape_stack_at_axis(shape1, shape2, axis_val, ndim)
+        ).to(
+            _shape_stack_at_axis_normalized(dimVec1, dimVec2, axis_val + ndim),
+            # when
+            axis_val < 0,
+            shape1 == Shape.from_list(dimVec1),
+            shape2 == Shape.from_list(dimVec2),
+        )
+
+        yield rewrite(
+            _shape_stack_at_axis(shape1, shape2, axis_val, ndim)
+        ).to(
+            _shape_stack_at_axis_normalized(dimVec1, dimVec2, axis_val),
+            # when
+            axis_val >= 0,
+            shape1 == Shape.from_list(dimVec1),
+            shape2 == Shape.from_list(dimVec2),
+        )
+
+        yield rewrite(
+            # axis_val != 0
+            _shape_stack_at_axis_normalized(dimVec1, dimVec2, axis_val)
+        ).to(
+            Shape.from_list(Vec[Dim](dimVec1[0])) + _shape_stack_at_axis_normalized(dimVec1.remove(0), dimVec2.remove(0), axis_val-1),
+            # when
+            dimVec1[0] == dimVec2[0],
+            axis_val != i64(0),
+            dimVec1.length() > 0,
+        )
+        yield rewrite(
+            # axis_val == 0
+            _shape_stack_at_axis_normalized(dimVec1, dimVec2, axis_val)
+        ).to(
+            Shape.from_list(Vec[Dim](dimVec1[0], Dim.fixed(2))) +  _shape_stack_at_axis_normalized(dimVec1.remove(0), dimVec2.remove(0), axis_val),
+            # when
+            dimVec1[0] == dimVec2[0],
+            axis_val == i64(0),
+        )
+
+        yield rewrite(
+            # empty
+            _shape_stack_at_axis_normalized(dimVec1, dimVec2, axis_val)
+        ).to(
+            Shape(),
+            # when
+            dimVec1.length() == i64(0),
+        )
 
 @ruleset
 def ruleset_numpy_promote_binop(
@@ -1120,6 +1249,10 @@ def npy_take() -> Term: ...
 
 @function
 def npy_broadcast_to() -> Term: ...
+
+@function
+def npy_stack() -> Term: ...
+
 
 
 loaded_module = {
@@ -1703,7 +1836,15 @@ class MlirBackend(_ch06_MlirBackend):
                 shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
                 print(shape, ary_val)
-                raise NotImplementedError(f"TODO: {ary_val} :: {shape}")
+                raise TodoException(f"TODO: {ary_val} :: {shape}")
+
+            case "NpyOp_Stack_2_Shaped<ary1, ary2, axis, outshape>", (ary1, ary2, axis, outshape):
+                # This is implementing np.broacast_to(ary, outshape)
+                shape = TypeSpeller.apply(outshape)
+                ary_val_1 = (yield ary1)
+                ary_val_2 = (yield ary2)
+                print(shape, ary_val_1, ary_val_2)
+                raise TodoException(f"TODO: {ary_val_1, ary_val_2, axis} :: {shape}")
 
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
@@ -1938,11 +2079,12 @@ def apply_rotary_emb_broadcast_to(freqs_cos_expanded):
 
 
 @pytest.mark.xfail(reason="TODO",
-                   raises=NotImplementedError)
+                   raises=TodoException)
 def test_apply_rotary_emb_broadcast_to():
     np.random.seed(0)
     seq_len, head_dim = 5, 24
     freqs_cos_expanded = np.random.random((1, seq_len, 1, head_dim))
+    # print("???", apply_rotary_emb_broadcast_to(freqs_cos_expanded).shape)
     _run_array_unary_test(apply_rotary_emb_broadcast_to, freqs_cos_expanded)
 
 
@@ -1959,6 +2101,22 @@ def test_apply_rotary_emb_ufuncs():
     freqs_cos = np.random.random(shape)
     freqs_sin = np.random.random(shape)
     _run_array_test(apply_rotary_emb_ufuncs, (xq_r, xq_i, freqs_cos, freqs_sin))
+
+
+def apply_rotary_emb_stack(xq_out_r, xq_out_i):
+    return np.stack((xq_out_r, xq_out_i), axis=-1)
+
+
+@pytest.mark.xfail(reason="TODO",
+                   raises=TodoException)
+def test_apply_rotary_emb_stack():
+    np.random.seed(0)
+    shape = 1, 5, 6
+    xq_out_r = np.random.random(shape)
+    xq_out_i = np.random.random(shape)
+    # print("???", apply_rotary_emb_stack(xq_out_r, xq_out_i).shape)
+    _run_array_test(apply_rotary_emb_stack, (xq_out_r, xq_out_i))
+
 
 
 #######################################
