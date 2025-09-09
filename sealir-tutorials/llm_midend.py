@@ -854,7 +854,7 @@ class NumPyRules:
         ).then(
             set_(TypeVar(res).getType()).to(
                 ArrayType(
-                    ndim,
+                    ndim + 1,
                     dtype,
                     _shape_stack_at_axis(shape1, shape2, axis_val, ndim),
                     layout
