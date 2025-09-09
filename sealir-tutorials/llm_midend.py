@@ -1546,7 +1546,12 @@ class MlirBackend(_ch06_MlirBackend):
 
         self.codegen = LlamaBackend()
 
+
+    def get_last_compiled_return_type(self):
+        return self._retty
+
     def lower(self, root, argtypes):
+        self._retty = None # reset
         [func] = [child for child in root._args
                   if isinstance(child, rg.Func)]
 
@@ -2155,11 +2160,22 @@ def _run_array_unary_test(target_function, inary):
 
 
 def _run_array_test(target_function, args):
-    cres = run_compiler(target_function, args)
-    jit_func = cres.jit_func
 
-    got = jit_func(*args)
+
     desired = target_function(*args)
+
+    try:
+        cres = run_compiler(target_function, args)
+    finally:
+        # still try to test the shape output
+        be = compiler_config["backend"]
+        retty = be.get_last_compiled_return_type()
+
+        assert desired.ndim == retty.ndim
+        assert desired.shape == retty.shape
+
+    jit_func = cres.jit_func
+    got = jit_func(*args)
     if DEBUG:
         print("GOT".center(80, '-'))
         print(got)
