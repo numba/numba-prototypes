@@ -416,26 +416,60 @@ class Backend:
 
         return fn_name
 
-    def gen_array_broadcast(self, module, dims, new_shape, broadcast_along):
+    def gen_array_broadcast(self, module, in_shape, out_shape, axis):
         fn_name = self.gen_fn_name("broadcast")
 
+        if axis == -1:
+            axis = len(out_shape) - 1
+        
+        if out_shape[axis] % in_shape[axis]:
+            raise ValueError("Array cannot be broadcasted to given shape along this axis")
+
         with module.context, InsertionPoint(module.body), Location.unknown():
+            ndim = len(out_shape)
             element_type = F64Type.get()
-            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
-            memref_type_res = MemRefType.get(list(new_shape), element_type)
-            func_type = FunctionType.get([memref_type, memref_type_res], [])
+            index_type = IndexType.get()
+            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * ndim, element_type)
+            memref_type_out = MemRefType.get([ShapedType.get_dynamic_size()] * ndim, element_type)
+            func_type = FunctionType.get([memref_type], [memref_type_out])
 
             func_op = func.FuncOp(fn_name, func_type)
             func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
 
             with InsertionPoint(func_op.add_entry_block()):
-                input_memref, output_memref = func_op.arguments
-                linalg.broadcast(
-                    input_memref,
-                    outs=[output_memref],
-                    dimensions=broadcast_along
-                )
-                func.ReturnOp([])
+                input_arg, = func_op.arguments
+                output_memref = memref.alloc(memref_type_out, [arith.constant(index_type, s) for s in out_shape], [])
+                curr_offset = 0
+
+                loop_times = out_shape[axis] // in_shape[axis]
+
+                for i in range(loop_times):
+                    offsets = [0] * (ndim)
+                    offsets[axis] = i
+
+                    strides = [1] * (ndim)
+                    # strides[axis] = loop_times
+
+                    out_strides = [ShapedType.get_dynamic_stride_or_offset()] * (ndim)
+                    out_strides[-1] = 1
+
+                    out_off = ShapedType.get_dynamic_stride_or_offset() if i !=0 else 0                    
+                    out_layout = StridedLayoutAttr.get(out_off, out_strides)
+                    memref_type_out_inner = MemRefType.get(in_shape, element_type, layout=out_layout)
+                    subview = memref.SubViewOp(
+                        memref_type_out_inner,
+                        output_memref,
+                        offsets=[],
+                        sizes=[],
+                        strides=[],
+                        static_offsets=DenseI64ArrayAttr.get(offsets),
+                        static_sizes=DenseI64ArrayAttr.get(in_shape),
+                        static_strides=DenseI64ArrayAttr.get(strides)
+                    ).result
+
+                    memref.copy(input_arg, subview)
+
+                func.ReturnOp([output_memref])
 
         return fn_name
 

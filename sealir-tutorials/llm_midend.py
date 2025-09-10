@@ -1868,8 +1868,18 @@ class MlirBackend(_ch06_MlirBackend):
                 in_shape = TypeSpeller.apply(inshape)
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
-                print(in_shape, out_shape)
-                raise TodoException(f"TODO: {ary_val} :: {in_shape, out_shape}")
+                print(in_shape, out_shape, ary_val)
+
+                fnname_broadcast = be.gen_array_broadcast(self.module, in_shape, out_shape, 2)
+                fn_broadcast = self._get_func_by_name(fnname_broadcast)
+
+                [src_type_1,] = fn_broadcast.type.inputs
+
+                element_type = src_type_1.element_type
+                memref_type_out = ir.MemRefType.get([ir.ShapedType.get_dynamic_size()] * len(out_shape), element_type)
+                result = func.call((memref_type_out,), fnname_broadcast, [ary_val])
+
+                return result
 
             case "NpyOp_Stack_2_Shaped<ary1, ary2, axis, inshape, outshape>", (ary1, ary2, axis, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
@@ -2119,8 +2129,6 @@ def apply_rotary_emb_broadcast_to(freqs_cos_expanded):
     return np.broadcast_to(freqs_cos_expanded, (1, 5, 6, 24))
 
 
-@pytest.mark.xfail(reason="TODO",
-                   raises=TodoException)
 def test_apply_rotary_emb_broadcast_to():
     np.random.seed(0)
     seq_len, head_dim = 5, 24
