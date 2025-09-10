@@ -1546,7 +1546,7 @@ def _mlir_location_from_frame(info: str=""):
 
     frame = inspect.currentframe().f_back
     if frame is None:
-        return Location.unknown()
+        return Location.name(info)
 
     # Get method/function name
     method_name = frame.f_code.co_name
@@ -1624,7 +1624,7 @@ class MlirBackend(_ch06_MlirBackend):
             # TODO: make this use static shape
             assert ty.dtype == "Float64"
             with self.context:
-                with Location.name("MlirBackend.lower_type"):
+                with _mlir_location_from_frame():
                     element_type = F64Type.get()
                     return MemRefType.get(ty.shape, element_type)
         else:
@@ -1711,6 +1711,7 @@ class MlirBackend(_ch06_MlirBackend):
 
         with _mlir_location_from_frame():
             # Create the broadcasted memref type
+            print("---", array_val.result.type)
             layout = ir.StridedLayoutAttr.get(0, calculated_strides)
             bc_memref_type = ir.MemRefType.get(out_shape, element_type, layout=layout)
 
@@ -1764,25 +1765,95 @@ class MlirBackend(_ch06_MlirBackend):
 
             return result
 
+    def _handle_unary_ufunc(self, operand, inshape, outshape, op):
+        from mlir.dialects import memref, linalg
+        from mlir import ir
+
+        oshape = TypeSpeller.apply(outshape)
+        nd = len(oshape)
+        element_type = operand.result.type.element_type
+
+        (base, offset, *shapes_strides) = memref.extract_strided_metadata(operand)
+        strides = shapes_strides[nd:]
+        assert len(strides) == nd
+
+        result = memref.AllocOp(
+            ir.MemRefType.get(oshape, element_type),
+            [], []
+        )
+
+        generic_op = linalg.GenericOp(
+            result_tensors=[],
+            inputs=[operand],
+            outputs=[result],
+            indexing_maps=[
+                ir.AffineMap.get_identity(nd),
+                ir.AffineMap.get_identity(nd)
+            ],
+            iterator_types=ir.ArrayAttr.get([ir.Attribute.parse("#linalg.iterator_type<parallel>")])
+        )
+
+        body = generic_op.regions[0].blocks.append(
+            element_type, element_type
+        )
+
+        with ir.InsertionPoint(body):
+            linalg.YieldOp([op(body.arguments[0])])
+
+        return result
+
+    def _handle_reduce_ufunc(self, opval, axis, inshape: list[int], outshape: list[int], op):
+        from mlir.dialects import arith, func, memref, linalg, math
+        from mlir import ir
+
+        nd = len(inshape)
+        if axis < 0:
+            axis = nd + axis
+
+        # Extract input dimensions for reduced result (all dims except the reduced one)
+        element_type = ir.F64Type.get()
+        reduced_shape = list(inshape)
+        reduced_shape.pop(axis)
+        memref_type = ir.MemRefType.get(reduced_shape, element_type)
+        result_reduced = memref.AllocOp(memref_type, [], [])
+
+        # Necessary to fill zeros
+        zero = arith.ConstantOp(element_type, 0.0)
+        linalg.fill(zero, outs=[result_reduced])
+
+        reduce_op = linalg.ReduceOp(
+            result=[],
+            inputs=[opval],
+            inits=[result_reduced],
+            dimensions=[axis]
+        )
+
+        body = reduce_op.regions[0].blocks.append(
+            element_type, element_type
+        )
+
+        with ir.InsertionPoint(body):
+            linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
+
+        # broadcast for keepdims
+        memref_type = ir.MemRefType.get(outshape, element_type)
+        result = memref.AllocOp(memref_type, [], [])
+        linalg.broadcast(
+            result_reduced,
+            outs=[result],
+            dimensions=[axis]
+        )
+        print(self.module.dump())
+        return result
+
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
         from mlir.dialects import arith, func, memref, linalg, math
         from mlir import ir
         be: LlamaBackend = self.codegen
         match op, operands:
             case "NpyOp_Exp_Shaped<operand, inshape, outshape>", (operand, inshape, outshape):
-                shape = TypeSpeller.apply(outshape)
-                nd = len(shape)
-                fname_exp = be.gen_array_unary(self.module, nd, math.exp, None)
-                f_exp = self._get_func_by_name(fname_exp)
-                [op_ty, result_type] = f_exp.type.inputs
-                operand_val = (yield operand)
-
-                dynshape = ir.ShapedType.get_dynamic_size()
-                final_shape = [dynshape] * nd
-                memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
-                result = memref.AllocOp(memref_type, [memref.DimOp(operand_val, arith.ConstantOp(ir.IndexType.get(), i)) for i in range(nd)], [])
-                func.call((), fname_exp, [operand_val, result])
-
+                operand = (yield operand)
+                result = self._handle_unary_ufunc(operand, inshape, outshape, op=math.exp)
                 return result
 
             case "NpyOp_Add_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
@@ -1799,118 +1870,19 @@ class MlirBackend(_ch06_MlirBackend):
 
             case "NpyOp_Max_Shaped<operand, axis, keepdims, inshape, outshape>", (operand, axis, True, inshape, outshape):
                 # Implements np.max(operand, axis, keepdims=True)
-                shape = TypeSpeller.apply(outshape)
-                nd = len(shape)
-                if axis < 0:
-                    axis = nd + axis
-                fname_reduce = be.gen_array_reduce(self.module, nd, (axis,), arith.maximumf, None)
-                # fn_reduce = self._get_func_by_name(fname_reduce)
-                # [operand_type, result_type] = fn_reduce.type.inputs
+                op = arith.maximumf
                 opval = (yield operand)
-
-                # Extract input dimensions for reduced result (all dims except the reduced one)
-                element_type = ir.F64Type.get()
-                reduced_shape = list(shape)
-                reduced_shape.pop(axis)
-                memref_type = ir.MemRefType.get(reduced_shape, element_type)
-                result_reduced = memref.AllocOp(memref_type, [], [])
-                # func.call((), fname_reduce, [opval, result_reduced])
-
-                input_memref = opval
-
-                reduce_op = linalg.ReduceOp(
-                    result=[],
-                    inputs=[input_memref],
-                    inits=[result_reduced],
-                    dimensions=[axis]
-                )
-
-                body = reduce_op.regions[0].blocks.append(
-                    element_type, element_type
-                )
-
-                with ir.InsertionPoint(body):
-                    linalg.YieldOp([arith.maximumf(body.arguments[0], body.arguments[1])])
-
-                # broadcast for keepdims
-                memref_type = ir.MemRefType.get(shape, element_type)
-                result = memref.AllocOp(memref_type, [], [])
-                linalg.broadcast(
-                    result_reduced,
-                    outs=[result],
-                    dimensions=[axis]
-                )
-                return result
+                oshape = TypeSpeller.apply(outshape)
+                ishape = TypeSpeller.apply(inshape)
+                return self._handle_reduce_ufunc(opval, axis, ishape, oshape, op=op)
 
             case "NpyOp_Sum_Shaped<operand, axis, keepdims, inshape, outshape>", (operand, axis, True, inshape, outshape):
-                shape = TypeSpeller.apply(outshape)
-                nd = len(shape)
-                if axis < 0:
-                    axis = nd + axis
-                fname_reduce = be.gen_array_reduce(self.module, nd, (axis,), arith.addf, None)
-                fn_reduce = self._get_func_by_name(fname_reduce)
-                [operand_type, result_type] = fn_reduce.type.inputs
+                op = arith.addf
                 opval = (yield operand)
+                oshape = TypeSpeller.apply(outshape)
+                ishape = TypeSpeller.apply(inshape)
+                return self._handle_reduce_ufunc(opval, axis, ishape, oshape, op=op)
 
-                # Extract input dimensions for reduced result (all dims except the reduced one)
-                reduced_dims = []
-                for i in range(nd):
-                    if axis != i:
-                        idx = arith.ConstantOp(ir.IndexType.get(), i)
-                        reduced_dims.append(memref.DimOp(opval, idx))
-
-                dynshape = ir.ShapedType.get_dynamic_size()
-                reduced_shape = [dynshape] * (nd - 1)
-                memref_type = ir.MemRefType.get(reduced_shape, result_type.element_type)
-                result_reduced = memref.AllocOp(memref_type, reduced_dims, [])
-                func.call((), fname_reduce, [opval, result_reduced])
-
-                print("***HACK***")
-                axis_shape = memref.DimOp(opval, arith.ConstantOp(ir.IndexType.get(), axis))
-                final_dims = reduced_dims.copy()
-                final_dims.insert(axis, axis_shape)
-
-                final_shape = [dynshape] * nd
-                memref_type = ir.MemRefType.get(final_shape, result_type.element_type)
-                result = memref.AllocOp(memref_type, final_dims, [])
-                linalg.broadcast(
-                    result_reduced,
-                    outs=[result],
-                    dimensions=[axis],
-                )
-                return result
-            case "NpyOp_Subtract_Shaped<lhs, rhs, outshape>", (lhs, rhs, outshape):
-                # This implements np.subtract(lhs, rhs) with broadcasting
-                shape = TypeSpeller.apply(outshape)
-                nd = len(shape)
-                fname_binary = be.gen_array_binary(self.module, nd, nd, arith.subf, None)
-                fn_binary = self._get_func_by_name(fname_binary)
-                [lhs_type, rhs_type, result_type] = fn_binary.type.inputs
-                lhs_val = (yield lhs)
-                rhs_val = (yield rhs)
-
-                # Get output dimensions from outshape - use the largest operand to determine target size
-                dynshape = ir.ShapedType.get_dynamic_size()
-                result_shape = [dynshape] * nd
-                memref_type = ir.MemRefType.get(result_shape, result_type.element_type)
-
-                # Get target dimensions from outshape
-                target_dims = []
-                for i in range(nd):
-                    # Convert each dimension from the outshape to an MLIR dimension value
-                    dim_size = shape[i]
-                    if isinstance(dim_size, int):
-                        # Static dimension
-                        target_dims.append(arith.ConstantOp(ir.IndexType.get(), dim_size))
-                    else:
-                        assert False, 'not supported' # TODO
-
-                # Allocate result memref
-                result = memref.AllocOp(memref_type, target_dims, [])
-
-                # Call the generated binary function with broadcasted operands
-                func.call((), fname_binary, [lhs_val, rhs_val, result])
-                return result
             case "NpyOp_Reshape_Shaped<ary, src_nd, inshape, outshape>", (ary, nd, inshape, outshape):
                 ary_val = (yield ary)
                 return self._handle_reshape(ary_val, nd, outshape)
@@ -2003,7 +1975,7 @@ class MlirBackend(_ch06_MlirBackend):
         module = self.module
 
 
-        with ir.InsertionPoint(module.body), ir.Location.unknown():
+        with ir.InsertionPoint(module.body), _mlir_location_from_frame():
             element_type = ir.F64Type.get()
             # self._argtys and self._retty are from `.lower()`
             # TODO: ^ not good
@@ -2147,6 +2119,17 @@ def test_softmax_x_minux_max():
     np.random.seed(0)
     _run_array_unary_test(softmax_x_minus_max, np.random.random((1, 4)))
     _run_array_unary_test(softmax_x_minus_max, np.random.random((1, 2, 6, 4)))
+
+
+def softmax_exp(x):
+    # exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
+    return np.sum(x, axis=-1, keepdims=True)
+
+
+def test_softmax_exp():
+    np.random.seed(0)
+    _run_array_unary_test(softmax_exp, np.random.random((1, 4)))
+    _run_array_unary_test(softmax_exp, np.random.random((1, 2, 6, 4)))
 
 
 def softmax_full(x):
