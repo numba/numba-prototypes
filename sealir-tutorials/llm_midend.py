@@ -1711,7 +1711,6 @@ class MlirBackend(_ch06_MlirBackend):
 
         with _mlir_location_from_frame():
             # Create the broadcasted memref type
-            print("---", array_val.result.type)
             layout = ir.StridedLayoutAttr.get(0, calculated_strides)
             bc_memref_type = ir.MemRefType.get(out_shape, element_type, layout=layout)
 
@@ -1946,18 +1945,8 @@ class MlirBackend(_ch06_MlirBackend):
                 in_shape = TypeSpeller.apply(inshape)
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
-                print(in_shape, out_shape, ary_val)
 
-                fnname_broadcast = be.gen_array_broadcast(self.module, in_shape, out_shape, 2)
-                fn_broadcast = self._get_func_by_name(fnname_broadcast)
-
-                [src_type_1,] = fn_broadcast.type.inputs
-
-                element_type = src_type_1.element_type
-                memref_type_out = ir.MemRefType.get([ir.ShapedType.get_dynamic_size()] * len(out_shape), element_type)
-                result = func.call((memref_type_out,), fnname_broadcast, [ary_val])
-
-                return result
+                return self._gen_static_broadcast(ary_val, in_shape, out_shape)
 
             case "NpyOp_Stack_2_Shaped<ary1, ary2, axis, inshape, outshape>", (ary1, ary2, axis, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
