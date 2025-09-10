@@ -1728,7 +1728,7 @@ class MlirBackend(_ch06_MlirBackend):
             )
 
 
-    def _handle_binop_ufunc(self, lhs_val, rhs_val, lhs_shape, rhs_shape, outshape, op):
+    def _gen_binop_ufunc(self, lhs_val, rhs_val, lhs_shape, rhs_shape, outshape, op):
         from mlir.dialects import arith, func, memref, linalg, math
         from mlir import ir
 
@@ -1765,7 +1765,7 @@ class MlirBackend(_ch06_MlirBackend):
 
             return result
 
-    def _handle_unary_ufunc(self, operand, inshape, outshape, op):
+    def _gen_unary_ufunc(self, operand, inshape, outshape, op):
         from mlir.dialects import memref, linalg
         from mlir import ir
 
@@ -1802,7 +1802,7 @@ class MlirBackend(_ch06_MlirBackend):
 
         return result
 
-    def _handle_reduce_ufunc(self, opval, axis, inshape: list[int], outshape: list[int], op):
+    def _gen_reduce_ufunc(self, opval, axis, inshape: list[int], outshape: list[int], op):
         from mlir.dialects import arith, func, memref, linalg, math
         from mlir import ir
 
@@ -1843,7 +1843,6 @@ class MlirBackend(_ch06_MlirBackend):
             outs=[result],
             dimensions=[axis]
         )
-        print(self.module.dump())
         return result
 
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
@@ -1853,20 +1852,20 @@ class MlirBackend(_ch06_MlirBackend):
         match op, operands:
             case "NpyOp_Exp_Shaped<operand, inshape, outshape>", (operand, inshape, outshape):
                 operand = (yield operand)
-                result = self._handle_unary_ufunc(operand, inshape, outshape, op=math.exp)
+                result = self._gen_unary_ufunc(operand, inshape, outshape, op=math.exp)
                 return result
 
             case "NpyOp_Add_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
-                return self._handle_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.addf)
+                return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.addf)
 
             case "NpyOp_Subtract_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
-                return self._handle_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.subf)
+                return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.subf)
 
             case "NpyOp_Multiply_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
-                return self._handle_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.mulf)
+                return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.mulf)
 
             case "NpyOp_Divide_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
-                return self._handle_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.divf)
+                return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.divf)
 
             case "NpyOp_Max_Shaped<operand, axis, keepdims, inshape, outshape>", (operand, axis, True, inshape, outshape):
                 # Implements np.max(operand, axis, keepdims=True)
@@ -1874,14 +1873,14 @@ class MlirBackend(_ch06_MlirBackend):
                 opval = (yield operand)
                 oshape = TypeSpeller.apply(outshape)
                 ishape = TypeSpeller.apply(inshape)
-                return self._handle_reduce_ufunc(opval, axis, ishape, oshape, op=op)
+                return self._gen_reduce_ufunc(opval, axis, ishape, oshape, op=op)
 
             case "NpyOp_Sum_Shaped<operand, axis, keepdims, inshape, outshape>", (operand, axis, True, inshape, outshape):
                 op = arith.addf
                 opval = (yield operand)
                 oshape = TypeSpeller.apply(outshape)
                 ishape = TypeSpeller.apply(inshape)
-                return self._handle_reduce_ufunc(opval, axis, ishape, oshape, op=op)
+                return self._gen_reduce_ufunc(opval, axis, ishape, oshape, op=op)
 
             case "NpyOp_Reshape_Shaped<ary, src_nd, inshape, outshape>", (ary, nd, inshape, outshape):
                 ary_val = (yield ary)
