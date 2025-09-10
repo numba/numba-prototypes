@@ -1597,9 +1597,9 @@ class MlirBackend(_ch06_MlirBackend):
             # TODO: make this use static shape
             assert ty.dtype == "Float64"
             with self.context:
-                with Location.unknown():
+                with Location.name("MlirBackend.lower_type"):
                     element_type = F64Type.get()
-                    return MemRefType.get([ShapedType.get_dynamic_size()] * ty.ndim, element_type)
+                    return MemRefType.get(ty.shape, element_type)
         else:
             return super().lower_type(ty)
 
@@ -1701,16 +1701,16 @@ class MlirBackend(_ch06_MlirBackend):
                 return result
 
             case "NpyOp_Add_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
-                return self._handle_binop_ufunc((yield lhs), (yield rhs), outshape, op=arith.addf)
+                return self._handle_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.addf)
 
             case "NpyOp_Subtract_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
-                return self._handle_binop_ufunc((yield lhs), (yield rhs), outshape, op=arith.subf)
+                return self._handle_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.subf)
 
             case "NpyOp_Multiply_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
-                return self._handle_binop_ufunc((yield lhs), (yield rhs), outshape, op=arith.mulf)
+                return self._handle_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.mulf)
 
             case "NpyOp_Divide_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
-                return self._handle_binop_ufunc((yield lhs), (yield rhs), outshape, op=arith.divf)
+                return self._handle_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.divf)
 
             case "NpyOp_Max_Shaped<operand, axis, keepdims, inshape, outshape>", (operand, axis, True, inshape, outshape):
                 # Implements np.max(operand, axis, keepdims=True)
