@@ -232,6 +232,9 @@ class Backend:
             module.dump()
         return module
 
+    def _cast_return_value(self, val):
+        return val
+
     def lower_expr(self, expr: SExpr, state: LowerStates):
         """Expression Lowering Implementation
 
@@ -257,7 +260,7 @@ class Backend:
 
                 portnames = [p.name for p in body.ports]
                 retval = outs[portnames.index(internal_prefix("ret"))]
-                func.ReturnOp([retval])
+                func.ReturnOp([self._cast_return_value(retval)])
             case rg.RegionBegin(inports=ins):
                 portvalues = []
                 for i, k in enumerate(ins):

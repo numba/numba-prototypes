@@ -1577,6 +1577,11 @@ class MlirBackend(_ch06_MlirBackend):
     def get_last_compiled_return_type(self):
         return self._retty
 
+    def _cast_return_value(self, val):
+        from mlir.dialects import memref
+        resty =  self.lower_type_return(self._retty)
+        return memref.CastOp(resty, val)
+
     def lower(self, root, argtypes):
         self._retty = None # reset
         [func] = [child for child in root._args
@@ -1613,13 +1618,23 @@ class MlirBackend(_ch06_MlirBackend):
         print(argtypes)
 
         super().lower(func, argtypes)
+
+        print(self.module.dump())
         return self.module
 
+    def lower_type_return(self, ty):
+        from mlir.ir import MemRefType, F64Type, StridedLayoutAttr, ShapedType
+        with self.context, _mlir_location_from_frame():
+            ty = self._retty
+            element_type = F64Type.get()
+            nd = len(ty.shape)
+            return MemRefType.get(ty.shape, element_type, layout=StridedLayoutAttr.get(0, [ShapedType.get_dynamic_stride_or_offset()] * nd))
+
     def get_return_types(self, root):
-        return (self.lower_type(self._retty),)
+        return [self.lower_type_return(self._retty)]
 
     def lower_type(self, ty):
-        from mlir.ir import MemRefType, ShapedType, F64Type, Location
+        from mlir.ir import MemRefType, F64Type
         if isinstance(ty, BeArrayType):
             # TODO: make this use static shape
             assert ty.dtype == "Float64"
@@ -1664,7 +1679,7 @@ class MlirBackend(_ch06_MlirBackend):
         if in_shape == out_shape:
             return array_val
 
-        element_type = array_val.result.type.element_type
+        element_type = ir.F64Type.get()
 
         # Use SubView-based broadcasting for numpy broadcast semantics
         static_offsets = []
@@ -1874,39 +1889,56 @@ class MlirBackend(_ch06_MlirBackend):
                 return self._gen_reshape(ary_val, ishape, oshape)
             case "NpyOp_Take_Shaped_one_index<ary, index, axis, src_nd, inshape, outshape>", (ary, index, -1, src_nd, inshape, outshape):
                 # This is implementing np.take(ary, index, axis=-1)
-                # src_nd is the ary.ndim
-                # outshape is the shape of the output
-                shape = TypeSpeller.apply(outshape)
-                out_nd = len(shape)
-                fname_take = be.gen_array_take(self.module, src_nd, -1, index)
-                fn_take = self._get_func_by_name(fname_take)
-                [src_type, result_type] = fn_take.type.inputs
-
+                axis = -1
+                element_type = ir.F64Type.get()
                 ary_val = (yield ary)
+                oshape = TypeSpeller.apply(outshape)
+                ishape = TypeSpeller.apply(inshape)
 
-                # Get output dimensions from outshape - use the largest operand to determine target size
-                dynshape = ir.ShapedType.get_dynamic_size()
-                result_shape = [dynshape] * (out_nd + 1)
-                memref_type = ir.MemRefType.get(result_shape, result_type.element_type)
+                sub_shape = list(ishape)
+                sub_shape[axis] = 1
 
-                # Get target dimensions from outshape
-                target_dims = []
-                for dim_size in [*shape, 1]:
-                    # Convert each dimension from the outshape to an MLIR dimension value
-                    if isinstance(dim_size, int):
-                        # Static dimension
-                        target_dims.append(arith.ConstantOp(ir.IndexType.get(), dim_size))
-                    else:
-                        assert False, 'not supported' # TODO# Allocate result memref
-                result = memref.AllocOp(memref_type, target_dims, [])
+                offsets = [0] * src_nd
+                offsets[axis] = index
 
-                # Cast result to match the function signature
-                casted_result = memref.CastOp(result_type, result)
+                strides = [1] * src_nd
 
-                # Call the generated function
-                func.call((), fname_take, [ary_val, casted_result])
+                calculated_strides = []
+                current_stride = 1
+                for i in reversed(range(src_nd)):
+                    dim = ishape[i]
 
-                return self._gen_reshape(result, out_nd + 1, outshape)
+                    calculated_strides.insert(0, current_stride)
+                    # Update stride for next outer dimension
+                    current_stride *= dim
+
+
+                out_layout = ir.StridedLayoutAttr.get(index, calculated_strides)
+                memref_type_out = ir.MemRefType.get(sub_shape, element_type, layout=out_layout)
+
+
+                subview = memref.SubViewOp(
+                    memref_type_out,
+                    ary_val,
+                    offsets=[],
+                    sizes=[],
+                    strides=[],
+                    static_offsets=ir.DenseI64ArrayAttr.get(offsets),
+                    static_sizes=ir.DenseI64ArrayAttr.get(sub_shape),
+                    static_strides=ir.DenseI64ArrayAttr.get(strides)
+                ).result
+
+                result = ir.MemRefType.get(oshape, element_type, layout=ir.StridedLayoutAttr.get(0, calculated_strides[:-1]))
+
+                # collapse the axis
+                reassoc = [[x] for x in range(len(sub_shape))]
+                reassoc_target = reassoc.pop(axis)
+                reassoc[axis].extend(reassoc_target)
+                return memref.CollapseShapeOp(
+                    src=subview,
+                    result=result,
+                    reassociation=reassoc,
+                ).result
 
             case "NpyOp_Broadcast_To_Shaped<ary, inshape, outshape>", (ary, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
