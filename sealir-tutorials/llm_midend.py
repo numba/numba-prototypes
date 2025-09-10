@@ -1865,19 +1865,30 @@ class MlirBackend(_ch06_MlirBackend):
             case "NpyOp_Broadcast_To_Shaped<ary, inshape, outshape>", (ary, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
                 # outshape is the shape of the output
-                shape = TypeSpeller.apply(outshape)
+                in_shape = TypeSpeller.apply(inshape)
+                out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
-                print(shape, ary_val)
-                raise TodoException(f"TODO: {ary_val} :: {shape}")
+                print(in_shape, out_shape)
+                raise TodoException(f"TODO: {ary_val} :: {in_shape, out_shape}")
 
             case "NpyOp_Stack_2_Shaped<ary1, ary2, axis, inshape, outshape>", (ary1, ary2, axis, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
-                shape = TypeSpeller.apply(outshape)
+                in_shape = TypeSpeller.apply(inshape)
+                out_shape = TypeSpeller.apply(outshape)
                 ary_val_1 = (yield ary1)
                 ary_val_2 = (yield ary2)
-                print(shape, ary_val_1, ary_val_2)
-                raise TodoException(f"TODO: {ary_val_1, ary_val_2, axis} :: {shape}")
 
+                fname_stack = be.gen_array_stack(self.module, (in_shape, in_shape), out_shape, axis)
+                fn_stack = self._get_func_by_name(fname_stack)
+
+                [src_type_1, src_type_2] = fn_stack.type.inputs
+
+                element_type = src_type_1.element_type
+                memref_type_out = ir.MemRefType.get([ir.ShapedType.get_dynamic_size()] * len(out_shape), element_type)
+
+                result = func.call((memref_type_out,), fname_stack, [ary_val_1, ary_val_2])
+
+                return result
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -2032,8 +2043,6 @@ def softmax_x_minus_max(x):
     return x - np.max(x, axis=-1, keepdims=True)
 
 
-@pytest.mark.xfail(reason="1d error",
-                   raises=AssertionError)
 def test_softmax_x_minux_max_1d():
     np.random.seed(0)
     _run_array_unary_test(softmax_x_minus_max, np.random.random(4))
@@ -2139,8 +2148,6 @@ def apply_rotary_emb_stack(xq_out_r, xq_out_i):
     return np.stack((xq_out_r, xq_out_i), axis=-1)
 
 
-@pytest.mark.xfail(reason="TODO",
-                   raises=TodoException)
 def test_apply_rotary_emb_stack():
     np.random.seed(0)
     shape = 1, 5, 6

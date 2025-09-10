@@ -444,56 +444,72 @@ class Backend:
 
         return fn_name
 
-    def gen_array_stack(self, module, dims, num_inputs, axis, sizes_along_axis):
+    def gen_array_stack(self, module, inp_shapes, out_shape, axis):
         fn_name = self.gen_fn_name("stack")
 
+        if axis == -1:
+            axis = len(out_shape) - 1
+
         with module.context, InsertionPoint(module.body), Location.unknown():
+            ndim = len(out_shape) - 1
             element_type = F64Type.get()
             index_type = IndexType.get()
-            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
-            func_type = FunctionType.get([memref_type] * (num_inputs + 1), [])
+            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * ndim, element_type)
+            memref_type_out = MemRefType.get([ShapedType.get_dynamic_size()] * (ndim + 1), element_type)
+            func_type = FunctionType.get([memref_type] * len(inp_shapes), [memref_type_out])
 
             func_op = func.FuncOp(fn_name, func_type)
             func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
 
             with InsertionPoint(func_op.add_entry_block()):
-                input_args = func_op.arguments[:-1]
-                output_memref = func_op.arguments[-1]
+                input_args = func_op.arguments
+                output_memref = memref.alloc(memref_type_out, [arith.constant(index_type, s) for s in out_shape], [])
                 curr_offset = 0
 
-                for input_arg, size_along_axis in zip(input_args, sizes_along_axis):
-
-                    out_shape = [ShapedType.get_dynamic_size()] * dims
-                    out_shape[axis] = size_along_axis
-
-                    offsets = [0] * dims
+                for input_arg, input_shape in zip(input_args, inp_shapes):
+                    input_shape = list(input_shape)
+                    input_shape.insert(axis, 1)
+                    offsets = [0] * (ndim + 1)
                     offsets[axis] = curr_offset
 
-                    strides = [1] * dims
-                    strides[axis] = num_inputs
+                    strides = [1] * (ndim + 1)
+                    strides[axis] = len(inp_shapes)
 
-                    out_strides = [ShapedType.get_dynamic_stride_or_offset()] * dims
-                    out_strides[axis] = num_inputs
-
+                    out_strides = [ShapedType.get_dynamic_stride_or_offset()] * (ndim + 1)
+                    out_strides[axis] = len(inp_shapes)
                     out_layout = StridedLayoutAttr.get(curr_offset, out_strides)
-                    memref_type_out = MemRefType.get(out_shape, element_type, layout=out_layout)
-                    sizes = [memref.dim(func_op.arguments[0], arith.constant(index_type, i)) for i in range(dims)]
-                    sizes.pop(axis)
+                    memref_type_out_inner = MemRefType.get(input_shape, element_type, layout=out_layout)
                     subview = memref.SubViewOp(
-                        memref_type_out,
+                        memref_type_out_inner,
                         output_memref,
                         offsets=[],
-                        sizes=sizes,
+                        sizes=[],
                         strides=[],
                         static_offsets=DenseI64ArrayAttr.get(offsets),
-                        static_sizes=DenseI64ArrayAttr.get(out_shape),
+                        static_sizes=DenseI64ArrayAttr.get(input_shape),
                         static_strides=DenseI64ArrayAttr.get(strides)
                     ).result
 
-                    memref.copy(input_arg, subview)
+                    re_shape = [ShapedType.get_dynamic_size()] * (ndim + 1)
+                    re_shape[axis] = 1
+                    memref_type_in_inner = MemRefType.get(re_shape, element_type)
+
+                    reassociation = Backend.build_mlir_reassociation(3, [2])
+
+                    output_shape = [memref.dim(input_arg, arith.constant(index_type, i)) for i in range(ndim)]
+
+                    input_arg_exp = memref.expand_shape(
+                        memref_type_in_inner,
+                        input_arg,
+                        reassociation=reassociation,
+                        output_shape=output_shape,
+                        static_output_shape=DenseI64ArrayAttr.get(re_shape) # [dyn, dyn, 1, dyn, 1]
+                    )
+
+                    memref.copy(input_arg_exp, subview)
                     curr_offset += 1
 
-                func.ReturnOp([])
+                func.ReturnOp([output_memref])
 
         return fn_name
 
@@ -936,89 +952,89 @@ class Backend:
 
         return fn_name
 
-context = Context()
-context.load_all_available_dialects()
+def main():
 
-with context:
-    module = Module.create(loc=Location.unknown())
+    context = Context()
+    context.load_all_available_dialects()
 
-backend = Backend()
+    with context:
+        module = Module.create(loc=Location.unknown())
 
-batch_size, seq_len, n_heads, dims, cache_size = 1, 5, 6, 288, 256
-n_local_heads, head_dim = n_heads, dims // n_heads
+    backend = Backend()
 
-input_shape = (batch_size, seq_len, dims)
-softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
+    batch_size, seq_len, n_heads, dims, cache_size = 1, 5, 6, 288, 256
+    n_local_heads, head_dim = n_heads, dims // n_heads
 
-input_ndim = len(input_shape)
-softmax_ndim = len(softmax_input_shape)
+    input_shape = (batch_size, seq_len, dims)
+    softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
 
-arr_max_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.maximumf, None)
-arr_sub = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.subf, None)
-arr_exp = backend.gen_array_unary(module, softmax_ndim, math.exp, None)
-arr_sum_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.addf, None)
-arr_div = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.divf, None)
-arr_broadcast = backend.gen_array_broadcast(module, softmax_ndim - 1, softmax_input_shape, broadcast_along=[softmax_ndim - 1])
+    input_ndim = len(input_shape)
+    softmax_ndim = len(softmax_input_shape)
 
-arr_transpose = backend.gen_array_transpose(module, 2)
-arr_expand = backend.gen_array_expand_dims(module, 2, (0,))
-arr_reshape_exp_1 = backend.gen_array_reshape(module, 2, (batch_size, dims, dims))
-arr_matmul = backend.gen_array_matmul(module, 3, None)
-arr_reshape = backend.gen_array_reshape(module, 3, (batch_size, seq_len, n_local_heads, head_dim))
+    arr_max_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.maximumf, None)
+    arr_sub = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.subf, None)
+    arr_exp = backend.gen_array_unary(module, softmax_ndim, math.exp, None)
+    arr_sum_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.addf, None)
+    arr_div = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.divf, None)
+    arr_broadcast = backend.gen_array_broadcast(module, softmax_ndim - 1, softmax_input_shape, broadcast_along=[softmax_ndim - 1])
 
-arr_reshape_2 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, n_local_heads, head_dim // 2, 2))
-arr_take_0 = backend.gen_array_take(module, 5, 4, 0)
-arr_take_1 = backend.gen_array_take(module, 5, 4, 1)
-arr_reshape_3 = backend.gen_array_reshape(module, 5, (batch_size, seq_len, n_local_heads, head_dim // 2))
-arr_expand_2 = backend.gen_array_expand_dims(module, 2, (0, 2))
-arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, n_local_heads, head_dim // 2), broadcast_along=[0, 2])
-arr_add = backend.gen_array_binary(module, 4, 4, arith.addf, None)
-arr_sub_1 = backend.gen_array_binary(module, 4, 4, arith.subf, None)
-arr_mul = backend.gen_array_binary(module, 4, 4, arith.mulf, None)
-arr_stack = backend.gen_array_stack(module, 4, 2, 3, (head_dim // 2, head_dim // 2))
+    arr_transpose = backend.gen_array_transpose(module, 2)
+    arr_expand = backend.gen_array_expand_dims(module, 2, (0,))
+    arr_reshape_exp_1 = backend.gen_array_reshape(module, 2, (batch_size, dims, dims))
+    arr_matmul = backend.gen_array_matmul(module, 3, None)
+    arr_reshape = backend.gen_array_reshape(module, 3, (batch_size, seq_len, n_local_heads, head_dim))
 
-arr_transpose_2 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3))
-arr_setitem = backend.gen_array_setitem(module, 4, (None, slice(0, seq_len)))
-arr_getitem = backend.gen_array_getitem(module, 4, (None, slice(0, seq_len)))
-arr_transpose_3 = backend.gen_array_transpose(module, 4, (0, 1, 3, 2), None)
-arr_matmul_1 = backend.gen_array_matmul(module, 4, None)
-arr_broadcast_3 = backend.gen_array_broadcast(module, 2, (batch_size, n_local_heads, seq_len, seq_len), broadcast_along=[0, 1])
-arr_add_2 = backend.gen_array_binary(module, 4, 4, arith.addf, None)
-arr_matmul_2 = backend.gen_array_matmul(module, 4, None)
-arr_transpose_4 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3), None)
-arr_reshape_4 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, dims))
-arr_fill = backend.gen_array_fill_value(module, 4, None)
-arr_sqrt = backend.gen_array_unary(module, 4, math.sqrt, None)
-arr_div_2 = backend.gen_array_binary(module, 4, 4, arith.divf, None)
+    arr_reshape_2 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, n_local_heads, head_dim // 2, 2))
+    arr_take_0 = backend.gen_array_take(module, 5, 4, 0)
+    arr_take_1 = backend.gen_array_take(module, 5, 4, 1)
+    arr_reshape_3 = backend.gen_array_reshape(module, 5, (batch_size, seq_len, n_local_heads, head_dim // 2))
+    arr_expand_2 = backend.gen_array_expand_dims(module, 2, (0, 2))
+    arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, n_local_heads, head_dim // 2), broadcast_along=[0, 2])
+    arr_add = backend.gen_array_binary(module, 4, 4, arith.addf, None)
+    arr_sub_1 = backend.gen_array_binary(module, 4, 4, arith.subf, None)
+    arr_mul = backend.gen_array_binary(module, 4, 4, arith.mulf, None)
+    arr_stack = backend.gen_array_stack(module, 4, 2, 3, (head_dim // 2, head_dim // 2))
+
+    arr_transpose_2 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3))
+    arr_setitem = backend.gen_array_setitem(module, 4, (None, slice(0, seq_len)))
+    arr_getitem = backend.gen_array_getitem(module, 4, (None, slice(0, seq_len)))
+    arr_transpose_3 = backend.gen_array_transpose(module, 4, (0, 1, 3, 2), None)
+    arr_matmul_1 = backend.gen_array_matmul(module, 4, None)
+    arr_broadcast_3 = backend.gen_array_broadcast(module, 2, (batch_size, n_local_heads, seq_len, seq_len), broadcast_along=[0, 1])
+    arr_add_2 = backend.gen_array_binary(module, 4, 4, arith.addf, None)
+    arr_matmul_2 = backend.gen_array_matmul(module, 4, None)
+    arr_transpose_4 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3), None)
+    arr_reshape_4 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, dims))
+    arr_fill = backend.gen_array_fill_value(module, 4, None)
+    arr_sqrt = backend.gen_array_unary(module, 4, math.sqrt, None)
+    arr_div_2 = backend.gen_array_binary(module, 4, 4, arith.divf, None)
 
 
-print("Generated MLIR:")
-print(str(module))
-print("\n" + "="*50 + "\n")
+    print("Generated MLIR:")
+    print(str(module))
+    print("\n" + "="*50 + "\n")
 
-if _VERIFY:
-    print("Running verification...")
-    from utils import MLIRVerifier
+    if _VERIFY:
+        print("Running verification...")
+        from utils import MLIRVerifier
 
-    verifier = MLIRVerifier(module)
+        verifier = MLIRVerifier(module)
 
-    verifier.verify(
-        [
-            "lower-affine",
-            "convert-linalg-to-loops",
-            "expand-strided-metadata",
-            "lower-affine",
-            "convert-scf-to-cf",
-            "finalize-memref-to-llvm",
-            "convert-math-to-libm",
-            "convert-func-to-llvm",
-            "convert-index-to-llvm",
-            "reconcile-unrealized-casts"
-        ],
-        "outs"
-    )
-
-if __name__ == "__main__":
+        verifier.verify(
+            [
+                "lower-affine",
+                "convert-linalg-to-loops",
+                "expand-strided-metadata",
+                "lower-affine",
+                "convert-scf-to-cf",
+                "finalize-memref-to-llvm",
+                "convert-math-to-libm",
+                "convert-func-to-llvm",
+                "convert-index-to-llvm",
+                "reconcile-unrealized-casts"
+            ],
+            "outs"
+        )
 
 
     if _FUZZ:
