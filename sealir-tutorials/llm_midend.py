@@ -1657,7 +1657,7 @@ class MlirBackend(_ch06_MlirBackend):
         out = memref.reshape(memref_type_res, ary_val, shape=shape_memref)
         return out
 
-    def _handle_static_broadcast(self, array_val, in_shape: list[int], out_shape: list[int]):
+    def _gen_static_broadcast(self, array_val, in_shape: list[int], out_shape: list[int]):
         from mlir.dialects import memref
         from mlir import ir
 
@@ -1723,8 +1723,8 @@ class MlirBackend(_ch06_MlirBackend):
             rhs_shape = TypeSpeller.apply(rhs_shape)
             element_type = ir.F64Type.get()
             # broadcast
-            bc_lhs = self._handle_static_broadcast(lhs_val, lhs_shape, shape)
-            bc_rhs = self._handle_static_broadcast(rhs_val, rhs_shape, shape)
+            bc_lhs = self._gen_static_broadcast(lhs_val, lhs_shape, shape)
+            bc_rhs = self._gen_static_broadcast(rhs_val, rhs_shape, shape)
             # Do binop
             nd = len(shape)
 
