@@ -1644,33 +1644,18 @@ class MlirBackend(_ch06_MlirBackend):
             if decl.sym_name.value == fname:
                 return decl
 
-    def _handle_reshape(self, ary_val, nd, outshape):
-        from mlir.dialects import arith, func, memref
+    def _gen_reshape(self, ary_val, inshape: list[int], outshape: list[int]):
+        from mlir.dialects import memref, arith
         from mlir import ir
-        be: LlamaBackend = self.codegen
+        element_type = ir.F64Type.get()
+        index_type = ir.IndexType.get()
 
-        shape = TypeSpeller.apply(outshape)
-        out_nd = len(shape)
-        fname_reshape = be.gen_array_reshape(self.module, nd, shape)
-        fn_reshape = self._get_func_by_name(fname_reshape)
-        [src_type, result_type] = fn_reshape.type.inputs
-
-        # Get output dimensions from outshape - use fixed shape
-        result_shape = shape  # Use the actual shape values, not dynamic
-        memref_type = ir.MemRefType.get(result_shape, result_type.element_type)
-
-        # Allocate result memref
-        result = memref.AllocOp(memref_type, [], [])
-
-        # Call the generated reshape function
-        func.call((), fname_reshape, [ary_val, result])
-
-        # Cast result to dynamic shaped type to match function signature
-        out_type = ir.MemRefType.get(
-            [ir.ShapedType.get_dynamic_size()] * out_nd,
-            result_type.element_type
-        )
-        return memref.CastOp(out_type, result)
+        shape_memref = memref.AllocOp(ir.MemRefType.get([len(outshape)], index_type), [], [])
+        memref_type_res = ir.MemRefType.get(outshape, element_type)
+        for idx, i in enumerate(outshape):
+            memref.store(arith.constant(index_type, i), shape_memref, [arith.constant(index_type, idx)])
+        out = memref.reshape(memref_type_res, ary_val, shape=shape_memref)
+        return out
 
     def _handle_static_broadcast(self, array_val, in_shape: list[int], out_shape: list[int]):
         from mlir.dialects import memref
@@ -1883,8 +1868,10 @@ class MlirBackend(_ch06_MlirBackend):
                 return self._gen_reduce_ufunc(opval, axis, ishape, oshape, op=op)
 
             case "NpyOp_Reshape_Shaped<ary, src_nd, inshape, outshape>", (ary, nd, inshape, outshape):
+                ishape = TypeSpeller.apply(inshape)
+                oshape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
-                return self._handle_reshape(ary_val, nd, outshape)
+                return self._gen_reshape(ary_val, ishape, oshape)
             case "NpyOp_Take_Shaped_one_index<ary, index, axis, src_nd, inshape, outshape>", (ary, index, -1, src_nd, inshape, outshape):
                 # This is implementing np.take(ary, index, axis=-1)
                 # src_nd is the ary.ndim
@@ -1919,7 +1906,7 @@ class MlirBackend(_ch06_MlirBackend):
                 # Call the generated function
                 func.call((), fname_take, [ary_val, casted_result])
 
-                return self._handle_reshape(result, out_nd + 1, outshape)
+                return self._gen_reshape(result, out_nd + 1, outshape)
 
             case "NpyOp_Broadcast_To_Shaped<ary, inshape, outshape>", (ary, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
