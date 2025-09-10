@@ -2120,15 +2120,14 @@ def test_softmax_x_minux_max():
     _run_array_unary_test(softmax_x_minus_max, np.random.random((1, 2, 6, 4)))
 
 
-def softmax_exp(x):
-    # exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
+def softmax_sum(x):
     return np.sum(x, axis=-1, keepdims=True)
 
 
-def test_softmax_exp():
+def test_softmax_sum():
     np.random.seed(0)
-    _run_array_unary_test(softmax_exp, np.random.random((1, 4)))
-    _run_array_unary_test(softmax_exp, np.random.random((1, 2, 6, 4)))
+    _run_array_unary_test(softmax_sum, np.random.random((1, 4)))
+    _run_array_unary_test(softmax_sum, np.random.random((1, 2, 6, 4)))
 
 
 def softmax_full(x):
