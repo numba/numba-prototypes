@@ -1333,6 +1333,11 @@ def ruleset_explain_array_desc(ad: ArrayDesc, ndim: i64, dtype: Type, shape: Sha
 class Annotate(Expr):
     def __init__(self, term: Term, ty: Type): ...
 
+
+class ArgFact(Expr):
+    def __init__(self, i: i64Like, ty: Type): ...
+
+
 @ruleset
 def ruleset_typevar_annotate(term: Term, tv: TypeVar, typ: Type):
     yield rule(
@@ -1429,6 +1434,7 @@ class ExtendEGraphToRVSDG(_ch05_ExtendEGraphToRVSDG):
     handle_ErrorMsg = handle_generic
     handle_DataLayout = handle_generic
     handle_Annotate = handle_generic
+    handle_ArgFact = handle_generic
     handle_Shape = handle_generic
 
 compiler_config = _compiler_config.copy()
@@ -1587,17 +1593,22 @@ class MlirBackend(_ch06_MlirBackend):
         [func] = [child for child in root._args
                   if isinstance(child, rg.Func)]
 
+        # HACK
+        # Find arguments
+        argfacts = [child for child in root._args if isinstance(child, rg.Generic) and child.name=="ArgFact"]
+
         print(format_rvsdg(func))
         fname = func.fname
         beginnode = func.body.begin
         intypes = {}
-        for argport in ase.search_parents(beginnode, lambda x: isinstance(x, rg.Unpack)):
-            print('   .parent', argport)
-            idx = argport._args[1]
-            annos = list(ase.search_parents(argport, lambda x: isinstance(x, rg.Generic) and x._args[0]=='Annotate'))
-            if annos:
-                intypes[idx] = TypeSpeller.apply(annos[0]._args[2])
+
+        for argfact in argfacts:
+            [arg_idx, ty] = argfact.children
+            intypes[arg_idx] = TypeSpeller.apply(ty)
+
         print(intypes)
+        ninports = len(beginnode.inports)
+        assert len(intypes) == ninports - 1  # one extra for the IO
         self._argtys = tuple(intypes.values())
 
         # outtypes
@@ -2067,6 +2078,13 @@ def run_compiler(target_function, args):
         input_types.append(desc.toType())
         input_type_rules.extend(eg_facts)
 
+        # HACK
+        input_type_rules.append(rule(
+            desc.toType()
+        ).then(
+            ArgFact(i, desc.toType())
+        ))
+
     ruleset_array_facts = ruleset(*input_type_rules)
 
     report = Report(default_expanded=True, enable_nested_metadata=True)
@@ -2262,6 +2280,7 @@ def _run_array_test(target_function, args):
 
         assert desired.ndim == retty.ndim
         assert desired.shape == retty.shape
+        assert desired.ndim == retty.ndim
 
     jit_func = cres.jit_func
     got = jit_func(*args)
