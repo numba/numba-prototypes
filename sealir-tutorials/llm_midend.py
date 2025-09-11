@@ -1328,6 +1328,33 @@ def ruleset_explain_array_desc(ad: ArrayDesc, ndim: i64, dtype: Type, shape: Sha
             layout=layout,
         ))
     )
+    # inverse
+
+    @function
+    def _array_desc_set_dim(ad: ArrayDesc, dimVec: Vec[Dim], i: i64Like) -> Unit:
+        ...
+
+    yield rule(
+        ad == ArrayType(
+            ndim=ndim, dtype=dtype,
+            shape=Shape.from_list(dimVec),
+            layout=layout,
+        ),
+        dimVec.length() == ndim,
+    ).then(
+        set_(ad.ndim).to(ndim),
+        set_(ad.dtype).to(dtype),
+        set_(ad.dataLayout).to(layout),
+        _array_desc_set_dim(ad, dimVec, 0),
+    )
+
+    yield rule(
+        _array_desc_set_dim(ad, dimVec, idx),
+        idx < dimVec.length(),
+    ).then(
+        _array_desc_set_dim(ad, dimVec, idx + 1),
+        set_(ad.dim(idx)).to(dimVec[idx]),
+    )
 
 
 class Annotate(Expr):
@@ -2278,7 +2305,6 @@ def _run_array_test(target_function, args):
         be = compiler_config["backend"]
         retty = be.get_last_compiled_return_type()
 
-        assert desired.ndim == retty.ndim
         assert desired.shape == retty.shape
         assert desired.ndim == retty.ndim
 
