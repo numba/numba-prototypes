@@ -1,5 +1,6 @@
 from __future__ import annotations
 import pytest
+import inspect
 import numpy as np
 import operator
 from functools import reduce
@@ -1636,7 +1637,7 @@ class MlirBackend(_ch06_MlirBackend):
         print(intypes)
         ninports = len(beginnode.inports)
         assert len(intypes) == ninports - 1  # one extra for the IO
-        self._argtys = tuple(intypes.values())
+        self._argtys = tuple([intypes[i] for i in range(len(argfacts))])
 
         # outtypes
         outtypes = {}
@@ -1649,10 +1650,10 @@ class MlirBackend(_ch06_MlirBackend):
 
         # attrs = Attributes(func.body.begin.attrs)
         # retty = attrs.get_return_type(func.body)
-        print("ARGS", intypes)
+        print("ARGS", self._argtys)
         print("RETURN TYPE", retty)
 
-        argtypes = tuple(intypes.values())
+        argtypes = self._argtys
         print(argtypes)
 
         super().lower(func, argtypes)
@@ -2114,6 +2115,14 @@ def run_compiler(target_function, args):
         ))
 
     ruleset_array_facts = ruleset(*input_type_rules)
+
+    # FIXME: egraph function parameters are sorted.
+    #        they don't match the ordering of the actual parameters.
+    #        this should be handled elsewhere.
+    #        for now we just reorder it here.
+    argnames = list(inspect.signature(target_function).parameters.keys())
+    arg_ordered = sorted([(v, k) for k, v in enumerate(argnames)])
+    input_types = [input_types[i] for k, i in arg_ordered]
 
     report = Report(default_expanded=True, enable_nested_metadata=True)
     try:
