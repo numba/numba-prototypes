@@ -1666,7 +1666,8 @@ class MlirBackend(_ch06_MlirBackend):
             ty = self._retty
             element_type = F64Type.get()
             nd = len(ty.shape)
-            return MemRefType.get(ty.shape, element_type, layout=StridedLayoutAttr.get(0, [ShapedType.get_dynamic_stride_or_offset()] * nd))
+            dyn = ShapedType.get_dynamic_stride_or_offset()
+            return MemRefType.get(ty.shape, element_type, layout=StridedLayoutAttr.get(dyn, [dyn] * nd))
 
     def get_return_types(self, root):
         return [self.lower_type_return(self._retty)]
@@ -1965,7 +1966,7 @@ class MlirBackend(_ch06_MlirBackend):
                     static_strides=ir.DenseI64ArrayAttr.get(strides)
                 ).result
 
-                result = ir.MemRefType.get(oshape, element_type, layout=ir.StridedLayoutAttr.get(0, calculated_strides[:-1]))
+                result = ir.MemRefType.get(oshape, element_type, layout=ir.StridedLayoutAttr.get(index, calculated_strides[:-1]))
 
                 # collapse the axis
                 reassoc = [[x] for x in range(len(sub_shape))]
@@ -2218,15 +2219,22 @@ def test_apply_rotary_emb_broadcast_to_expanddims_equiv():
     np.testing.assert_equal(got, desired)
 
 
-def apply_rotary_emb_fancy_index(xqri):
+def apply_rotary_emb_fancy_index_0(xqri):
     # xq_r = xqri[..., 0]
     xq_r = np.take(xqri, 0, axis=-1)
+    return xq_r
+
+def apply_rotary_emb_fancy_index_1(xqri):
+    # xq_r = xqri[..., 1]
+    xq_r = np.take(xqri, 1, axis=-1)
     return xq_r
 
 
 def test_apply_rotary_emb_fancy_index():
     np.random.seed(0)
-    _run_array_unary_test(apply_rotary_emb_fancy_index,
+    _run_array_unary_test(apply_rotary_emb_fancy_index_0,
+                          np.random.random((1, 2, 3, 4)))
+    _run_array_unary_test(apply_rotary_emb_fancy_index_1,
                           np.random.random((1, 2, 3, 4)))
 
 
@@ -2280,8 +2288,38 @@ def test_apply_rotary_emb_stack():
     shape = 1, 5, 6
     xq_out_r = np.random.random(shape)
     xq_out_i = np.random.random(shape)
-    # print("???", apply_rotary_emb_stack(xq_out_r, xq_out_i).shape)
     _run_array_test(apply_rotary_emb_stack, (xq_out_r, xq_out_i))
+
+
+def apply_rotary_emb(xq, xk, freqs_cos, freqs_sin):
+    xqri = xq.reshape(xq.shape[:-1] + (-1, 2))
+    xkri = xk.reshape(xk.shape[:-1] + (-1, 2))
+    # xq_r = xqri[..., 0]
+    xq_r = np.take(xqri, 0, axis=-1)
+    # xq_i = xqri[..., 1]
+    xq_i = np.take(xqri, 1, axis=-1)
+    # xk_r = xkri[..., 0]
+    xk_r = np.take(xkri, 0, axis=-1)
+    # xk_i = xkri[..., 1]
+    xk_i = np.take(xkri, 1, axis=-1)
+
+    return xq_r + xq_i
+
+
+def test_apply_rotary_emb():
+    np.random.seed(0)
+
+    batch_size, seq_len, n_heads, dims = 1, 5, 6, 288
+    n_local_heads, head_dim = n_heads, dims // n_heads
+
+    xq = np.random.random((batch_size, seq_len, n_local_heads, head_dim))
+    xk = np.random.random((batch_size, seq_len, n_local_heads, head_dim))
+    freqs_cos = np.random.random((seq_len, head_dim // 2))
+    freqs_sin = np.random.random((seq_len, head_dim // 2))
+    xk = xq
+    freqs_cos = xq
+    freqs_sin = xq
+    _run_array_test(apply_rotary_emb, (xq, xk, freqs_cos, freqs_sin))
 
 
 
