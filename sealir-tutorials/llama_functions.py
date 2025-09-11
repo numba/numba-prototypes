@@ -478,7 +478,7 @@ class Backend:
 
         return fn_name
 
-    def gen_array_stack(self, module, inp_shapes, out_shape, axis):
+    def gen_array_stack(self, module, num_inputs, inp_shape, out_shape, axis):
         fn_name = self.gen_fn_name("stack")
 
         if axis == -1:
@@ -488,29 +488,32 @@ class Backend:
             ndim = len(out_shape) - 1
             element_type = F64Type.get()
             index_type = IndexType.get()
-            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * ndim, element_type)
-            memref_type_out = MemRefType.get([ShapedType.get_dynamic_size()] * (ndim + 1), element_type)
-            func_type = FunctionType.get([memref_type] * len(inp_shapes), [memref_type_out])
+            memref_type = MemRefType.get(inp_shape, element_type)
+            memref_type_out = MemRefType.get(out_shape, element_type)
+            func_type = FunctionType.get([memref_type] * num_inputs, [memref_type_out])
 
             func_op = func.FuncOp(fn_name, func_type)
             func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
 
             with InsertionPoint(func_op.add_entry_block()):
                 input_args = func_op.arguments
-                output_memref = memref.alloc(memref_type_out, [arith.constant(index_type, s) for s in out_shape], [])
+                output_memref = memref.alloc(memref_type_out, [], [])
                 curr_offset = 0
+                input_shape = list(inp_shape)
+                input_shape.insert(axis, 1)
 
-                for input_arg, input_shape in zip(input_args, inp_shapes):
-                    input_shape = list(input_shape)
-                    input_shape.insert(axis, 1)
+                strides = [1] * (ndim + 1)
+                strides[axis] = num_inputs
+
+                out_strides = [1] * (ndim + 1)
+                for i in range(len(out_shape) - 2, -1, -1):
+                    out_strides[i] = out_strides[i+1] * out_shape[i+1]
+                out_strides[axis] *= num_inputs
+
+                for input_arg in input_args:
+
                     offsets = [0] * (ndim + 1)
                     offsets[axis] = curr_offset
-
-                    strides = [1] * (ndim + 1)
-                    strides[axis] = len(inp_shapes)
-
-                    out_strides = [ShapedType.get_dynamic_stride_or_offset()] * (ndim + 1)
-                    out_strides[axis] = len(inp_shapes)
                     out_layout = StridedLayoutAttr.get(curr_offset, out_strides)
                     memref_type_out_inner = MemRefType.get(input_shape, element_type, layout=out_layout)
                     subview = memref.SubViewOp(
@@ -524,20 +527,18 @@ class Backend:
                         static_strides=DenseI64ArrayAttr.get(strides)
                     ).result
 
-                    re_shape = [ShapedType.get_dynamic_size()] * (ndim + 1)
+                    re_shape = list(out_shape)
                     re_shape[axis] = 1
                     memref_type_in_inner = MemRefType.get(re_shape, element_type)
 
-                    reassociation = Backend.build_mlir_reassociation(3, [2])
-
-                    output_shape = [memref.dim(input_arg, arith.constant(index_type, i)) for i in range(ndim)]
+                    reassociation = Backend.build_mlir_reassociation(ndim, [axis-1])
 
                     input_arg_exp = memref.expand_shape(
                         memref_type_in_inner,
                         input_arg,
                         reassociation=reassociation,
-                        output_shape=output_shape,
-                        static_output_shape=DenseI64ArrayAttr.get(re_shape) # [dyn, dyn, 1, dyn, 1]
+                        output_shape=[],
+                        static_output_shape=DenseI64ArrayAttr.get(re_shape)
                     )
 
                     memref.copy(input_arg_exp, subview)

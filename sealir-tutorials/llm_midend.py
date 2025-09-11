@@ -1955,13 +1955,13 @@ class MlirBackend(_ch06_MlirBackend):
                 ary_val_1 = (yield ary1)
                 ary_val_2 = (yield ary2)
 
-                fname_stack = be.gen_array_stack(self.module, (in_shape, in_shape), out_shape, axis)
+                fname_stack = be.gen_array_stack(self.module, 2, in_shape, out_shape, axis)
                 fn_stack = self._get_func_by_name(fname_stack)
 
                 [src_type_1, src_type_2] = fn_stack.type.inputs
 
                 element_type = src_type_1.element_type
-                memref_type_out = ir.MemRefType.get([ir.ShapedType.get_dynamic_size()] * len(out_shape), element_type)
+                memref_type_out = ir.MemRefType.get(out_shape, element_type)
 
                 result = func.call((memref_type_out,), fname_stack, [ary_val_1, ary_val_2])
 
