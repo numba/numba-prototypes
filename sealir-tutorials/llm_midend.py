@@ -179,7 +179,6 @@ def ruleset_tuple(tuptype: Type, expr: Term, io: Term, amt: i64,
                   slice: Term, io2: Term,
                   lhs: Term, rhs: Term,
                   lhs_size: i64, rhs_size: i64):
-    from egglog import panic
     yield rule(
         # handle value_tuple[:-1]
         slice == Py_SliceIO(io, Term.LiteralNone(), Term.LiteralI64(amt), Term.LiteralNone()),
@@ -318,6 +317,13 @@ def NpyOp_Stack_2(ary1: Term, ary2: Term, axis: i64Like) -> Term: ...
 
 @function
 def NpyOp_Stack_2_Shaped(ary1: Term, ary2: Term, axis: i64Like, inshape: Shape, outshape: Shape) -> Term: ...
+
+
+@function(cost=1000)
+def NpyOp_Transpose_simple(arg_array: Term) -> Term: ...
+
+@function
+def NpyOp_Transpose_Shaped_simple(arg_array: Term, inshape: Shape, outshape: Shape) -> Term: ...
 
 
 @function
@@ -921,6 +927,82 @@ class NumPyRules:
             dimVec1.length() == i64(0),
         )
 
+    @staticmethod
+    def transpose(orig: Term):
+        yield rewrite(orig, subsume=True).to(npy_transpose())
+
+        @ruleset
+        def handle_simple_transpose(
+            io: Term,
+            argVec: Vec[Term],
+            arg_array: Term,
+            res: Term,
+            dtype: Type,
+            shape: Shape,
+            in_shape: Shape,
+            out_shape: Shape,
+            layout: DataLayout,
+            ndim: i64,
+            dimVec: Vec[Dim],
+        ):
+            callee = Py_Call(func=npy_transpose(), io=io, args=TermList(argVec))
+
+            yield rewrite(callee.getPort(1)).to(
+                NpyOp_Transpose_simple(arg_array),
+                # when
+                arg_array == argVec[0],
+                i64(1) == argVec.length(),
+            )
+            yield rewrite(callee.getPort(0)).to(io)
+
+            # Typing & Shaping
+
+            @function(cost=1000)
+            def _shape_transpose(dimVec: Vec[Dim]) -> Shape: ...
+
+            yield rule(
+                res == NpyOp_Transpose_simple(arg_array),
+                TypeVar(arg_array).getType() == ArrayType(ndim, dtype, shape, layout).toType(),
+                shape == Shape.from_list(dimVec),
+            ).then(
+                set_(TypeVar(res).getType()).to(
+                    ArrayType(ndim, dtype, _shape_transpose(dimVec), layout).toType()
+                )
+            )
+
+            # Specialization
+            yield rewrite(res).to(
+                NpyOp_Transpose_Shaped_simple(arg_array, in_shape, out_shape),
+                # when
+                res == NpyOp_Transpose_simple(arg_array),
+                TypeVar(arg_array).getType() == ArrayType(ndim, dtype, in_shape, layout).toType(),
+                TypeVar(res).getType() == ArrayType(ndim, dtype, out_shape, layout).toType(),
+            )
+
+            # _shape_transpose
+            yield rewrite(
+                _shape_transpose(dimVec),
+                subsume=True,
+            ).to(
+                Shape().append(dimVec[ndim - 1]) + _shape_transpose(dimVec.remove(ndim - 1)),
+                # when
+                ndim == dimVec.length(),
+                ndim > 0,
+            )
+
+            yield rewrite(
+                _shape_transpose(dimVec),
+                subsume=True,
+            ).to(
+                Shape(),
+                # when
+                ndim == dimVec.length(),
+                ndim == i64(0),
+            )
+
+        yield handle_simple_transpose
+
+
 @ruleset
 def ruleset_numpy_promote_binop(
     op: Term, lhs: Term, rhs: Term, io: Term, arraydesc: ArrayDesc
@@ -1281,6 +1363,10 @@ def npy_broadcast_to() -> Term: ...
 @function
 def npy_stack() -> Term: ...
 
+@function
+def npy_transpose() -> Term: ...
+
+
 
 
 loaded_module = {
@@ -1302,7 +1388,15 @@ def make_function_rule(module_mapping: dict[str, str]):
     for modname in module_mapping.values():
         if modname in loaded_module:
             rules = module_function_rule_lookup(modname)
-            yield ruleset(*rules, name=f"ruleset_module_{modname}")
+            others = []
+            for rule in rules:
+                if isinstance(rule, Ruleset):
+                    yield rule
+                else:
+                    others.append(rule)
+
+            if others:
+                yield ruleset(*others, name=f"ruleset_module_{modname}")
 
 
 module_rulesets = (
@@ -2006,6 +2100,13 @@ class MlirBackend(_ch06_MlirBackend):
                 result = func.call((memref_type_out,), fname_stack, [ary_val_1, ary_val_2])
 
                 return result
+
+            case "NpyOp_Transpose_Shaped_simple<arg_array, inshape, outshape>", (ary, inshape, outshape):
+                # This is implementing np.transpose(ary)
+                in_shape = TypeSpeller.apply(inshape)
+                out_shape = TypeSpeller.apply(outshape)
+                ary_val = (yield ary)
+                raise TodoException(f"np.transpose {in_shape} {out_shape}")
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -2332,7 +2433,6 @@ def apply_rotary_emb(xq, xk, freqs_cos, freqs_sin):
     return np.stack((xq_out, xk_out), axis=-1)
 
 
-
 def test_apply_rotary_emb():
     np.random.seed(0)
 
@@ -2344,6 +2444,30 @@ def test_apply_rotary_emb():
     freqs_cos = np.random.random((seq_len, head_dim // 2))
     freqs_sin = np.random.random((seq_len, head_dim // 2))
     _run_array_test(apply_rotary_emb, (xq, xk, freqs_cos, freqs_sin))
+
+
+#######################################
+# Attention
+
+def attention_transpose(q_weight):
+    q_weight = np.transpose(q_weight)
+    return q_weight
+
+
+def test_attention_transpose():
+    # Testing for:
+    #   q_weight, k_weight, v_weight, o_weight = [w.T for w in attn_weights]
+    np.random.seed(0)
+    q_weight = np.random.random((2, 3, 4))
+    # first check equivalent expression
+    np.testing.assert_array_equal(q_weight.T, np.transpose(q_weight))
+
+    # test compiler
+    _run_array_test(attention_transpose, (q_weight,))
+
+    q_weight = np.random.random((288, 288))
+    # test compiler on llm use case
+    _run_array_test(attention_transpose, (q_weight,))
 
 
 
