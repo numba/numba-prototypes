@@ -8,7 +8,7 @@ from pprint import pprint
 from dataclasses import dataclass
 from types import FunctionType
 
-from ch04_1_typeinfer_ifelse import Type, TypeFloat64, TypeVar
+from ch04_1_typeinfer_ifelse import Type, TypeFloat64, TypeVar, NbOp_Add_Int64
 from ch05_typeinfer_array import ArrayDesc, Broadcast, Dim, ruleset_broadcasting
 from ch05_typeinfer_array import (
     ExtendEGraphToRVSDG as _ch05_ExtendEGraphToRVSDG,
@@ -61,6 +61,7 @@ from sealir.eqsat.py_eqsat import (
     Py_SubscriptIO,
     Py_Tuple,
     Py_AddIO,
+    Py_SetitemIO,
 )
 from sealir.eqsat.py_eqsat import make_rules as py_eqsat_rules
 from sealir.eqsat.rvsdg_eqsat import Term, TermDict, TermList, termlist, DynInt
@@ -220,6 +221,40 @@ def ruleset_tuple(tuptype: Type, expr: Term, io: Term, amt: i64,
         Py_Tuple(TermList(termVec.append(termVec2)))
     )
 
+
+
+
+class Slice(Expr):
+    @classmethod
+    def from_term(cls, term: Term) -> Slice: ...
+
+    @classmethod
+    def from_args(cls, lower: Term, upper: Term, step: Term) -> Slice: ...
+
+
+
+@ruleset
+def ruleset_slice(py_slice: Term, io: Term, lower: Term, upper: Term, step: Term, slice1: Slice):
+    # slice building are pure
+    yield rewrite(Py_SliceIO(io, lower, upper, step).getPort(0)).to(io)
+
+    # Slice.from_term(Py_SliceIO) to Slice.from_args
+    yield rewrite(
+        Slice.from_term(Py_SliceIO(io, lower, upper, step).getPort(1))
+    ).to(
+        Slice.from_args(lower, upper, step)
+    )
+
+@ruleset
+def ruleset_more_constant_folding(x: i64, y: i64, io: Term, res: Term):
+    yield rule(
+        res == Py_AddIO(io, Term.LiteralI64(x), Term.LiteralI64(y))
+    ).then(
+        union(res.getPort(1)).with_(Term.LiteralI64(x + y)),
+        union(res.getPort(0)).with_(io),
+    )
+
+
 #######################################
 
 # Install numpy function rules
@@ -336,6 +371,12 @@ def NpyOp_MatMul_Shaped(
     lhs_shape: Shape, rhs_shape: Shape,
     out_shape: Shape,
 ) -> Term: ...
+
+
+@function
+def NpyOp_SetitemIO_2d_index(io: Term, ary: Term, value: Term,
+                             ishape: Shape,
+                             index0: Slice, index1: Slice) -> Term: ...
 
 
 @function
@@ -1588,10 +1629,37 @@ def _ruleset_shape_broadcas(
     ).to(dim1)
 
 
+
+@ruleset
+def ruleset_numpy_setitem(
+    res: Term,
+    io: Term,
+    ary: Term,
+    indices: Term,
+    index0: Term,
+    index1: Term,
+    val: Term,
+    ad: ArrayDesc,
+    idxVec: Vec[Term]
+):
+    yield rewrite(Py_SetitemIO(io=io, obj=ary, index=indices, val=val), subsume=True).to(
+        NpyOp_SetitemIO_2d_index(io=io, ary=ary, value=val,
+                                 ishape=Shape.from_arraydesc(ad),
+                                 index0=Slice.from_term(index0),
+                                 index1=Slice.from_term(index1)),
+        # when
+        TypeVar(ary).getType() == ad.toType(),
+        Py_Tuple(TermList(idxVec)),
+        idxVec.length() == i64(2),
+        idxVec[0] == index0,
+        idxVec[1] == index1,
+    )
+
 numpy_rulesset = (
     ruleset_numpy_reshape
     | ruleset_numpy_promote_binop
     | ruleset_numpy_shape
+    | ruleset_numpy_setitem
 )
 
 @function
@@ -1812,6 +1880,7 @@ class ExtendEGraphToRVSDG(_ch05_ExtendEGraphToRVSDG):
     handle_Annotate = handle_generic
     handle_ArgFact = handle_generic
     handle_Shape = handle_generic
+    handle_Slice = handle_generic
 
 compiler_config = _compiler_config.copy()
 compiler_config["converter_class"] = ExtendEGraphToRVSDG
@@ -1846,6 +1915,10 @@ class TypeSpeller(ase.TreeVisitor):
             #     assert r is not None
             case NbOp_Type(str(name)):
                 memo[expr] = name
+            case rg.PyNone():
+                memo[expr] = None
+            case rg.PyInt(int(ival)):
+                memo[expr] = ival
             case _:
                 print("HAR?", ase.pretty_str(expr), type(expr))
                 return None
@@ -1871,6 +1944,8 @@ class TypeSpeller(ase.TreeVisitor):
                 return ad
             case "Shape.from_list", (vec,):
                 return vec
+            case "Slice.from_args", (lower, upper, step):
+                return slice(lower, upper, step)
             # case "·.toTuple<self>", (vec,):
             #     return vec
             case _:
@@ -2371,6 +2446,14 @@ class MlirBackend(_ch06_MlirBackend):
                 out_shape = TypeSpeller.apply(out_shape)
                 raise TodoException(f"np.matmul {lhs_shape} x {rhs_shape} = {out_shape}")
 
+            case "NpyOp_SetitemIO_2d_index<io, ary, value, ishape, index0, index1>", (_, ary, value, ishape, index0, index1):
+                index0 = TypeSpeller().apply(index0)
+                index1 = TypeSpeller().apply(index1)
+                ishape = TypeSpeller().apply(ishape)
+                ary_val = (yield ary)
+                value_val = (yield value)
+
+                raise TodoException("array __setitem__", index0, index1, ishape, ary_val, value_val)
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -2507,6 +2590,8 @@ def run_compiler(target_function, args):
                 | ruleset_explain_array_desc
                 | ruleset_typevar_annotate
                 | ruleset_tuple
+                | ruleset_slice
+                | ruleset_more_constant_folding
             ),
             pipeline_report=report,
             # pipeline_debug=True,
@@ -2755,6 +2840,28 @@ def test_attention_matmul():
     a = np.random.random((1, 2, 3, 4))
     b = np.random.random((1, 2, 4, 5))
     _run_array_test(attention_matmul, (a, b))
+
+
+def attention_setitem(cache_k, xk):
+    batch_size = 1
+    seq_len = 5
+    start_pos = 0
+
+    cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
+    return cache_k
+
+
+@pytest.mark.xfail(raises=TodoException)
+def test_attention_setitem():
+    # Usecase:
+    #   cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
+    np.random.seed(0)
+
+    xk = np.random.random((1, 5, 6, 48))
+    cache_k = np.random.random((1, 256, 6, 48))
+
+    # test compiler on llm use case
+    _run_array_test(attention_setitem, (cache_k, xk))
 
 
 
