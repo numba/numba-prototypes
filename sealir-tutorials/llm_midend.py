@@ -355,10 +355,20 @@ def NpyOp_Stack_2_Shaped(ary1: Term, ary2: Term, axis: i64Like, inshape: Shape, 
 
 
 @function(cost=1000)
-def NpyOp_Transpose_simple(arg_array: Term) -> Term: ...
+def NpyOp_Transpose_simple(array: Term) -> Term: ...
+
 
 @function
-def NpyOp_Transpose_Shaped_simple(arg_array: Term, inshape: Shape, outshape: Shape) -> Term: ...
+def NpyOp_Transpose_Shaped_simple(array: Term, inshape: Shape, outshape: Shape) -> Term: ...
+
+
+@function(cost=1000)
+def NpyOp_Transpose_explicit(array: Term, reorder: TermList, outshape: Shape) -> Term: ...
+
+
+@function
+def NpyOp_Transpose_Shaped_explicit(array: Term, inshape: Shape, reorder: TermList, outshape: Shape) -> Term: ...
+
 
 
 @function(cost=1000)
@@ -1063,7 +1073,72 @@ class NumPyRules:
                 ndim == i64(0),
             )
 
+            # _transpose_reoder_simple
+
+
         yield handle_simple_transpose
+
+        @ruleset
+        def handle_explicit_transpose(
+            io: Term,
+            argVec: Vec[Term],
+            arg_array: Term,
+            arg_shape: Term,
+            res: Term,
+            dtype: Type,
+            shape: Shape,
+            in_shape: Shape,
+            out_shape: Shape,
+            layout: DataLayout,
+            ndim: i64,
+            dimVec: Vec[Dim],
+            termVec: Vec[Term],
+            x: i64
+        ):
+            callee = Py_Call(func=npy_transpose(), io=io, args=TermList(argVec))
+
+            @function(cost=1000)
+            def _shape_reorder(dimVec: Vec[Dim], termVec: Vec[Term]) -> Shape: ...
+
+            yield rewrite(callee.getPort(1)).to(
+                NpyOp_Transpose_explicit(arg_array, TermList(termVec), _shape_reorder(dimVec, termVec)),
+                # when
+                TypeVar(arg_array).getType() == ArrayType(_wc(i64), _wc(Type), in_shape, _wc(DataLayout)).toType(),
+                arg_array == argVec[0],
+                argVec[1] == Py_Tuple(TermList(termVec)),
+                i64(2) == argVec.length(),
+                in_shape == Shape.from_list(dimVec),
+            )
+
+            # Typing & Shaping
+            yield rule(
+                res == NpyOp_Transpose_explicit(arg_array, TermList(termVec), out_shape),
+                TypeVar(arg_array).getType() == ArrayType(ndim, dtype, in_shape, _wc(DataLayout)).toType(),
+            ).then(
+                set_(TypeVar(res).getType()).to(
+                    ArrayType(ndim, dtype, out_shape, DataLayout.strided()).toType()
+                ),
+                union(res).with_(NpyOp_Transpose_Shaped_explicit(arg_array, in_shape, TermList(termVec), out_shape)),
+            )
+
+            # _shape_reorder
+            yield rewrite(
+                _shape_reorder(dimVec, termVec),
+                subsume=True,
+            ).to(
+                Shape().append(dimVec[x]) + _shape_reorder(dimVec, termVec.remove(0)),
+                # when
+                Term.LiteralI64(x) == termVec[0],
+            )
+            yield rewrite(
+                _shape_reorder(dimVec, Vec[Term].empty()),
+                subsume=True,
+            ).to(
+                Shape()
+            )
+
+
+        yield handle_explicit_transpose
 
 
     @staticmethod
@@ -1904,10 +1979,17 @@ class ExtendEGraphToRVSDG(_ch05_ExtendEGraphToRVSDG):
         parent_output = super().handle_Term(op, children, grm)
         if parent_output is NotImplemented:
             assert isinstance(children, dict)
+            # flatten children
+            # XXX: improve handling of Vec[]
+            values = []
+            for v in children.values():
+                if isinstance(v, tuple):
+                    v = grm.write(rg.GenericList(name='tuple', children=v))
+                values.append(v)
             return grm.write(
                 LLM_generic(
                     desc=op + f"<{', '.join(children)}>",
-                    operands=tuple(children.values()),
+                    operands=tuple(values),
                 )
             )
         return parent_output
@@ -2493,12 +2575,20 @@ class MlirBackend(_ch06_MlirBackend):
 
                 return result
 
-            case "NpyOp_Transpose_Shaped_simple<arg_array, inshape, outshape>", (ary, inshape, outshape):
+            case "NpyOp_Transpose_Shaped_simple<array, inshape, outshape>", (ary, inshape, outshape):
                 # This is implementing np.transpose(ary)
                 in_shape = TypeSpeller.apply(inshape)
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
                 raise TodoException(f"np.transpose {in_shape} {out_shape}")
+
+            case "NpyOp_Transpose_Shaped_explicit<array, inshape, reorder, outshape>", (ary, inshape, reorder, outshape):
+                # This is implementing np.transpose(ary)
+                in_shape = TypeSpeller.apply(inshape)
+                out_shape = TypeSpeller.apply(outshape)
+                reorder = TypeSpeller.apply(reorder)
+                ary_val = (yield ary)
+                raise TodoException(f"np.transpose({reorder}) {in_shape} {out_shape}")
 
             case "NpyOp_MatMul_Shaped<lhs, rhs, lhs_shape, rhs_shape, out_shape>", (lhs, rhs, lhs_shape, rhs_shape, out_shape):
                 # np.matmul
@@ -2890,6 +2980,20 @@ def test_attention_transpose():
     q_weight = np.random.random((288, 288))
     # test compiler on llm use case
     _run_array_test(attention_transpose, (q_weight,))
+
+
+def attention_transpose_2(xq):
+    return np.transpose(xq, (0, 2, 1, 3))
+
+
+@pytest.mark.xfail(raises=TodoException)
+def test_attention_transpose_2():
+    # Usecase
+    #   xq = xq.transpose(0, 2, 1, 3)
+    np.random.seed(0)
+    xq = np.random.random((1, 5, 6, 48))
+    # test compiler on llm use case
+    _run_array_test(attention_transpose_2, (xq,))
 
 
 def attention_matmul(x, q_weight):
