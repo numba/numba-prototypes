@@ -312,7 +312,7 @@ def NpyOp_Broadcast_To(ary: Term, shape: Term) -> Term: ...
 def NpyOp_Broadcast_To_Shaped(ary: Term, inshape: Shape, outshape: Shape) -> Term: ...
 
 
-@function(cost=1000)
+@function(cost=10000)
 def NpyOp_Stack_2(ary1: Term, ary2: Term, axis: i64Like) -> Term: ...
 
 
@@ -2250,8 +2250,7 @@ def test_apply_rotary_emb_fancy_index():
 def apply_rotary_emb_expand_dims(freqs_cos):
     # np.expand_dims(freqs_cos, axis=(0, 2))
     # TODO actually support np.expand_dims
-    # return freqs_cos.reshape((1,) + (freqs_cos.shape[0],) + (1,) + (freqs_cos.shape[1],))
-    return freqs_cos.reshape((1,) + freqs_cos.shape)
+    return freqs_cos.reshape((1,) + (freqs_cos.shape[0],) + (1,) + (freqs_cos.shape[1],))
 
 
 def test_apply_rotary_emb_expand_dims():
@@ -2312,7 +2311,26 @@ def apply_rotary_emb(xq, xk, freqs_cos, freqs_sin):
     # xk_i = xkri[..., 1]
     xk_i = np.take(xkri, 1, axis=-1)
 
-    return xq_r + xq_i
+    # freqs_cos = np.broadcast_to(np.expand_dims(freqs_cos, axis=(0, 2)), (1, 5, 6, 24))
+    freqs_cos = np.broadcast_to(freqs_cos.reshape((1,) + (freqs_cos.shape[0],) + (1,) + (freqs_cos.shape[1],)), (1, 5, 6, 24))
+    # freqs_sin = np.broadcast_to(np.expand_dims(freqs_sin, axis=(0, 2)), (1, 5, 6, 24))
+    freqs_sin = np.broadcast_to(freqs_sin.reshape((1,) + (freqs_sin.shape[0],) + (1,) + (freqs_sin.shape[1],)), (1, 5, 6, 24))
+
+    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
+    xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
+    xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin
+    xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
+
+    # Combine real and imaginary parts
+    xq_out = np.stack((xq_out_r, xq_out_i), axis=-1).reshape(
+        xq_out_r.shape[:-1] + (-1,)
+    )
+    xk_out = np.stack((xk_out_r, xk_out_i), axis=-1).reshape(
+        xk_out_r.shape[:-1] + (-1,)
+    )
+
+    return np.stack((xq_out, xk_out), axis=-1)
+
 
 
 def test_apply_rotary_emb():
@@ -2325,9 +2343,6 @@ def test_apply_rotary_emb():
     xk = np.random.random((batch_size, seq_len, n_local_heads, head_dim))
     freqs_cos = np.random.random((seq_len, head_dim // 2))
     freqs_sin = np.random.random((seq_len, head_dim // 2))
-    xk = xq
-    freqs_cos = xq
-    freqs_sin = xq
     _run_array_test(apply_rotary_emb, (xq, xk, freqs_cos, freqs_sin))
 
 
@@ -2397,4 +2412,5 @@ def main():
     np.testing.assert_allclose(res, desired)
 
 if __name__ == "__main__":
+    # test_apply_rotary_emb()
     main()
