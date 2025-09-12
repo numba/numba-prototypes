@@ -326,6 +326,22 @@ def NpyOp_Transpose_simple(arg_array: Term) -> Term: ...
 def NpyOp_Transpose_Shaped_simple(arg_array: Term, inshape: Shape, outshape: Shape) -> Term: ...
 
 
+@function(cost=1000)
+def NpyOp_MatMul(lhs: Term, rhs: Term) -> Term: ...
+
+
+@function
+def NpyOp_MatMul_Shaped(
+    lhs: Term, rhs: Term,
+    lhs_shape: Shape, rhs_shape: Shape,
+    out_shape: Shape,
+) -> Term: ...
+
+
+@function
+def Shape_Broadcast(lhs: Shape, rhs: Shape) -> Shape: ...
+
+
 @function
 def get_ufunc_reduce_array_desc(
     in_array: ArrayDesc, axis: i64Like, keepdims: BoolLike
@@ -1003,6 +1019,136 @@ class NumPyRules:
         yield handle_simple_transpose
 
 
+    @staticmethod
+    def matmul(orig: Term):
+        yield rewrite(orig, subsume=True).to(npy_matmul())
+
+        @ruleset
+        def handle_matmul(
+            io: Term,
+            argVec: Vec[Term],
+            arg_lhs: Term,
+            arg_rhs: Term,
+            res: Term,
+            dtype: Type,
+            shape: Shape,
+            shape_lhs: Shape,
+            shape_rhs: Shape,
+            ndim_lhs: i64,
+            ndim_rhs: i64,
+            layout_lhs: DataLayout,
+            layout_rhs: DataLayout,
+            dimVec_lhs: Vec[Dim],
+            dimVec_rhs: Vec[Dim],
+            dimM: Dim,
+            dimN: Dim,
+            dimK: Dim,
+        ):
+            callee = Py_Call(func=npy_matmul(), io=io, args=TermList(argVec))
+
+            yield rewrite(callee.getPort(1)).to(
+                NpyOp_MatMul(arg_lhs, arg_rhs),
+                # when
+                arg_lhs == argVec[0],
+                arg_rhs == argVec[1],
+                i64(2) == argVec.length(),
+            )
+            yield rewrite(callee.getPort(0)).to(io)
+
+            # Typing & Shaping
+
+            @function(cost=1000)
+            def _shape_matmul_broadcast(lhs: Shape, rhs: Shape) -> Shape: ...
+
+            @function(cost=1000)
+            def _shape_matmul_broadcast_step(
+                lhs: Shape, rhs: Shape,
+                dimM: Dim,
+                dimN: Dim,
+                dimK: Dim,
+            ) -> Shape: ...
+
+            @function(cost=10)
+            def _shape_matmul_batch(
+                batch_shape: Shape,
+                dimM: Dim,
+                dimN: Dim,
+                dimK: Dim,
+            ) -> Shape: ...
+
+            yield rule(
+                res == NpyOp_MatMul(arg_lhs, arg_rhs),
+                TypeVar(arg_lhs).getType() == ArrayType(ndim_lhs, dtype, shape_lhs, layout_lhs).toType(),
+                TypeVar(arg_rhs).getType() == ArrayType(ndim_rhs, dtype, shape_rhs, layout_rhs).toType(),
+            ).then(
+                set_(TypeVar(res).getType()).to(
+                    ArrayType(
+                        ndim=ndim_lhs.max(ndim_rhs),
+                        dtype=dtype,
+                        shape=_shape_matmul_broadcast(shape_lhs, shape_rhs),
+                        layout=DataLayout.c_contiguous(),
+                    ).toType()
+                )
+            )
+
+            # _shape_matmul_broadcast
+            yield rewrite(
+                _shape_matmul_broadcast(
+                    Shape.from_list(dimVec_lhs),
+                    Shape.from_list(dimVec_rhs),
+                ),
+                subsume=True,
+            ).to(
+                _shape_matmul_broadcast_step(
+                    Shape.from_list(dimVec_lhs.pop().pop()),
+                    Shape.from_list(dimVec_rhs.pop().pop()),
+                    dimM, dimN, dimK,
+                ),
+                # when
+                ndim_lhs == dimVec_lhs.length(),
+                ndim_rhs == dimVec_rhs.length(),
+                ndim_lhs >= 2,
+                ndim_rhs >= 2,
+                dimM == dimVec_lhs[ndim_lhs - 2],
+                dimN == dimVec_lhs[ndim_lhs - 1],
+                dimN == dimVec_rhs[ndim_rhs - 2],
+                dimK == dimVec_rhs[ndim_rhs - 1],
+            )
+
+            yield rewrite(
+                _shape_matmul_broadcast_step(
+                    shape_lhs, shape_rhs,
+                    dimM, dimN, dimK,
+                )
+            ).to(
+                _shape_matmul_batch(
+                    Shape_Broadcast(shape_lhs, shape_rhs),
+                    dimM, dimN, dimK
+                )
+            )
+
+            yield rewrite(
+                _shape_matmul_batch(shape, dimM, dimN, dimK),
+                subsume=True,
+            ).to(
+                shape + Shape().append(dimM).append(dimK)
+            )
+
+            # Specialize
+            yield rewrite(
+                res
+            ).to(
+                NpyOp_MatMul_Shaped(arg_lhs, arg_rhs, shape_lhs, shape_rhs, shape),
+                # when
+                res == NpyOp_MatMul(arg_lhs, arg_rhs),
+                TypeVar(res).getType() == ArrayType(_wc(i64), _wc(Type), shape, _wc(DataLayout)).toType(),
+                TypeVar(arg_lhs).getType() == ArrayType(_wc(i64), _wc(Type), shape_lhs, _wc(DataLayout)).toType(),
+                TypeVar(arg_rhs).getType() == ArrayType(_wc(i64), _wc(Type), shape_rhs, _wc(DataLayout)).toType(),
+            )
+
+        yield handle_matmul
+
+
 @ruleset
 def ruleset_numpy_promote_binop(
     op: Term, lhs: Term, rhs: Term, io: Term, arraydesc: ArrayDesc
@@ -1336,6 +1482,111 @@ def ruleset_numpy_shape(
     )
 
 
+@ruleset_numpy_shape.register
+def _ruleset_shape_broadcas(
+    dimVec1: Vec[Dim],
+    dimVec2: Vec[Dim],
+    nd: i64,
+    ndim1: i64,
+    ndim2: i64,
+    dim1: Dim,
+    dim2: Dim,
+    m: i64,
+    n: i64,
+):
+    # broadcast shape
+    # TODO: duplicating logic from ch5 because a shape based broadcast is cleaner
+
+
+    @function(cost=1000)
+    def _broadcast_match_nd(dimVec1: Vec[Dim], dimVec2: Vec[Dim], nd: i64) -> Shape: ...
+
+    @function(cost=1000)
+    def _broadcast_match_dimensions(dimVec1: Vec[Dim], dimVec2: Vec[Dim]) -> Shape: ...
+
+    @function(cost=1000)
+    def _broadcast_dim(dimL: Dim, dimR: Dim) -> Dim: ...
+
+
+    yield rewrite(
+        Shape_Broadcast(Shape.from_list(dimVec1), Shape.from_list(dimVec2))
+    ).to(
+        _broadcast_match_nd(dimVec1, dimVec2, ndim1.max(ndim2)),
+        # when
+        ndim1 == dimVec1.length(),
+        ndim2 == dimVec2.length(),
+    )
+
+    yield rewrite(
+        _broadcast_match_nd(dimVec1, dimVec2, nd),
+        subsume=True,
+    ).to(
+        _broadcast_match_nd(dimVec1, Vec[Dim](Dim.fixed(1)).append(dimVec2), nd),
+        # when
+        nd != dimVec2.length(),
+    )
+
+    yield rewrite(
+        _broadcast_match_nd(dimVec1, dimVec2, nd),
+        subsume=True,
+    ).to(
+        _broadcast_match_nd(Vec[Dim](Dim.fixed(1)).append(dimVec1), dimVec2, nd),
+        # when
+        nd != dimVec1.length(),
+    )
+
+    yield rewrite(
+        _broadcast_match_nd(dimVec1, dimVec2, nd),
+        subsume=True,
+    ).to(
+        _broadcast_match_dimensions(dimVec1, dimVec2),
+        # when
+        nd == dimVec1.length(),
+        nd == dimVec2.length(),
+    )
+
+    yield rewrite(
+        _broadcast_match_dimensions(dimVec1, dimVec2),
+        subsume=True,
+    ).to(
+        Shape().append(_broadcast_dim(dim1, dim2)) + _broadcast_match_dimensions(dimVec1.remove(0), dimVec2.remove(0)),
+        # when
+        dim1 == dimVec1[0],
+        dim2 == dimVec2[0],
+    )
+
+    yield rewrite(
+        _broadcast_match_dimensions(dimVec1, dimVec2),
+        subsume=True,
+    ).to(
+        Shape(),
+        # when
+        dimVec1.length() == i64(0),
+        dimVec2.length() == i64(0),
+    )
+
+
+    # broadcast Dim
+    yield rewrite(
+        # dim==1 can broadcast to anything
+        _broadcast_dim(dim1, Dim.fixed(1)),
+        subsume=True,
+    ).to(
+        dim1
+    )
+    yield rewrite(
+        # commutative: flip left and right
+        _broadcast_dim(dim1, dim2),
+    ).to(
+        _broadcast_dim(dim2, dim1),
+    )
+
+    yield rewrite(
+        # matching dimension
+        _broadcast_dim(dim1, dim1),
+        subsume=True,
+    ).to(dim1)
+
 
 numpy_rulesset = (
     ruleset_numpy_reshape
@@ -1366,6 +1617,9 @@ def npy_stack() -> Term: ...
 @function
 def npy_transpose() -> Term: ...
 
+
+@function
+def npy_matmul() -> Term: ...
 
 
 
@@ -2107,6 +2361,16 @@ class MlirBackend(_ch06_MlirBackend):
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
                 raise TodoException(f"np.transpose {in_shape} {out_shape}")
+
+            case "NpyOp_MatMul_Shaped<lhs, rhs, lhs_shape, rhs_shape, out_shape>", (lhs, rhs, lhs_shape, rhs_shape, out_shape):
+                # np.matmul
+                lhs_val = (yield lhs)
+                rhs_val = (yield rhs)
+                lhs_shape = TypeSpeller.apply(lhs_shape)
+                rhs_shape = TypeSpeller.apply(rhs_shape)
+                out_shape = TypeSpeller.apply(out_shape)
+                raise TodoException(f"np.matmul {lhs_shape} x {rhs_shape} = {out_shape}")
+
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -2454,6 +2718,7 @@ def attention_transpose(q_weight):
     return q_weight
 
 
+@pytest.mark.xfail(raises=TodoException)
 def test_attention_transpose():
     # Testing for:
     #   q_weight, k_weight, v_weight, o_weight = [w.T for w in attn_weights]
@@ -2468,6 +2733,29 @@ def test_attention_transpose():
     q_weight = np.random.random((288, 288))
     # test compiler on llm use case
     _run_array_test(attention_transpose, (q_weight,))
+
+
+def attention_matmul(x, q_weight):
+    # return x @ q_weight
+    return np.matmul(x, q_weight)
+
+
+@pytest.mark.xfail(raises=TodoException)
+def test_attention_matmul():
+    # Testing for:
+    #   x @ q_weight
+    np.random.seed(0)
+    x = np.random.random((1, 5, 288))
+    q_weight = np.random.random((288, 288))
+
+    # test compiler on llm use case
+    _run_array_test(attention_matmul, (x, q_weight))
+
+    # test other shapes
+    a = np.random.random((1, 2, 3, 4))
+    b = np.random.random((1, 2, 4, 5))
+    _run_array_test(attention_matmul, (a, b))
+
 
 
 
