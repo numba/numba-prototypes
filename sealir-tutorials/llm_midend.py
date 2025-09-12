@@ -374,9 +374,15 @@ def NpyOp_MatMul_Shaped(
 
 
 @function
-def NpyOp_SetitemIO_2d_index(io: Term, ary: Term, value: Term,
-                             ishape: Shape,
-                             index0: Slice, index1: Slice) -> Term: ...
+def NpyOp_SetitemIO_Shaped_2d_index(
+    io: Term, ary: Term, value: Term, ishape: Shape,
+    index0: Slice, index1: Slice) -> Term: ...
+
+
+@function
+def NpyOp_GetitemIO_Shaped_2d_index(
+    io: Term, ary: Term, ishape: Shape,
+    index0: Slice, index1: Slice, oshape: Shape) -> Term: ...
 
 
 @function
@@ -1643,7 +1649,7 @@ def ruleset_numpy_setitem(
     idxVec: Vec[Term]
 ):
     yield rewrite(Py_SetitemIO(io=io, obj=ary, index=indices, val=val), subsume=True).to(
-        NpyOp_SetitemIO_2d_index(io=io, ary=ary, value=val,
+        NpyOp_SetitemIO_Shaped_2d_index(io=io, ary=ary, value=val,
                                  ishape=Shape.from_arraydesc(ad),
                                  index0=Slice.from_term(index0),
                                  index1=Slice.from_term(index1)),
@@ -1655,11 +1661,68 @@ def ruleset_numpy_setitem(
         idxVec[1] == index1,
     )
 
+@ruleset
+def ruleset_numpy_getitem(
+    res: Term,
+    io: Term,
+    ary: Term,
+    indices: Term,
+    shape: Shape,
+    upper0: i64,
+    upper1: i64,
+    ndim: i64,
+    dtype: Type,
+    dimVec: Vec[Dim],
+    index0: Term,
+    index1: Term,
+    idxVec: Vec[Term],
+):
+    @function
+    def _shape_getitem_2d(shape: Shape, index0: Slice, index1: Slice) -> Shape: ...
+
+    yield rule(
+        res == Py_SubscriptIO(io=io, obj=ary, index=indices),
+        TypeVar(ary).getType() == ArrayType(ndim=ndim, dtype=dtype, shape=shape, layout=_wc(DataLayout)).toType(),
+        Py_Tuple(TermList(idxVec)),
+        idxVec.length() == i64(2),
+        idxVec[0] == index0,
+        idxVec[1] == index1,
+    ).then(
+        union(res.getPort(0)).with_(io),  # consume but no new effect
+        union(res.getPort(1)).with_(
+            NpyOp_GetitemIO_Shaped_2d_index(
+                io=io,
+                ary=ary,
+                ishape=shape,
+                index0=(_slice0 := Slice.from_term(index0)),
+                index1=(_slice1 := Slice.from_term(index1)),
+                oshape=(_oshape := _shape_getitem_2d(shape, _slice0, _slice1)),
+            )
+        ),
+        set_(TypeVar(res.getPort(1)).getType()).to(
+            ArrayType(ndim=ndim, dtype=dtype, shape=_oshape, layout=DataLayout.strided()).toType()
+        )
+    )
+
+    # _shape_getitem_2d
+    none = Term.LiteralNone()
+    yield rewrite(
+        # support slice with only upper
+        _shape_getitem_2d(Shape.from_list(dimVec), Slice.from_args(none, Term.LiteralI64(upper0), none), Slice.from_args(none, Term.LiteralI64(upper1), none))
+    ).to(
+        Shape().append(Dim.fixed(upper0)).append(Dim.fixed(upper1)) + Shape.from_list(dimVec.remove(0).remove(0)),
+        # when
+        dimVec.length() >= 2,
+    )
+
+
+
 numpy_rulesset = (
     ruleset_numpy_reshape
     | ruleset_numpy_promote_binop
     | ruleset_numpy_shape
     | ruleset_numpy_setitem
+    | ruleset_numpy_getitem
 )
 
 @function
@@ -2446,7 +2509,7 @@ class MlirBackend(_ch06_MlirBackend):
                 out_shape = TypeSpeller.apply(out_shape)
                 raise TodoException(f"np.matmul {lhs_shape} x {rhs_shape} = {out_shape}")
 
-            case "NpyOp_SetitemIO_2d_index<io, ary, value, ishape, index0, index1>", (_, ary, value, ishape, index0, index1):
+            case "NpyOp_SetitemIO_Shaped_2d_index<io, ary, value, ishape, index0, index1>", (_, ary, value, ishape, index0, index1):
                 index0 = TypeSpeller().apply(index0)
                 index1 = TypeSpeller().apply(index1)
                 ishape = TypeSpeller().apply(ishape)
@@ -2454,6 +2517,15 @@ class MlirBackend(_ch06_MlirBackend):
                 value_val = (yield value)
 
                 raise TodoException("array __setitem__", index0, index1, ishape, ary_val, value_val)
+
+            case "NpyOp_GetitemIO_Shaped_2d_index<io, ary, ishape, index0, index1, oshape>", (_, ary, ishape, index0, index1, oshape):
+                index0 = TypeSpeller().apply(index0)
+                index1 = TypeSpeller().apply(index1)
+                ishape = TypeSpeller().apply(ishape)
+                oshape = TypeSpeller().apply(oshape)
+                ary_val = (yield ary)
+
+                raise TodoException("array __getitem__", index0, index1, ishape, ary_val, oshape)
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -2863,6 +2935,23 @@ def test_attention_setitem():
     # test compiler on llm use case
     _run_array_test(attention_setitem, (cache_k, xk))
 
+
+def attention_getitem(cache_k):
+    batch_size = 1
+    seq_len = 5
+    start_pos = 0
+    ks = cache_k[:batch_size, : start_pos + seq_len]
+    return ks
+
+
+@pytest.mark.xfail(raises=TodoException)
+def test_attention_getitem():
+    # Usecase:
+    #   ks = cache_k[:batch_size, : start_pos + seq_len]
+    np.random.seed(0)
+    cache_k = np.random.random((1, 256, 6, 48))
+    # test compiler on llm use case
+    _run_array_test(attention_getitem, (cache_k,))
 
 
 
