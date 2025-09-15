@@ -2652,7 +2652,10 @@ class MlirBackend(_ch06_MlirBackend):
                 ary_val = (yield ary)
                 value_val = (yield value)
 
-                raise TodoException("array __setitem__", index0, index1, ishape, ary_val, value_val)
+                fname_setitem = be.gen_array_setitem_shaped(self.module, ishape, (index0, index1))
+                res = func.call((), fname_setitem, [ary_val, value_val])
+
+                return [res]
 
             case "NpyOp_GetitemIO_Shaped_2d_index<io, ary, ishape, index0, index1, oshape>", (_, ary, ishape, index0, index1, oshape):
                 index0 = TypeSpeller().apply(index0)
@@ -2661,7 +2664,21 @@ class MlirBackend(_ch06_MlirBackend):
                 oshape = TypeSpeller().apply(oshape)
                 ary_val = (yield ary)
 
-                raise TodoException("array __getitem__", index0, index1, ishape, ary_val, oshape)
+                fname_getitem = be.gen_array_getitem_shaped(self.module, ishape, oshape, (index0, index1))
+                fn_getitem = self._get_func_by_name(fname_getitem)
+                [src_type_1] = fn_getitem.type.inputs
+
+                element_type = src_type_1.element_type
+                dims = len(ishape)
+    
+                out_strides = [1] * dims
+                for i in range(dims-1,0,-1):
+                    out_strides[i-1] = out_strides[i] * ishape[i]
+
+                memref_type_out = ir.MemRefType.get(oshape, element_type, layout=ir.StridedLayoutAttr.get(0, out_strides))
+                result = func.call((memref_type_out,), fname_getitem, [ary_val])
+
+                return result
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -3164,8 +3181,6 @@ def main():
         print(desired)
     np.testing.assert_allclose(res, desired)
 
-test_attention_getitem()
-
-# if __name__ == "__main__":
-#     # test_apply_rotary_emb()
-#     main()
+if __name__ == "__main__":
+    # test_apply_rotary_emb()
+    main()

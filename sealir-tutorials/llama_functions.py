@@ -10,7 +10,7 @@ from ctypes.util import find_library
 
 import math as pymath
 
-_DEBUG = False
+_DEBUG = True
 _VERIFY = False
 _FUZZ = False
 
@@ -1024,22 +1024,26 @@ class Backend:
 
     def gen_array_getitem_shaped(self, module, in_shape, out_shape, indices):
         fn_name = self.gen_fn_name("getitem")
+
+        dims = len(in_shape)
+
         assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
         if len(indices) < dims:
             indices = list(indices) + ([None] * (dims - len(indices)))
 
-        out_shape = [ShapedType.get_dynamic_size()] * dims
         offsets = [0] * dims
         strides = [1] * dims
-        out_strides = [ShapedType.get_dynamic_stride_or_offset()] * dims
+        out_strides = [1] * dims
+
+        for i in range(dims-1,0,-1):
+            out_strides[i-1] = out_strides[i] * in_shape[i]
+
         modified_axes = []
 
         for axis, index in enumerate(indices):
             if index is None:
                 continue
             elif isinstance(index, int):
-                out_shape[index] = 1
-                # out_strides[index] = 1
                 offsets[axis] = index
                 modified_axes.append(axis)
             elif isinstance(index, slice):
@@ -1051,52 +1055,35 @@ class Backend:
                 else:
                     index_stop = index.stop
 
-                out_shape[axis] = (index_stop - index_start) // index_step
-                # out_strides[axis] = index_step
                 offsets[axis] = index_start
                 modified_axes.append(axis)
             else:
                 raise TypeError(f"Unknown index type {type(index)}")
 
-        out_strides[-1] = 1
-
-        first_offset = 0
-        for offset in offsets:
-            if offset != 0:
-                first_offset = offset
-                break
-
         with module.context, InsertionPoint(module.body), Location.unknown():
             element_type = F64Type.get()
             index_type = IndexType.get()
-            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
-            memref_type_out = MemRefType.get(out_shape, element_type, layout=StridedLayoutAttr.get(first_offset, out_strides))
-            func_type = FunctionType.get([memref_type, memref_type_out], [])
+            memref_type_in = MemRefType.get(in_shape, element_type)
+            memref_type_out = MemRefType.get(out_shape, element_type, layout=StridedLayoutAttr.get(0, out_strides))
+            func_type = FunctionType.get([memref_type_in], [memref_type_out])
 
             func_op = func.FuncOp(fn_name, func_type)
             func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
 
             with InsertionPoint(func_op.add_entry_block()):
-                input_memref, output_memref = func_op.arguments
-
-                sizes = [memref.dim(func_op.arguments[0], arith.constant(index_type, i)) for i in range(dims)]
-                for mod in modified_axes:
-                    sizes.pop(mod)
-
+                input_memref, = func_op.arguments
                 subview = memref.SubViewOp(
                     memref_type_out,
                     input_memref,
                     offsets=[],
-                    sizes=sizes,
+                    sizes=[],
                     strides=[],
                     static_offsets=DenseI64ArrayAttr.get(offsets),
                     static_sizes=DenseI64ArrayAttr.get(out_shape),
                     static_strides=DenseI64ArrayAttr.get(strides)
                 ).result
 
-                memref.copy(subview, output_memref)
-
-                func.ReturnOp([])
+                func.ReturnOp([subview])
 
         return fn_name
 
@@ -1174,6 +1161,76 @@ class Backend:
 
                 memref.copy(value_memref, subview)
                 func.ReturnOp([arith.constant(element_type, 0.0)])
+
+        return fn_name
+
+    def gen_array_setitem_shaped(self, module, in_shape, indices):
+        fn_name = self.gen_fn_name("setitem")
+        
+        dims = len(in_shape)
+        assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
+
+        if len(indices) < dims:
+            indices = list(indices) + ([None] * (dims - len(indices)))
+
+        val_shape = in_shape
+        offsets = [0] * dims
+        strides = [1] * dims
+
+        modified_axes = []
+
+        for axis, index in enumerate(indices):
+            if index is None:
+                continue
+            elif isinstance(index, int):
+                val_shape[index] = 1
+                offsets[axis] = index
+                modified_axes.append(axis)
+            elif isinstance(index, slice):
+                index_start = index.start if index.start is not None else 0
+                index_step = index.step if index.step is not None else 1
+                index_stop = 0
+                if index.stop is None:
+                    raise ValueError("Slices with undefined stop not supported")
+                else:
+                    index_stop = index.stop
+
+                val_shape[axis] = (index_stop - index_start) // index_step
+                offsets[axis] = index_start
+                modified_axes.append(axis)
+            else:
+                raise TypeError(f"Unknown index type {type(index)}")
+
+        out_strides = [1] * dims
+
+        for i in range(dims-1,0,-1):
+            out_strides[i-1] = out_strides[i] * val_shape[i]
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type = MemRefType.get(in_shape, element_type)
+            memref_type_out = MemRefType.get(val_shape, element_type, layout=StridedLayoutAttr.get(0, out_strides))
+            func_type = FunctionType.get([memref_type, memref_type_out], [])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                arr_memref, value_memref = func_op.arguments
+
+                subview = memref.SubViewOp(
+                    memref_type_out,
+                    arr_memref,
+                    offsets=[],
+                    sizes=[],
+                    strides=[],
+                    static_offsets=DenseI64ArrayAttr.get(offsets),
+                    static_sizes=DenseI64ArrayAttr.get(val_shape),
+                    static_strides=DenseI64ArrayAttr.get(strides)
+                ).result
+
+                memref.copy(value_memref, subview)
+                func.ReturnOp([])
 
         return fn_name
 
