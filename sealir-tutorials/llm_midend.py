@@ -397,6 +397,14 @@ def NpyOp_GetitemIO_Shaped_2d_index(
     index0: Slice, index1: Slice, oshape: Shape) -> Term: ...
 
 
+@function(cost=1000)
+def NpyOp_Copy(io: Term, ary: Term) -> Term: ...
+
+
+@function
+def NpyOp_Copy_Shaped(io: Term, ary: Term, shape: Shape) -> Term: ...
+
+
 @function
 def Shape_Broadcast(lhs: Shape, rhs: Shape) -> Shape: ...
 
@@ -1280,6 +1288,46 @@ class NumPyRules:
 
         yield handle_matmul
 
+    @staticmethod
+    def copy(orig: Term):
+        yield rewrite(orig, subsume=True).to(npy_copy())
+
+        @ruleset
+        def handle_copy(
+            io: Term,
+            argVec: Vec[Term],
+            ary: Term,
+            res: Term,
+            dtype: Type,
+            shape: Shape,
+            ndim: i64,
+        ):
+            callee = Py_Call(func=npy_copy(), io=io, args=TermList(argVec))
+
+            yield rewrite(callee).to(
+                NpyOp_Copy(io, ary),
+                # when
+                ary == argVec[0],
+                argVec.length() == i64(1),
+            )
+
+            # Typing & shaping
+            # Input is the same as output
+            yield rule(
+                res == NpyOp_Copy(io, ary),
+                TypeVar(ary).getType() == ArrayType(
+                    ndim=ndim, dtype=dtype, shape=shape, layout=_wc(DataLayout),
+                ).toType(),
+            ).then(
+                union(res).with_(NpyOp_Copy_Shaped(io, ary, shape)),
+                set_(TypeVar(res.getPort(1)).getType()).to(ArrayType(
+                    ndim=ndim, dtype=dtype, shape=shape,
+                    layout=DataLayout.c_contiguous()).toType()
+                )
+            )
+
+        yield handle_copy
+
 
 @ruleset
 def ruleset_numpy_promote_binop(
@@ -1768,7 +1816,7 @@ def ruleset_numpy_getitem(
     yield rule(
         res == Py_SubscriptIO(io=io, obj=ary, index=indices),
         TypeVar(ary).getType() == ArrayType(ndim=ndim, dtype=dtype, shape=shape, layout=_wc(DataLayout)).toType(),
-        Py_Tuple(TermList(idxVec)),
+        indices == Py_Tuple(TermList(idxVec)),
         idxVec.length() == i64(2),
         idxVec[0] == index0,
         idxVec[1] == index1,
@@ -1836,6 +1884,10 @@ def npy_transpose() -> Term: ...
 
 @function
 def npy_matmul() -> Term: ...
+
+
+@function
+def npy_copy() -> Term: ...
 
 
 
@@ -2708,6 +2760,14 @@ class MlirBackend(_ch06_MlirBackend):
                 result = func.call((memref_type_out,), fname_getitem, [ary_val])
 
                 return result
+            case "NpyOp_Copy_Shaped<io, ary, shape>", (io, ary, shape):
+                io_val = (yield io)
+                ary_val = (yield ary)
+                element_type = ir.F64Type.get()
+                shape = TypeSpeller().apply(shape)
+                result = memref.alloc(ir.MemRefType.get(shape, element_type), [], [])
+                memref.copy(ary_val, result)
+                return io_val, result
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -3143,6 +3203,35 @@ def test_attention_getitem():
     cache_k = np.random.random((1, 256, 6, 48))
     # test compiler on llm use case
     _run_array_test(attention_getitem, (cache_k,))
+
+
+def attention_getitem_setitem(cache_k, xk, yk):
+    batch_size = 1
+    seq_len = 5
+    start_pos = 0
+
+    cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
+    # Copy is a synchronization point;
+    # with it, e.g:
+    #    ks = cache_k[:batch_size, : start_pos + seq_len]
+    # the getitem and + can be moved after the second setitem.
+    ks = np.copy(cache_k[:batch_size, : start_pos + seq_len])
+    q = ks + ks
+    cache_k[:batch_size, start_pos : start_pos + seq_len] = yk
+    kr = cache_k[:batch_size, : start_pos + seq_len]
+
+    return kr + q
+
+
+def test_attention_setitem_getitem_effect():
+    np.random.seed(0)
+
+    xk = np.random.random((1, 5, 6, 48))
+    yk = np.random.random((1, 5, 6, 48))
+    cache_k = np.random.random((1, 256, 6, 48))
+
+    # test compiler on llm use case
+    _run_array_test(attention_getitem_setitem, (cache_k, xk, yk))
 
 
 
