@@ -603,6 +603,35 @@ class Backend:
 
         return fn_name
 
+    def gen_array_expand_dims_shaped(self, module, in_shape, axes):
+        fn_name = self.gen_fn_name("expand_dims")
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type = MemRefType.get(in_shape, element_type)
+            result_shape = list(in_shape)
+            for i in sorted(axes):
+                result_shape.insert(i, 1)
+            dims = len(in_shape)
+
+            memref_type_res = MemRefType.get(result_shape, element_type)
+            func_type = FunctionType.get([memref_type], [memref_type_res])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                reassociation = Backend.build_mlir_reassociation(dims, axes)
+                res = memref.expand_shape(memref_type_res,
+                    func_op.arguments[0],
+                    reassociation=reassociation,
+                    output_shape=[], # [2, 3, 4]
+                    static_output_shape=DenseI64ArrayAttr.get(result_shape) # [dyn, dyn, 1, dyn, 1]
+                )
+                func.ReturnOp([res])
+
+        return fn_name
+
     def gen_array_argmax(self, module, dims, axis):
         fn_name = self.gen_fn_name("argmax")
 
@@ -706,6 +735,63 @@ class Backend:
 
         return fn_name
 
+    def gen_array_matmul_shaped(self, module, lhs_shape, rhs_shape, out_shape):
+        fn_name = self.gen_fn_name("matmul")
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type_lhs = MemRefType.get(lhs_shape, element_type)
+            memref_type_rhs = MemRefType.get(rhs_shape, element_type)
+            memref_type_out = MemRefType.get(out_shape, element_type)
+            func_type = FunctionType.get([memref_type_lhs, memref_type_rhs], [memref_type_out])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+            dims = len(out_shape)
+
+            with InsertionPoint(func_op.add_entry_block()):
+                a, b, = func_op.arguments
+
+                total_dims = dims + 1
+
+                batch_exprs = [AffineExpr.get_dim(i) for i in range(dims - 2)]
+                m_expr = AffineExpr.get_dim(dims - 2)  # M dimension
+                n_expr = AffineExpr.get_dim(dims - 1)  # N dimension
+                k_expr = AffineExpr.get_dim(dims)      # K dimension (reduction)
+
+                map_a = AffineMap.get(total_dims, 0, batch_exprs + [m_expr, k_expr])
+                map_b = AffineMap.get(total_dims, 0, batch_exprs + [k_expr, n_expr])
+                map_c = AffineMap.get(total_dims, 0, batch_exprs + [m_expr, n_expr])
+
+                indexing_maps = ArrayAttr.get([
+                    AffineMapAttr.get(map_a),
+                    AffineMapAttr.get(map_b),
+                    AffineMapAttr.get(map_c)
+                ])
+
+                iterator_types = ArrayAttr.get([
+                    StringAttr.get("parallel") for _ in range(dims - 1)  # batch + M + N
+                ] + [StringAttr.get("reduction")])  # K
+
+                out = memref.alloc(memref_type_out, [], [])
+
+                generic_op = linalg.generic(
+                    inputs=[a, b], outputs=[out], result_tensors=[],
+                    indexing_maps=indexing_maps,
+                    iterator_types=iterator_types
+                )
+
+                block = generic_op.regions[0].blocks.append(element_type, element_type, element_type)
+                with InsertionPoint(block):
+                    a_val, b_val, acc_val = block.arguments
+                    mul = arith.mulf(a_val, b_val)
+                    add = arith.addf(acc_val, mul)
+                    linalg.yield_([add])
+
+                func.ReturnOp([out])
+
+        return fn_name
+
     def gen_array_transpose(self, module, dims, permutation = None, dtype = None):
         fn_name = self.gen_fn_name("transpose")
 
@@ -724,6 +810,31 @@ class Backend:
                 input_memref, output_memref = func_op.arguments
                 linalg.transpose(input_memref, outs=[output_memref], permutation=permutation)
                 func.ReturnOp([])
+
+        return fn_name
+
+    def gen_array_transpose_shaped(self, module, in_shape, permutation = None, dtype = None):
+        fn_name = self.gen_fn_name("transpose")
+
+        if permutation is None:
+            permutation=[i for i in range(len(in_shape)).__reversed__()]
+
+        out_shape = [in_shape[i] for i in permutation]
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type_in = MemRefType.get(in_shape, element_type)
+            memref_type_out = MemRefType.get(out_shape, element_type)
+            func_type = FunctionType.get([memref_type_in], [memref_type_out])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                input_memref, = func_op.arguments
+                output_memref = memref.alloc(memref_type_out, [], [])
+                linalg.transpose(input_memref, outs=[output_memref], permutation=permutation)
+                func.ReturnOp([output_memref])
 
         return fn_name
 
@@ -833,6 +944,85 @@ class Backend:
         return fn_name
 
     def gen_array_getitem(self, module, dims, indices):
+        fn_name = self.gen_fn_name("getitem")
+        assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
+        if len(indices) < dims:
+            indices = list(indices) + ([None] * (dims - len(indices)))
+
+        out_shape = [ShapedType.get_dynamic_size()] * dims
+        offsets = [0] * dims
+        strides = [1] * dims
+        out_strides = [ShapedType.get_dynamic_stride_or_offset()] * dims
+        modified_axes = []
+
+        for axis, index in enumerate(indices):
+            if index is None:
+                continue
+            elif isinstance(index, int):
+                out_shape[index] = 1
+                # out_strides[index] = 1
+                offsets[axis] = index
+                modified_axes.append(axis)
+            elif isinstance(index, slice):
+                index_start = index.start if index.start is not None else 0
+                index_step = index.step if index.step is not None else 1
+                index_stop = 0
+                if index.stop is None:
+                    raise ValueError("Slices with undefined stop not supported")
+                else:
+                    index_stop = index.stop
+
+                out_shape[axis] = (index_stop - index_start) // index_step
+                # out_strides[axis] = index_step
+                offsets[axis] = index_start
+                modified_axes.append(axis)
+            else:
+                raise TypeError(f"Unknown index type {type(index)}")
+
+        out_strides[-1] = 1
+
+        first_offset = 0
+        for offset in offsets:
+            if offset != 0:
+                first_offset = offset
+                break
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            index_type = IndexType.get()
+            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
+            memref_type_out = MemRefType.get(out_shape, element_type, layout=StridedLayoutAttr.get(first_offset, out_strides))
+            func_type = FunctionType.get([memref_type, memref_type_out], [])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                input_memref, output_memref = func_op.arguments
+
+                sizes = [memref.dim(func_op.arguments[0], arith.constant(index_type, i)) for i in range(dims)]
+                for mod in modified_axes:
+                    sizes.pop(mod)
+
+                subview = memref.SubViewOp(
+                    memref_type_out,
+                    input_memref,
+                    offsets=[],
+                    sizes=sizes,
+                    strides=[],
+                    static_offsets=DenseI64ArrayAttr.get(offsets),
+                    static_sizes=DenseI64ArrayAttr.get(out_shape),
+                    static_strides=DenseI64ArrayAttr.get(strides)
+                ).result
+
+                memref.copy(subview, output_memref)
+
+                func.ReturnOp([])
+
+        return fn_name
+
+
+    def gen_array_getitem_shaped(self, module, in_shape, out_shape, indices):
         fn_name = self.gen_fn_name("getitem")
         assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
         if len(indices) < dims:

@@ -2580,7 +2580,17 @@ class MlirBackend(_ch06_MlirBackend):
                 in_shape = TypeSpeller.apply(inshape)
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
-                raise TodoException(f"np.transpose {in_shape} {out_shape}")
+                fname_transpose = be.gen_array_transpose_shaped(self.module, in_shape)
+                fn_transpose = self._get_func_by_name(fname_transpose)
+
+                [src_type_1] = fn_transpose.type.inputs
+
+                element_type = src_type_1.element_type
+                memref_type_out = ir.MemRefType.get(out_shape, element_type)
+
+                result = func.call((memref_type_out,), fname_transpose, [ary_val])
+
+                return result
 
             case "NpyOp_Transpose_Shaped_explicit<array, inshape, reorder, outshape>", (ary, inshape, reorder, outshape):
                 # This is implementing np.transpose(ary)
@@ -2588,7 +2598,17 @@ class MlirBackend(_ch06_MlirBackend):
                 out_shape = TypeSpeller.apply(outshape)
                 reorder = TypeSpeller.apply(reorder)
                 ary_val = (yield ary)
-                raise TodoException(f"np.transpose({reorder}) {in_shape} {out_shape}")
+                fname_transpose = be.gen_array_transpose_shaped(self.module, in_shape, reorder)
+                fn_transpose = self._get_func_by_name(fname_transpose)
+
+                [src_type_1] = fn_transpose.type.inputs
+
+                element_type = src_type_1.element_type
+                memref_type_out = ir.MemRefType.get(out_shape, element_type)
+
+                result = func.call((memref_type_out,), fname_transpose, [ary_val])
+
+                return result
 
             case "NpyOp_MatMul_Shaped<lhs, rhs, lhs_shape, rhs_shape, out_shape>", (lhs, rhs, lhs_shape, rhs_shape, out_shape):
                 # np.matmul
@@ -2597,7 +2617,33 @@ class MlirBackend(_ch06_MlirBackend):
                 lhs_shape = TypeSpeller.apply(lhs_shape)
                 rhs_shape = TypeSpeller.apply(rhs_shape)
                 out_shape = TypeSpeller.apply(out_shape)
-                raise TodoException(f"np.matmul {lhs_shape} x {rhs_shape} = {out_shape}")
+
+                if len(lhs_shape) != len(rhs_shape):
+                    if len(lhs_shape) > len(rhs_shape):
+                        exp_name = be.gen_array_expand_dims_shaped(self.module, rhs_shape, [i for i in range(len(lhs_shape)-len(rhs_shape))])
+                        rhs_shape = [1] * (len(lhs_shape) - len(rhs_shape)) + list(rhs_shape)
+
+                        rhs_type_new = ir.MemRefType.get(rhs_shape, self._get_func_by_name(exp_name).type.inputs[0].element_type)
+                        rhs_val = func.call((rhs_type_new,), exp_name, [rhs_val])
+                        
+                    else:
+                        exp_name = be.gen_array_expand_dims_shaped(self.module, lhs_shape, [i for i in range(len(rhs_shape)-len(lhs_shape))])
+                        lhs_shape = [1] * (len(rhs_shape) - len(lhs_shape)) + list(lhs_shape)
+
+                        lhs_type_new = ir.MemRefType.get(lhs_shape, self._get_func_by_name(exp_name).type.inputs[0].element_type)
+                        lhs_val = func.call((lhs_type_new,), exp_name, [lhs_val])
+
+                fname_matmul = be.gen_array_matmul_shaped(self.module, lhs_shape, rhs_shape, out_shape)
+                fn_matmul = self._get_func_by_name(fname_matmul)
+
+                [src_type_1, src_type_2] = fn_matmul.type.inputs
+
+                element_type = src_type_1.element_type
+                memref_type_out = ir.MemRefType.get(out_shape, element_type)
+
+                result = func.call((memref_type_out,), fname_matmul, [lhs_val, rhs_val])
+
+                return result
 
             case "NpyOp_SetitemIO_Shaped_2d_index<io, ary, value, ishape, index0, index1>", (_, ary, value, ishape, index0, index1):
                 index0 = TypeSpeller().apply(index0)
@@ -2965,7 +3011,6 @@ def attention_transpose(q_weight):
     return q_weight
 
 
-@pytest.mark.xfail(raises=TodoException)
 def test_attention_transpose():
     # Testing for:
     #   q_weight, k_weight, v_weight, o_weight = [w.T for w in attn_weights]
@@ -2986,7 +3031,6 @@ def attention_transpose_2(xq):
     return np.transpose(xq, (0, 2, 1, 3))
 
 
-@pytest.mark.xfail(raises=TodoException)
 def test_attention_transpose_2():
     # Usecase
     #   xq = xq.transpose(0, 2, 1, 3)
@@ -3001,7 +3045,6 @@ def attention_matmul(x, q_weight):
     return np.matmul(x, q_weight)
 
 
-@pytest.mark.xfail(raises=TodoException)
 def test_attention_matmul():
     # Testing for:
     #   x @ q_weight
@@ -3027,7 +3070,6 @@ def attention_setitem(cache_k, xk):
     return cache_k
 
 
-@pytest.mark.xfail(raises=TodoException)
 def test_attention_setitem():
     # Usecase:
     #   cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
@@ -3048,7 +3090,6 @@ def attention_getitem(cache_k):
     return ks
 
 
-@pytest.mark.xfail(raises=TodoException)
 def test_attention_getitem():
     # Usecase:
     #   ks = cache_k[:batch_size, : start_pos + seq_len]
@@ -3123,6 +3164,8 @@ def main():
         print(desired)
     np.testing.assert_allclose(res, desired)
 
-if __name__ == "__main__":
-    # test_apply_rotary_emb()
-    main()
+test_attention_getitem()
+
+# if __name__ == "__main__":
+#     # test_apply_rotary_emb()
+#     main()
