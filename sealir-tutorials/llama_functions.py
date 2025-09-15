@@ -774,6 +774,8 @@ class Backend:
                 ] + [StringAttr.get("reduction")])  # K
 
                 out = memref.alloc(memref_type_out, [], [])
+                zero = arith.ConstantOp(element_type, 0.0)
+                linalg.fill(zero, outs=[out])
 
                 generic_op = linalg.generic(
                     inputs=[a, b], outputs=[out], result_tensors=[],
