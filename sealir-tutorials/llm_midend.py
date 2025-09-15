@@ -261,122 +261,124 @@ def ruleset_more_constant_folding(x: i64, y: i64, io: Term, res: Term):
 
 
 @function(cost=1000)
-def NpyOp_Sum(operand: Term, axis: i64Like, keepdims: BoolLike) -> Term: ...
+def NpyOp_Sum(io: Term, operand: Term, axis: i64Like, keepdims: BoolLike) -> Term: ...
 
 @function
-def NpyOp_Sum_Shaped(operand: Term, axis: i64Like, keepdims: BoolLike,
+def NpyOp_Sum_Shaped(io: Term, operand: Term, axis: i64Like, keepdims: BoolLike,
                      inshape: Shape, outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
-def NpyOp_Max(operand: Term, axis: i64Like, keepdims: BoolLike) -> Term: ...
+def NpyOp_Max(io: Term, operand: Term, axis: i64Like, keepdims: BoolLike) -> Term: ...
 
 @function
-def NpyOp_Max_Shaped(operand: Term, axis: i64Like, keepdims: BoolLike,
+def NpyOp_Max_Shaped(io: Term, operand: Term, axis: i64Like, keepdims: BoolLike,
                      inshape: Shape, outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
-def NpyOp_Exp(operand: Term) -> Term: ...
+def NpyOp_Exp(io: Term, operand: Term) -> Term: ...
 
 @function
-def NpyOp_Exp_Shaped(operand: Term, inshape: Shape, outshape: Shape) -> Term: ...
+def NpyOp_Exp_Shaped(io: Term, operand: Term, inshape: Shape, outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
-def NpyOp_Add(lhs: Term, rhs: Term) -> Term: ...
+def NpyOp_Add(io: Term, lhs: Term, rhs: Term) -> Term: ...
 
 
 @function
-def NpyOp_Add_Shaped(lhs: Term, rhs: Term,
+def NpyOp_Add_Shaped(io: Term,
+                     lhs: Term, rhs: Term,
                      lhs_shape: Shape, rhs_shape: Shape,
                      outshape: Shape) -> Term: ...
 
 
 
 @function(cost=1000)
-def NpyOp_Subtract(lhs: Term, rhs: Term) -> Term: ...
+def NpyOp_Subtract(io: Term, lhs: Term, rhs: Term) -> Term: ...
 
 
 @function
-def NpyOp_Subtract_Shaped(lhs: Term, rhs: Term,
+def NpyOp_Subtract_Shaped(io: Term, lhs: Term, rhs: Term,
                           lhs_shape: Shape, rhs_shape: Shape,
                           outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
-def NpyOp_Multiply(lhs: Term, rhs: Term) -> Term: ...
+def NpyOp_Multiply(io: Term, lhs: Term, rhs: Term) -> Term: ...
 
 
 @function
-def NpyOp_Multiply_Shaped(lhs: Term, rhs: Term,
+def NpyOp_Multiply_Shaped(io: Term, lhs: Term, rhs: Term,
                           lhs_shape: Shape, rhs_shape: Shape,
                           outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
-def NpyOp_Divide(lhs: Term, rhs: Term) -> Term: ...
+def NpyOp_Divide(io: Term, lhs: Term, rhs: Term) -> Term: ...
 
 @function
-def NpyOp_Divide_Shaped(lhs: Term, rhs: Term,
+def NpyOp_Divide_Shaped(io: Term, lhs: Term, rhs: Term,
                         lhs_shape: Shape, rhs_shape: Shape,
                         outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
-def NpyOp_Reshape(ary: Term, src_nd: i64Like, new_shape: Term) -> Term: ...
+def NpyOp_Reshape(io: Term, ary: Term, src_nd: i64Like, new_shape: Term) -> Term: ...
 
 
 @function
-def NpyOp_Reshape_Shaped(ary: Term, src_nd: i64Like, inshape: Shape, outshape: Shape) -> Term: ...
+def NpyOp_Reshape_Shaped(io: Term, ary: Term, src_nd: i64Like, inshape: Shape, outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
-def NpyOp_Take_one_index(ary: Term, index: i64Like, axis: i64Like) -> Term: ...
+def NpyOp_Take_one_index(io: Term, ary: Term, index: i64Like, axis: i64Like) -> Term: ...
 
 @function
-def NpyOp_Take_Shaped_one_index(ary: Term, index: i64Like, axis: i64Like, src_nd: i64Like, inshape: Shape, outshape: Shape) -> Term: ...
+def NpyOp_Take_Shaped_one_index(io: Term, ary: Term, index: i64Like, axis: i64Like, src_nd: i64Like, inshape: Shape, outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
-def NpyOp_Broadcast_To(ary: Term, shape: Term) -> Term: ...
+def NpyOp_Broadcast_To(io: Term, ary: Term, shape: Term) -> Term: ...
 
 
 @function
-def NpyOp_Broadcast_To_Shaped(ary: Term, inshape: Shape, outshape: Shape) -> Term: ...
+def NpyOp_Broadcast_To_Shaped(io: Term, ary: Term, inshape: Shape, outshape: Shape) -> Term: ...
 
 
 @function(cost=10000)
-def NpyOp_Stack_2(ary1: Term, ary2: Term, axis: i64Like) -> Term: ...
+def NpyOp_Stack_2(io: Term, ary1: Term, ary2: Term, axis: i64Like) -> Term: ...
 
 
 @function
-def NpyOp_Stack_2_Shaped(ary1: Term, ary2: Term, axis: i64Like, inshape: Shape, outshape: Shape) -> Term: ...
+def NpyOp_Stack_2_Shaped(io: Term, ary1: Term, ary2: Term, axis: i64Like, inshape: Shape, outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
-def NpyOp_Transpose_simple(array: Term) -> Term: ...
+def NpyOp_Transpose_simple(io: Term, array: Term) -> Term: ...
 
 
 @function
-def NpyOp_Transpose_Shaped_simple(array: Term, inshape: Shape, outshape: Shape) -> Term: ...
+def NpyOp_Transpose_Shaped_simple(io: Term, array: Term, inshape: Shape, outshape: Shape) -> Term: ...
 
 
 @function(cost=1000)
-def NpyOp_Transpose_explicit(array: Term, reorder: TermList, outshape: Shape) -> Term: ...
+def NpyOp_Transpose_explicit(io: Term, array: Term, reorder: TermList, outshape: Shape) -> Term: ...
 
 
 @function
-def NpyOp_Transpose_Shaped_explicit(array: Term, inshape: Shape, reorder: TermList, outshape: Shape) -> Term: ...
+def NpyOp_Transpose_Shaped_explicit(io: Term, array: Term, inshape: Shape, reorder: TermList, outshape: Shape) -> Term: ...
 
 
 
 @function(cost=1000)
-def NpyOp_MatMul(lhs: Term, rhs: Term) -> Term: ...
+def NpyOp_MatMul(io: Term, lhs: Term, rhs: Term) -> Term: ...
 
 
 @function
 def NpyOp_MatMul_Shaped(
+    io: Term,
     lhs: Term, rhs: Term,
     lhs_shape: Shape, rhs_shape: Shape,
     out_shape: Shape,
@@ -565,15 +567,15 @@ class NumPyRules:
             kwargs.lookup("keepdims"), kwargs.lookup("axis")
         )
         yield rewrite(callee.getPort(1)).to(
-            op_constructor(args[0], axis=axis_val, keepdims=keepdims_val),
+            op_constructor(io, args[0], axis=axis_val, keepdims=keepdims_val),
             # conditions
             Term.LiteralI64(axis_val) == kwargs.get("axis"),
             Term.LiteralBool(keepdims_val) == kwargs.get("keepdims"),
         )
-        # make it pure
+        # No effect on the output
         yield rewrite(callee.getPort(0)).to(io)
         yield rule(
-            res == op_constructor(obj, axis=axis_val, keepdims=keepdims_val),
+            res == op_constructor(io, obj, axis=axis_val, keepdims=keepdims_val),
             intype == TypeVar(obj).getType(),
             intype == arrdesc.toType(),
         ).then(
@@ -586,7 +588,7 @@ class NumPyRules:
         # make it shape specialized
         if op_con_special is not None:
             yield rule(
-                res == op_constructor(obj, axis=axis_val, keepdims=keepdims_val),
+                res == op_constructor(io, obj, axis=axis_val, keepdims=keepdims_val),
                 arrdesc.toType() == TypeVar(res).getType(),
                 in_ad.toType() == TypeVar(obj).getType(),
                 nd == arrdesc.ndim,
@@ -594,6 +596,7 @@ class NumPyRules:
             ).then(
                 union(res).with_(
                     op_con_special(
+                        io,
                         obj,
                         axis=axis_val,
                         keepdims=keepdims_val,
@@ -627,12 +630,13 @@ class NumPyRules:
             lhs == arg_vector[0],
             rhs == arg_vector[1],
         ).then(
+            # No output effect
             union(the_call.getPort(0)).with_(io),
-            union(the_call.getPort(1)).with_(op_constructor(lhs, rhs)),
+            union(the_call.getPort(1)).with_(op_constructor(io, lhs, rhs)),
         )
         # Typing and broadcasting
         yield rule(
-            res == op_constructor(lhs, rhs),
+            res == op_constructor(io, lhs, rhs),
             lhs_arraydesc.toType() == TypeVar(lhs).getType(),
             rhs_arraydesc.toType() == TypeVar(rhs).getType(),
         ).then(
@@ -641,7 +645,7 @@ class NumPyRules:
             )
         )
         yield rule(
-            res == op_constructor(lhs, rhs),
+            res == op_constructor(io, lhs, rhs),
             lhs_arraydesc.toType() == TypeVar(lhs).getType(),
             rhs_arraydesc.toType() == TypeVar(rhs).getType(),
             res_arraydesc.toType() == TypeVar(res).getType(),
@@ -654,7 +658,7 @@ class NumPyRules:
         )
         if op_con_special is not None:
             yield rule(
-                res == op_constructor(lhs, rhs),
+                res == op_constructor(io, lhs, rhs),
                 res_arraydesc.toType() == TypeVar(res).getType(),
                 lhs_arraydesc.toType() == TypeVar(lhs).getType(),
                 rhs_arraydesc.toType() == TypeVar(rhs).getType(),
@@ -663,7 +667,7 @@ class NumPyRules:
             ).then(
                 union(res).with_(
                     op_con_special(
-                        lhs, rhs,
+                        io, lhs, rhs,
                         lhs_shape=Shape.from_arraydesc(lhs_arraydesc),
                         rhs_shape=Shape.from_arraydesc(rhs_arraydesc),
                         outshape=Shape.from_arraydesc(res_arraydesc),
@@ -694,18 +698,19 @@ class NumPyRules:
             arg_vector.length() == i64(1),
             operand == arg_vector[0],
         ).then(
+            # No output effect
             union(the_call.getPort(0)).with_(io),
-            union(the_call.getPort(1)).with_(op_constructor(operand)),
+            union(the_call.getPort(1)).with_(op_constructor(io, operand)),
         )
         # Typing and broadcasting
         yield rule(
-            res == op_constructor(operand),
+            res == op_constructor(io, operand),
             operand_arraydesc.toType() == TypeVar(operand).getType(),
         ).then(set_(TypeVar(res).getType()).to(operand_arraydesc.toType()))
 
         if op_con_special is not None:
             yield rule(
-                res == op_constructor(operand),
+                res == op_constructor(io, operand),
                 res_arraydesc.toType() == TypeVar(res).getType(),
                 in_ad.toType() == TypeVar(operand).getType(),
                 nd == res_arraydesc.ndim,
@@ -713,6 +718,7 @@ class NumPyRules:
             ).then(
                 union(res).with_(
                     op_con_special(
+                        io,
                         operand,
                         Shape.from_arraydesc(in_ad),
                         outshape=Shape.from_arraydesc(res_arraydesc),
@@ -780,17 +786,18 @@ class NumPyRules:
             kwargs.lookup("axis"), args[1]
         )
         yield rewrite(callee.getPort(1)).to(
-            NpyOp_Take_one_index(args[0], index_val, axis=axis_val),
+            NpyOp_Take_one_index(io, args[0], index_val, axis=axis_val),
             # when
             Term.LiteralI64(axis_val) == kwargs.get("axis"),
             Term.LiteralI64(index_val) == args[1],
         )
-        # make it pure
+        # No output effect.
+        # e.g. np.take() returns a copy
         yield rewrite(callee.getPort(0)).to(io)
 
         # Typing & Shaping
         yield rule(
-            res == NpyOp_Take_one_index(obj, index_val, axis=-1),
+            res == NpyOp_Take_one_index(io, obj, index_val, axis=-1),
             TypeVar(obj).getType() == ArrayType(ndim, dtype, shape, layout).toType(),
             shape == Shape.from_list(dimVec)
         ).then(
@@ -805,11 +812,11 @@ class NumPyRules:
         )
         # promote
         yield rule(
-            res == NpyOp_Take_one_index(obj, index_val, axis_val),
+            res == NpyOp_Take_one_index(io, obj, index_val, axis_val),
             TypeVar(res).getType() == ArrayType(_wc(i64), _wc(Type), shape, _wc(DataLayout)).toType(),
             TypeVar(obj).getType() == ArrayType(ndim, _wc(Type), inshape, _wc(DataLayout)).toType(),
         ).then(
-            union(res).with_(NpyOp_Take_Shaped_one_index(obj, index_val, axis_val, ndim, inshape, shape))
+            union(res).with_(NpyOp_Take_Shaped_one_index(io, obj, index_val, axis_val, ndim, inshape, shape))
         )
 
     @staticmethod
@@ -835,9 +842,10 @@ class NumPyRules:
             ),
             argVec.length() == i64(2),
         ).then(
+            # No output effect
             union(call.getPort(0)).with_(io),
             union(call.getPort(1)).with_(
-                NpyOp_Broadcast_To(argVec[0], argVec[1]),
+                NpyOp_Broadcast_To(io, argVec[0], argVec[1]),
             ),
         )
 
@@ -848,11 +856,11 @@ class NumPyRules:
         ).to(
             _shape_from_tuple(termVec).toTuple(),
             # when
-            NpyOp_Broadcast_To(obj, shape_tup),
+            NpyOp_Broadcast_To(io, obj, shape_tup),
         )
 
         yield rule(
-            res == NpyOp_Broadcast_To(obj, shape_tup),
+            res == NpyOp_Broadcast_To(io, obj, shape_tup),
             TypeVar(obj).getType() == ad.toType(),  # obj is an array
             shape == Shape.from_list(dimVec),
             shape_tup == shape.toTuple(),
@@ -869,9 +877,9 @@ class NumPyRules:
         )
         # promote
         yield rewrite(
-            NpyOp_Broadcast_To(obj, shape_tup),
+            NpyOp_Broadcast_To(io, obj, shape_tup),
         ).to(
-            NpyOp_Broadcast_To_Shaped(obj, Shape.from_arraydesc(in_ad), shape),
+            NpyOp_Broadcast_To_Shaped(io, obj, Shape.from_arraydesc(in_ad), shape),
             # when
             shape == Shape.from_list(dimVec),
             in_ad.toType() == TypeVar(obj).getType(),
@@ -906,14 +914,14 @@ class NumPyRules:
             kwargs.lookup("axis"), args[0]
         )
         yield rewrite(callee.getPort(1)).to(
-            NpyOp_Stack_2(ary1, ary2, axis=axis_val),
+            NpyOp_Stack_2(io, ary1, ary2, axis=axis_val),
             # when
             Term.LiteralI64(axis_val) == kwargs.get("axis"),
             args[0] == Py_Tuple(TermList(arrayVec)),
             ary1 == arrayVec[0],
             ary2 == arrayVec[1],
         )
-        # make it pure
+        # no output effect
         yield rewrite(callee.getPort(0)).to(io)
 
         # Typing & Shaping
@@ -925,7 +933,7 @@ class NumPyRules:
         def _shape_stack_at_axis_normalized(dimVec1: Vec[Dim], dimVec2: Vec[Dim], axis_val: i64Like) -> Shape: ...
 
         yield rule(
-            res == NpyOp_Stack_2(ary1, ary2, axis=axis_val),
+            res == NpyOp_Stack_2(io, ary1, ary2, axis=axis_val),
             TypeVar(ary1).getType() == ArrayType(ndim, dtype, shape1, layout).toType(),
             TypeVar(ary2).getType() == ArrayType(ndim, dtype, shape2, layout).toType(),
             shape1 == Shape.from_list(dimVec1),
@@ -942,11 +950,11 @@ class NumPyRules:
             )
         )
         yield rewrite(res).to(
-            NpyOp_Stack_2_Shaped(ary1, ary2, axis_val,
+            NpyOp_Stack_2_Shaped(io, ary1, ary2, axis_val,
                                  Shape.from_arraydesc(ad1),
                                  shape1),
             # when
-            res == NpyOp_Stack_2(ary1, ary2, axis_val),
+            res == NpyOp_Stack_2(io, ary1, ary2, axis_val),
             ad1.toType() == TypeVar(ary1).getType(),
             TypeVar(res).getType() == ArrayType(_wc(i64), _wc(Type), shape1, _wc(DataLayout)).toType(),
         )
@@ -1021,11 +1029,12 @@ class NumPyRules:
             callee = Py_Call(func=npy_transpose(), io=io, args=TermList(argVec))
 
             yield rewrite(callee.getPort(1)).to(
-                NpyOp_Transpose_simple(arg_array),
+                NpyOp_Transpose_simple(io, arg_array),
                 # when
                 arg_array == argVec[0],
                 i64(1) == argVec.length(),
             )
+            # No output effect
             yield rewrite(callee.getPort(0)).to(io)
 
             # Typing & Shaping
@@ -1034,7 +1043,7 @@ class NumPyRules:
             def _shape_transpose(dimVec: Vec[Dim]) -> Shape: ...
 
             yield rule(
-                res == NpyOp_Transpose_simple(arg_array),
+                res == NpyOp_Transpose_simple(io, arg_array),
                 TypeVar(arg_array).getType() == ArrayType(ndim, dtype, shape, layout).toType(),
                 shape == Shape.from_list(dimVec),
             ).then(
@@ -1045,9 +1054,9 @@ class NumPyRules:
 
             # Specialization
             yield rewrite(res).to(
-                NpyOp_Transpose_Shaped_simple(arg_array, in_shape, out_shape),
+                NpyOp_Transpose_Shaped_simple(io, arg_array, in_shape, out_shape),
                 # when
-                res == NpyOp_Transpose_simple(arg_array),
+                res == NpyOp_Transpose_simple(io, arg_array),
                 TypeVar(arg_array).getType() == ArrayType(ndim, dtype, in_shape, layout).toType(),
                 TypeVar(res).getType() == ArrayType(ndim, dtype, out_shape, layout).toType(),
             )
@@ -1101,7 +1110,7 @@ class NumPyRules:
             def _shape_reorder(dimVec: Vec[Dim], termVec: Vec[Term]) -> Shape: ...
 
             yield rewrite(callee.getPort(1)).to(
-                NpyOp_Transpose_explicit(arg_array, TermList(termVec), _shape_reorder(dimVec, termVec)),
+                NpyOp_Transpose_explicit(io, arg_array, TermList(termVec), _shape_reorder(dimVec, termVec)),
                 # when
                 TypeVar(arg_array).getType() == ArrayType(_wc(i64), _wc(Type), in_shape, _wc(DataLayout)).toType(),
                 arg_array == argVec[0],
@@ -1112,13 +1121,13 @@ class NumPyRules:
 
             # Typing & Shaping
             yield rule(
-                res == NpyOp_Transpose_explicit(arg_array, TermList(termVec), out_shape),
+                res == NpyOp_Transpose_explicit(io, arg_array, TermList(termVec), out_shape),
                 TypeVar(arg_array).getType() == ArrayType(ndim, dtype, in_shape, _wc(DataLayout)).toType(),
             ).then(
                 set_(TypeVar(res).getType()).to(
                     ArrayType(ndim, dtype, out_shape, DataLayout.strided()).toType()
                 ),
-                union(res).with_(NpyOp_Transpose_Shaped_explicit(arg_array, in_shape, TermList(termVec), out_shape)),
+                union(res).with_(NpyOp_Transpose_Shaped_explicit(io, arg_array, in_shape, TermList(termVec), out_shape)),
             )
 
             # _shape_reorder
@@ -1169,12 +1178,13 @@ class NumPyRules:
             callee = Py_Call(func=npy_matmul(), io=io, args=TermList(argVec))
 
             yield rewrite(callee.getPort(1)).to(
-                NpyOp_MatMul(arg_lhs, arg_rhs),
+                NpyOp_MatMul(io, arg_lhs, arg_rhs),
                 # when
                 arg_lhs == argVec[0],
                 arg_rhs == argVec[1],
                 i64(2) == argVec.length(),
             )
+            # no output effect
             yield rewrite(callee.getPort(0)).to(io)
 
             # Typing & Shaping
@@ -1199,7 +1209,7 @@ class NumPyRules:
             ) -> Shape: ...
 
             yield rule(
-                res == NpyOp_MatMul(arg_lhs, arg_rhs),
+                res == NpyOp_MatMul(io, arg_lhs, arg_rhs),
                 TypeVar(arg_lhs).getType() == ArrayType(ndim_lhs, dtype, shape_lhs, layout_lhs).toType(),
                 TypeVar(arg_rhs).getType() == ArrayType(ndim_rhs, dtype, shape_rhs, layout_rhs).toType(),
             ).then(
@@ -1260,9 +1270,9 @@ class NumPyRules:
             yield rewrite(
                 res
             ).to(
-                NpyOp_MatMul_Shaped(arg_lhs, arg_rhs, shape_lhs, shape_rhs, shape),
+                NpyOp_MatMul_Shaped(io, arg_lhs, arg_rhs, shape_lhs, shape_rhs, shape),
                 # when
-                res == NpyOp_MatMul(arg_lhs, arg_rhs),
+                res == NpyOp_MatMul(io, arg_lhs, arg_rhs),
                 TypeVar(res).getType() == ArrayType(_wc(i64), _wc(Type), shape, _wc(DataLayout)).toType(),
                 TypeVar(arg_lhs).getType() == ArrayType(_wc(i64), _wc(Type), shape_lhs, _wc(DataLayout)).toType(),
                 TypeVar(arg_rhs).getType() == ArrayType(_wc(i64), _wc(Type), shape_rhs, _wc(DataLayout)).toType(),
@@ -1318,8 +1328,8 @@ def ruleset_numpy_reshape(
         TypeVar(ary).getType() == ad.toType(),
         ndim == ad.ndim,
     ).then(
-        union(target.getPort(1)).with_(NpyOp_Reshape(ary, ndim, args[0])),
-        # shortcut io
+        union(target.getPort(1)).with_(NpyOp_Reshape(io, ary, ndim, args[0])),
+        # has output effect because it returns a view
         union(target.getPort(0)).with_(io),
         union(target.getPort(0)).with_(callee.getPort(0)),
     )
@@ -1327,9 +1337,9 @@ def ruleset_numpy_reshape(
     yield rewrite(
         target
     ).to(
-        NpyOp_Reshape_Shaped(ary, ndim, Shape.from_arraydesc(ad), shape),
+        NpyOp_Reshape_Shaped(io, ary, ndim, Shape.from_arraydesc(ad), shape),
         # when
-        target == NpyOp_Reshape(ary, ndim, _wc(Term)),
+        target == NpyOp_Reshape(io, ary, ndim, _wc(Term)),
         TypeVar(target).getType() == ArrayType(_wc(i64), _wc(Type), shape, _wc(DataLayout)).toType(),
         TypeVar(ary).getType() == ad.toType(),
     )
@@ -1341,7 +1351,7 @@ def ruleset_numpy_reshape(
     def _norm_shape_step(shape: Shape, size: i64Like, out_shape: Shape) -> Shape: ...
 
     yield rule(
-        target == NpyOp_Reshape(ary, _wc(i64), new_shape.toTuple()),
+        target == NpyOp_Reshape(io, ary, _wc(i64), new_shape.toTuple()),
         TypeVar(new_shape.toTuple()).getType() == TypeTuple(ndim),
         ArrayType(_wc(i64), dtype, old_shape, layout).toType() == TypeVar(ary).getType(),
         size == old_shape.size,
@@ -1357,7 +1367,7 @@ def ruleset_numpy_reshape(
         ),
     )
     yield rule(
-        target == NpyOp_Reshape(ary, _wc(i64), new_shape.toTuple()),
+        target == NpyOp_Reshape(io, ary, _wc(i64), new_shape.toTuple()),
         TypeVar(new_shape.toTuple()).getType() == TypeTuple(ndim),
         ArrayType(_wc(i64), dtype, old_shape, layout).toType() == TypeVar(ary).getType(),
         size == old_shape.size,
@@ -1374,7 +1384,7 @@ def ruleset_numpy_reshape(
     )
 
     yield rule(
-        NpyOp_Reshape(ary, _wc(i64), Py_Tuple(TermList(termVec))),
+        NpyOp_Reshape(io, ary, _wc(i64), Py_Tuple(TermList(termVec))),
     ).then(
         union(Py_Tuple(TermList(termVec))).with_(_shape_from_tuple(termVec).toTuple())
     )
@@ -2457,45 +2467,53 @@ class MlirBackend(_ch06_MlirBackend):
         from mlir import ir
         be: LlamaBackend = self.codegen
         match op, operands:
-            case "NpyOp_Exp_Shaped<operand, inshape, outshape>", (operand, inshape, outshape):
+            case "NpyOp_Exp_Shaped<io, operand, inshape, outshape>", (io, operand, inshape, outshape):
+                (yield io)
                 operand = (yield operand)
                 result = self._gen_unary_ufunc(operand, inshape, outshape, op=math.exp)
                 return result
 
-            case "NpyOp_Add_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
+            case "NpyOp_Add_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
+                (yield io)
                 return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.addf)
 
-            case "NpyOp_Subtract_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
+            case "NpyOp_Subtract_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
+                (yield io)
                 return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.subf)
 
-            case "NpyOp_Multiply_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
+            case "NpyOp_Multiply_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
+                (yield io)
                 return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.mulf)
 
-            case "NpyOp_Divide_Shaped<lhs, rhs, lhs_shape, rhs_shape, outshape>", (lhs, rhs, lhs_shape, rhs_shape, outshape):
+            case "NpyOp_Divide_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
+                (yield io)
                 return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.divf)
 
-            case "NpyOp_Max_Shaped<operand, axis, keepdims, inshape, outshape>", (operand, axis, True, inshape, outshape):
+            case "NpyOp_Max_Shaped<io, operand, axis, keepdims, inshape, outshape>", (io, operand, axis, True, inshape, outshape):
                 # Implements np.max(operand, axis, keepdims=True)
+                (yield io)
                 op = arith.maximumf
                 opval = (yield operand)
                 oshape = TypeSpeller.apply(outshape)
                 ishape = TypeSpeller.apply(inshape)
                 return self._gen_reduce_ufunc(opval, axis, ishape, oshape, op=op)
 
-            case "NpyOp_Sum_Shaped<operand, axis, keepdims, inshape, outshape>", (operand, axis, True, inshape, outshape):
+            case "NpyOp_Sum_Shaped<io, operand, axis, keepdims, inshape, outshape>", (io, operand, axis, True, inshape, outshape):
                 op = arith.addf
                 opval = (yield operand)
                 oshape = TypeSpeller.apply(outshape)
                 ishape = TypeSpeller.apply(inshape)
                 return self._gen_reduce_ufunc(opval, axis, ishape, oshape, op=op)
 
-            case "NpyOp_Reshape_Shaped<ary, src_nd, inshape, outshape>", (ary, nd, inshape, outshape):
+            case "NpyOp_Reshape_Shaped<io, ary, src_nd, inshape, outshape>", (io, ary, nd, inshape, outshape):
+                (yield io)
                 ishape = TypeSpeller.apply(inshape)
                 oshape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
                 return self._gen_reshape(ary_val, ishape, oshape)
-            case "NpyOp_Take_Shaped_one_index<ary, index, axis, src_nd, inshape, outshape>", (ary, index, -1, src_nd, inshape, outshape):
+            case "NpyOp_Take_Shaped_one_index<io, ary, index, axis, src_nd, inshape, outshape>", (io, ary, index, -1, src_nd, inshape, outshape):
                 # This is implementing np.take(ary, index, axis=-1)
+                (yield io)
                 axis = -1
                 element_type = ir.F64Type.get()
                 ary_val = (yield ary)
@@ -2519,7 +2537,6 @@ class MlirBackend(_ch06_MlirBackend):
                     # Update stride for next outer dimension
                     current_stride *= dim
 
-
                 out_layout = ir.StridedLayoutAttr.get(index, calculated_strides)
                 memref_type_out = ir.MemRefType.get(sub_shape, element_type, layout=out_layout)
 
@@ -2541,23 +2558,31 @@ class MlirBackend(_ch06_MlirBackend):
                 reassoc = [[x] for x in range(len(sub_shape))]
                 reassoc_target = reassoc.pop(axis)
                 reassoc[axis].extend(reassoc_target)
-                return memref.CollapseShapeOp(
+                collapsed = memref.CollapseShapeOp(
                     src=subview,
                     result=result,
                     reassociation=reassoc,
                 ).result
 
-            case "NpyOp_Broadcast_To_Shaped<ary, inshape, outshape>", (ary, inshape, outshape):
+                # np.take returns a copy
+                copied = memref.alloc(ir.MemRefType.get(oshape, element_type), [], [])
+                memref.copy(collapsed, copied)
+                return copied
+
+
+            case "NpyOp_Broadcast_To_Shaped<io, ary, inshape, outshape>", (io, ary, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
                 # outshape is the shape of the output
+                (yield io)
                 in_shape = TypeSpeller.apply(inshape)
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
 
                 return self._gen_static_broadcast(ary_val, in_shape, out_shape)
 
-            case "NpyOp_Stack_2_Shaped<ary1, ary2, axis, inshape, outshape>", (ary1, ary2, axis, inshape, outshape):
+            case "NpyOp_Stack_2_Shaped<io, ary1, ary2, axis, inshape, outshape>", (io, ary1, ary2, axis, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
+                (yield io)
                 in_shape = TypeSpeller.apply(inshape)
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val_1 = (yield ary1)
@@ -2575,8 +2600,9 @@ class MlirBackend(_ch06_MlirBackend):
 
                 return result
 
-            case "NpyOp_Transpose_Shaped_simple<array, inshape, outshape>", (ary, inshape, outshape):
+            case "NpyOp_Transpose_Shaped_simple<io, array, inshape, outshape>", (io, ary, inshape, outshape):
                 # This is implementing np.transpose(ary)
+                (yield io)
                 in_shape = TypeSpeller.apply(inshape)
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
@@ -2592,8 +2618,9 @@ class MlirBackend(_ch06_MlirBackend):
 
                 return result
 
-            case "NpyOp_Transpose_Shaped_explicit<array, inshape, reorder, outshape>", (ary, inshape, reorder, outshape):
+            case "NpyOp_Transpose_Shaped_explicit<io, array, inshape, reorder, outshape>", (io, ary, inshape, reorder, outshape):
                 # This is implementing np.transpose(ary)
+                (yield io)
                 in_shape = TypeSpeller.apply(inshape)
                 out_shape = TypeSpeller.apply(outshape)
                 reorder = TypeSpeller.apply(reorder)
@@ -2610,8 +2637,9 @@ class MlirBackend(_ch06_MlirBackend):
 
                 return result
 
-            case "NpyOp_MatMul_Shaped<lhs, rhs, lhs_shape, rhs_shape, out_shape>", (lhs, rhs, lhs_shape, rhs_shape, out_shape):
+            case "NpyOp_MatMul_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, out_shape>", (io, lhs, rhs, lhs_shape, rhs_shape, out_shape):
                 # np.matmul
+                (yield io)
                 lhs_val = (yield lhs)
                 rhs_val = (yield rhs)
                 lhs_shape = TypeSpeller.apply(lhs_shape)
@@ -2625,7 +2653,7 @@ class MlirBackend(_ch06_MlirBackend):
 
                         rhs_type_new = ir.MemRefType.get(rhs_shape, self._get_func_by_name(exp_name).type.inputs[0].element_type)
                         rhs_val = func.call((rhs_type_new,), exp_name, [rhs_val])
-                        
+
                     else:
                         exp_name = be.gen_array_expand_dims_shaped(self.module, lhs_shape, [i for i in range(len(rhs_shape)-len(lhs_shape))])
                         lhs_shape = [1] * (len(rhs_shape) - len(lhs_shape)) + list(lhs_shape)
@@ -2645,7 +2673,8 @@ class MlirBackend(_ch06_MlirBackend):
 
                 return result
 
-            case "NpyOp_SetitemIO_Shaped_2d_index<io, ary, value, ishape, index0, index1>", (_, ary, value, ishape, index0, index1):
+            case "NpyOp_SetitemIO_Shaped_2d_index<io, ary, value, ishape, index0, index1>", (io, ary, value, ishape, index0, index1):
+                io_val = (yield io)
                 index0 = TypeSpeller().apply(index0)
                 index1 = TypeSpeller().apply(index1)
                 ishape = TypeSpeller().apply(ishape)
@@ -2653,9 +2682,9 @@ class MlirBackend(_ch06_MlirBackend):
                 value_val = (yield value)
 
                 fname_setitem = be.gen_array_setitem_shaped(self.module, ishape, (index0, index1))
-                res = func.call((), fname_setitem, [ary_val, value_val])
+                func.call((), fname_setitem, [ary_val, value_val])
 
-                return [res]
+                return (io_val,)
 
             case "NpyOp_GetitemIO_Shaped_2d_index<io, ary, ishape, index0, index1, oshape>", (_, ary, ishape, index0, index1, oshape):
                 index0 = TypeSpeller().apply(index0)
@@ -2670,7 +2699,7 @@ class MlirBackend(_ch06_MlirBackend):
 
                 element_type = src_type_1.element_type
                 dims = len(ishape)
-    
+
                 out_strides = [1] * dims
                 for i in range(dims-1,0,-1):
                     out_strides[i-1] = out_strides[i] * ishape[i]
