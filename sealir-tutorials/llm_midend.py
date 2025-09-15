@@ -3212,12 +3212,13 @@ def attention_getitem_setitem(cache_k, xk, yk):
 
     cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
     # Copy is a synchronization point;
-    # with it, e.g:
+    # without it, e.g:
     #    ks = cache_k[:batch_size, : start_pos + seq_len]
     # the getitem and + can be moved after the second setitem.
     ks = np.copy(cache_k[:batch_size, : start_pos + seq_len])
     q = ks + ks
     cache_k[:batch_size, start_pos : start_pos + seq_len] = yk
+    # the second setitem
     kr = cache_k[:batch_size, : start_pos + seq_len]
 
     return kr + q
