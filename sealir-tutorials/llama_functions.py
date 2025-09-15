@@ -1173,7 +1173,7 @@ class Backend:
         if len(indices) < dims:
             indices = list(indices) + ([None] * (dims - len(indices)))
 
-        val_shape = in_shape
+        val_shape = in_shape.copy()
         offsets = [0] * dims
         strides = [1] * dims
 
@@ -1204,12 +1204,13 @@ class Backend:
         out_strides = [1] * dims
 
         for i in range(dims-1,0,-1):
-            out_strides[i-1] = out_strides[i] * val_shape[i]
+            out_strides[i-1] = out_strides[i] * in_shape[i]
 
         with module.context, InsertionPoint(module.body), Location.unknown():
             element_type = F64Type.get()
             memref_type = MemRefType.get(in_shape, element_type)
-            memref_type_out = MemRefType.get(val_shape, element_type, layout=StridedLayoutAttr.get(0, out_strides))
+            memref_type_out = MemRefType.get(val_shape, element_type)
+            memref_type_subview = MemRefType.get(val_shape, element_type, layout=StridedLayoutAttr.get(0, out_strides))
             func_type = FunctionType.get([memref_type, memref_type_out], [])
 
             func_op = func.FuncOp(fn_name, func_type)
@@ -1219,7 +1220,7 @@ class Backend:
                 arr_memref, value_memref = func_op.arguments
 
                 subview = memref.SubViewOp(
-                    memref_type_out,
+                    memref_type_subview,
                     arr_memref,
                     offsets=[],
                     sizes=[],
