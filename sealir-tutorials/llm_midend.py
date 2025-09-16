@@ -17,6 +17,7 @@ from ch05_typeinfer_array import (
 from ch05_typeinfer_array import (
     Grammar,
     Int64,
+    NbOp_Type,
     NbOp_Base,
     TypeInt64,
     array_desc_rules,
@@ -62,6 +63,7 @@ from sealir.eqsat.py_eqsat import (
     Py_Tuple,
     Py_AddIO,
     Py_SetitemIO,
+    Py_FloorDivIO,
 )
 from sealir.eqsat.py_eqsat import make_rules as py_eqsat_rules
 from sealir.eqsat.rvsdg_eqsat import Term, TermDict, TermList, termlist, DynInt
@@ -251,6 +253,15 @@ def ruleset_more_constant_folding(x: i64, y: i64, io: Term, res: Term):
         res == Py_AddIO(io, Term.LiteralI64(x), Term.LiteralI64(y))
     ).then(
         union(res.getPort(1)).with_(Term.LiteralI64(x + y)),
+        union(res.getPort(0)).with_(io),
+    )
+
+    # FloorDiv
+
+    yield rule(
+        res == Py_FloorDivIO(io, Term.LiteralI64(x), Term.LiteralI64(y))
+    ).then(
+        union(res.getPort(1)).with_(Term.LiteralI64(x / y)),
         union(res.getPort(0)).with_(io),
     )
 
@@ -2108,7 +2119,6 @@ class TypeSpeller(ase.TreeVisitor):
         self.memo = {}
 
     def visit(self, expr: SExpr):
-        from ch04_1_typeinfer_ifelse import NbOp_Type
         memo = self.memo
         match expr:
             case rg.Generic(op, children):
@@ -2120,6 +2130,8 @@ class TypeSpeller(ase.TreeVisitor):
             # case LLM_generic(desc, operands):
             #     memo[expr] = r = self.visit_Generic(desc, tuple(map(lambda x: memo.get(x, x), operands)))
             #     assert r is not None
+            case NbOp_Type(str("Int64")):
+                memo[expr] = Int64
             case NbOp_Type(str(name)):
                 memo[expr] = name
             case rg.PyNone():
@@ -2176,7 +2188,7 @@ class StubBackend:
         beginnode = func.body.begin
         intypes = {}
         for argport in ase.search_parents(beginnode, lambda x: isinstance(x, rg.Unpack)):
-            print('   .parent', argport)
+            # print('   .parent', argport)
             idx = argport._args[1]
             annos = list(ase.search_parents(argport, lambda x: isinstance(x, rg.Generic) and x._args[0]=='Annotate'))
             if annos:
@@ -2264,7 +2276,7 @@ class MlirBackend(_ch06_MlirBackend):
             [arg_idx, ty] = argfact.children
             intypes[arg_idx] = TypeSpeller.apply(ty)
 
-        print(intypes)
+        pprint(intypes)
         ninports = len(beginnode.inports)
         assert len(intypes) == ninports - 1  # one extra for the IO
         self._argtys = tuple([intypes[i] for i in range(len(argfacts))])
@@ -2304,14 +2316,16 @@ class MlirBackend(_ch06_MlirBackend):
         return [self.lower_type_return(self._retty)]
 
     def lower_type(self, ty):
-        from mlir.ir import MemRefType, F64Type
+        from mlir.ir import MemRefType, F64Type, IntegerType
         if isinstance(ty, BeArrayType):
             # TODO: make this use static shape
             assert ty.dtype == "Float64"
-            with self.context:
-                with _mlir_location_from_frame():
-                    element_type = F64Type.get()
-                    return MemRefType.get(ty.shape, element_type)
+            with self.context, _mlir_location_from_frame():
+                element_type = F64Type.get()
+                return MemRefType.get(ty.shape, element_type)
+        elif ty == Int64:
+            with self.context, _mlir_location_from_frame():
+                return IntegerType.get_signless(64)
         else:
             return super().lower_type(ty)
 
@@ -2789,8 +2803,13 @@ class MlirBackend(_ch06_MlirBackend):
             # self._argtys and self._retty are from `.lower()`
             # TODO: ^ not good
             for aty in self._argtys:
-                assert aty.dtype == "Float64"
-                in_types.append(ir.MemRefType.get(aty.shape, element_type))
+                match aty:
+                    case BeArrayType(dtype="Float64") as aty:
+                        in_types.append(ir.MemRefType.get(aty.shape, element_type))
+                    case NbOp_Type("Int64"):
+                        in_types.append(ir.IntegerType.get_signless(64))
+                    case _:
+                        assert False
 
             aty = self._retty
             assert aty.dtype == "Float64"
@@ -2860,21 +2879,28 @@ def run_compiler(target_function, args):
     input_type_rules = []
 
     for i, a in enumerate(args):
-        assert a.dtype == np.float64
-        assert a.flags.c_contiguous
-        input_shapes.append(a.shape)
-        desc, eg_facts = array_desc_rules(
-            f"array_{i}", shape=a.shape, dtype=TypeFloat64, layout="c"
-        )
-        input_types.append(desc.toType())
-        input_type_rules.extend(eg_facts)
+        if isinstance(a, np.ndarray):
+            assert a.dtype == np.float64
+            assert a.flags.c_contiguous
+            input_shapes.append(a.shape)
+            desc, eg_facts = array_desc_rules(
+                f"array_{i}", shape=a.shape, dtype=TypeFloat64, layout="c"
+            )
+            input_types.append(desc.toType())
+            input_type_rules.extend(eg_facts)
 
-        # HACK
-        input_type_rules.append(rule(
-            desc.toType()
-        ).then(
-            ArgFact(i, desc.toType())
-        ))
+            # HACK
+            input_type_rules.append(rule(
+                desc.toType()
+            ).then(
+                ArgFact(i, desc.toType())
+            ))
+        elif isinstance(a, int):
+            input_types.append(TypeInt64)
+            input_type_rules.append(rule().then(ArgFact(i, TypeInt64)))
+        else:
+            raise TypeError(type(a))
+
 
     ruleset_array_facts = ruleset(*input_type_rules)
 
@@ -3235,6 +3261,109 @@ def test_attention_setitem_getitem_effect():
     _run_array_test(attention_getitem_setitem, (cache_k, xk, yk))
 
 
+def attention(
+    x, # shape = (1, 5, 288)
+    start_pos, # 0
+    mask, # shape = (5, 5)
+    freqs_cos, # shape = (5, 24)
+    freqs_sin, # shape = (5, 24)
+    attn_weights_q, # shape = (288, 288)
+    attn_weights_k, # shape = (288, 288)
+    attn_weights_v, # shape = (288, 288)
+    attn_weights_o, # shape = (288, 288)
+    cache_k, # shape = (1, 256, 6, 48)
+    cache_v, # shape = (1, 256, 6, 48)
+):
+    q_weight = np.transpose(attn_weights_q)
+    k_weight = np.transpose(attn_weights_k)
+    v_weight = np.transpose(attn_weights_v)
+    o_weight = np.transpose(attn_weights_o)
+
+    n_heads = 6
+    dims = 288
+    n_local_heads = n_heads # 6
+    head_dim = dims // n_heads # 288/ 6 = 48
+
+    batch_size = x.shape[0]
+    seq_len = x.shape[1]
+
+    # xq = x @ q_weight
+    # xk = x @ k_weight
+    # xv = x @ v_weight
+    xq = np.matmul(x, q_weight)
+    xk = np.matmul(x, k_weight)
+    xv = np.matmul(x, v_weight)
+
+    xq = xq.reshape((batch_size, seq_len, n_local_heads, head_dim))
+    xk = xk.reshape((batch_size, seq_len, n_local_heads, head_dim))
+    xv = xv.reshape((batch_size, seq_len, n_local_heads, head_dim))
+
+    # BEGIN inlined apply_rotary_emb()
+    xqri = xq.reshape(xq.shape[:-1] + (-1, 2))
+    xkri = xk.reshape(xk.shape[:-1] + (-1, 2))
+    # xq_r = xqri[..., 0]
+    xq_r = np.take(xqri, 0, axis=-1)
+    # xq_i = xqri[..., 1]
+    xq_i = np.take(xqri, 1, axis=-1)
+    # xk_r = xkri[..., 0]
+    xk_r = np.take(xkri, 0, axis=-1)
+    # xk_i = xkri[..., 1]
+    xk_i = np.take(xkri, 1, axis=-1)
+
+    # freqs_cos = np.broadcast_to(np.expand_dims(freqs_cos, axis=(0, 2)), (1, 5, 6, 24))
+    freqs_cos = np.broadcast_to(freqs_cos.reshape((1,) + (freqs_cos.shape[0],) + (1,) + (freqs_cos.shape[1],)), (1, 5, 6, 24))
+    # freqs_sin = np.broadcast_to(np.expand_dims(freqs_sin, axis=(0, 2)), (1, 5, 6, 24))
+    freqs_sin = np.broadcast_to(freqs_sin.reshape((1,) + (freqs_sin.shape[0],) + (1,) + (freqs_sin.shape[1],)), (1, 5, 6, 24))
+
+    xq_out_r = xq_r * freqs_cos - xq_i * freqs_sin
+    xq_out_i = xq_r * freqs_sin + xq_i * freqs_cos
+    xk_out_r = xk_r * freqs_cos - xk_i * freqs_sin
+    xk_out_i = xk_r * freqs_sin + xk_i * freqs_cos
+
+    # Combine real and imaginary parts
+    xq = np.stack((xq_out_r, xq_out_i), axis=-1).reshape(
+        xq_out_r.shape[:-1] + (-1,)
+    )
+    xk = np.stack((xk_out_r, xk_out_i), axis=-1).reshape(
+        xk_out_r.shape[:-1] + (-1,)
+    )
+    # END inlined apply_rotary_emb()
+
+    return xk
+
+
+
+def test_attention():
+    np.random.seed(0)
+
+    x = np.random.random((1, 5, 288))
+    mask = np.random.random((5, 5))
+    freqs_cos = np.random.random((5, 24))
+    freqs_sin = np.random.random((5, 24))
+    attn_weights_q = np.random.random((288, 288))
+    attn_weights_k = np.random.random((288, 288))
+    attn_weights_v = np.random.random((288, 288))
+    attn_weights_o = np.random.random((288, 288))
+    cache_k = np.random.random((1, 256, 6, 48))
+    cache_v = np.random.random((1, 256, 6, 48))
+
+    start_pos = 0
+    # test compiler on llm use case
+    _run_array_test(attention, (
+        x, # shape = (1, 5, 288)
+        start_pos, # 0
+        mask, # shape = (5, 5)
+        freqs_cos, # shape = (5, 24)
+        freqs_sin, # shape = (5, 24)
+        attn_weights_q, # shape = (288, 288)
+        attn_weights_k, # shape = (288, 288)
+        attn_weights_v, # shape = (288, 288)
+        attn_weights_o, # shape = (288, 288)
+        cache_k, # shape = (1, 256, 6, 48)
+        cache_v, # shape = (1, 256, 6, 48)
+    ))
+
+
 
 #######################################
 
@@ -3245,13 +3374,11 @@ def _run_array_unary_test(target_function, inary):
 
 
 def _run_array_test(target_function, args):
-
-
     desired = target_function(*args)
 
     try:
         cres = run_compiler(target_function, args)
-    finally:
+    except TodoException:
         # still try to test the shape output
         be = compiler_config["backend"]
         retty = be.get_last_compiled_return_type()
