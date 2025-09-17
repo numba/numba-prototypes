@@ -559,7 +559,9 @@ def pipeline_egraph_extraction(
     ) as report:
         stats = {}
         if display_egraph:
-            egraph.display()
+            # egraph.display()
+            from sealir.model_explorer.core import prepare_egraph, visualize_egraph
+            visualize_egraph(egraph, filepath="debug")
         try:
             # This is the same as ch4.1
             cost, extracted = egraph_extraction(
