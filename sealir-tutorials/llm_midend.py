@@ -941,8 +941,6 @@ class NumPyRules:
             Py_Tuple(TermList(termVec)),
         ).to(
             _shape_from_tuple(termVec).toTuple(),
-            # when
-            NpyOp_Broadcast_To(io, obj, shape_tup),
         )
 
         yield rule(
