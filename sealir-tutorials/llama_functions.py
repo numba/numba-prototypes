@@ -794,6 +794,40 @@ class Backend:
 
         return fn_name
 
+    def gen_inline_array_transpose(self, ary_val, permutation=None, dtype=None):
+        """Inline version of transpose that returns the transposed memref directly."""
+        # Get input shape information
+        input_type = ary_val.type
+        if not isinstance(input_type, MemRefType):
+            raise TypeError("Input must be a MemRef type")
+
+        in_shape = input_type.shape
+        dims = len(in_shape)
+
+        if permutation is None:
+            permutation = [i for i in range(dims).__reversed__()]
+
+        return self.gen_inline_array_transpose_shaped(ary_val, in_shape, permutation=permutation, dtype=dtype)
+
+    def gen_inline_array_transpose_shaped(self, ary_val, in_shape, permutation=None, dtype=None):
+        """Inline version of transpose_shaped that returns the transposed memref directly."""
+        if permutation is None:
+            permutation = [i for i in range(len(in_shape)).__reversed__()]
+
+        element_type = F64Type.get()
+        permutation = list(permutation)
+        out_shape = [in_shape[i] for i in permutation]
+
+        # Verify permutation dimensions match
+        for i, j in enumerate(permutation):
+            assert out_shape[i] == in_shape[j]
+
+        memref_type_out = MemRefType.get(out_shape, element_type)
+        output_memref = memref.alloc(memref_type_out, [], [])
+        linalg.transpose(ary_val, outs=[output_memref], permutation=permutation)
+
+        return output_memref
+
     def gen_array_transpose(self, module, dims, permutation = None, dtype = None):
         fn_name = self.gen_fn_name("transpose")
 
@@ -810,7 +844,9 @@ class Backend:
 
             with InsertionPoint(func_op.add_entry_block()):
                 input_memref, output_memref = func_op.arguments
-                linalg.transpose(input_memref, outs=[output_memref], permutation=permutation)
+                # Use inline version
+                result = self.gen_inline_array_transpose(input_memref, permutation, dtype)
+                memref.copy(result, output_memref)
                 func.ReturnOp([])
 
         return fn_name
@@ -834,8 +870,8 @@ class Backend:
 
             with InsertionPoint(func_op.add_entry_block()):
                 input_memref, = func_op.arguments
-                output_memref = memref.alloc(memref_type_out, [], [])
-                linalg.transpose(input_memref, outs=[output_memref], permutation=permutation)
+                # Use inline version
+                output_memref = self.gen_inline_array_transpose_shaped(input_memref, in_shape, permutation, dtype)
                 func.ReturnOp([output_memref])
 
         return fn_name

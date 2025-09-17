@@ -2693,17 +2693,8 @@ class MlirBackend(_ch06_MlirBackend):
                 in_shape = TypeSpeller.apply(inshape)
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
-                fname_transpose = be.gen_array_transpose_shaped(self.module, in_shape)
-                fn_transpose = self._get_func_by_name(fname_transpose)
 
-                [src_type_1] = fn_transpose.type.inputs
-
-                element_type = src_type_1.element_type
-                memref_type_out = ir.MemRefType.get(out_shape, element_type)
-
-                result = func.call((memref_type_out,), fname_transpose, [ary_val])
-
-                return result
+                return be.gen_inline_array_transpose(ary_val)
 
             case "NpyOp_Transpose_Shaped_explicit<io, array, inshape, reorder, outshape>", (io, ary, inshape, reorder, outshape):
                 # This is implementing np.transpose(ary)
@@ -2712,17 +2703,15 @@ class MlirBackend(_ch06_MlirBackend):
                 out_shape = TypeSpeller.apply(outshape)
                 reorder = TypeSpeller.apply(reorder)
                 ary_val = (yield ary)
-                fname_transpose = be.gen_array_transpose_shaped(self.module, in_shape, reorder)
-                fn_transpose = self._get_func_by_name(fname_transpose)
 
-                [src_type_1] = fn_transpose.type.inputs
+                element_type = ir.F64Type.get()
 
-                element_type = src_type_1.element_type
-                memref_type_out = ir.MemRefType.get(out_shape, element_type)
+                permutation=list(reorder)
+                out_shape = out_shape
+                for i, j in enumerate(permutation):
+                    assert out_shape[i] == in_shape[j]
 
-                result = func.call((memref_type_out,), fname_transpose, [ary_val])
-
-                return result
+                return be.gen_inline_array_transpose_shaped(ary_val, in_shape, permutation)
 
             case "NpyOp_MatMul_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, out_shape>", (io, lhs, rhs, lhs_shape, rhs_shape, out_shape):
                 # np.matmul
@@ -3353,9 +3342,15 @@ def attention(
     )
     # END inlined apply_rotary_emb()
 
-    # DEBUGGING HERE Slice.from_term
     cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
-    return xk
+    cache_v[:batch_size, start_pos : start_pos + seq_len] = xv
+    ks = cache_k[:batch_size, : start_pos + seq_len]
+    vs = cache_v[:batch_size, : start_pos + seq_len]
+
+    xq = np.transpose(xq, (0, 2, 1, 3))
+    xk = np.transpose(ks, (0, 2, 1, 3))
+    xv = np.transpose(vs, (0, 2, 1, 3))
+    return xv
 
 
 
