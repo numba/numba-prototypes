@@ -950,6 +950,8 @@ class NumPyRules:
         def _shape_stack_at_axis(shape1: Shape, shape2: Shape, axis_val: i64Like, ndim: i64Like) -> Shape: ...
         @function(cost=1000)
         def _shape_stack_at_axis_normalized(dimVec1: Vec[Dim], dimVec2: Vec[Dim], axis_val: i64Like) -> Shape: ...
+        @function
+        def _shape_stack_copy_tail(dimVec1: Vec[Dim], dimVec2: Vec[Dim]) -> Shape: ...
 
         yield rule(
             res == NpyOp_Stack_2(io, ary1, ary2, axis=axis_val),
@@ -1012,7 +1014,7 @@ class NumPyRules:
             # axis_val == 0
             _shape_stack_at_axis_normalized(dimVec1, dimVec2, axis_val)
         ).to(
-            Shape.from_list(Vec[Dim](dimVec1[0], Dim.fixed(2))) +  _shape_stack_at_axis_normalized(dimVec1.remove(0), dimVec2.remove(0), axis_val),
+            Shape.from_list(Vec[Dim](dimVec1[0], Dim.fixed(2))) +  _shape_stack_copy_tail(dimVec1.remove(0), dimVec2.remove(0)),
             # when
             dimVec1[0] == dimVec2[0],
             axis_val == i64(0),
@@ -1026,6 +1028,25 @@ class NumPyRules:
             # when
             dimVec1.length() == i64(0),
         )
+
+        # _shape_stack_copy_tail
+        yield rewrite(
+            _shape_stack_copy_tail(dimVec1, dimVec2)
+        ).to(
+            Shape.from_list(Vec[Dim](dimVec1[0])) +  _shape_stack_copy_tail(dimVec1.remove(0), dimVec2.remove(0)),
+            # when
+            dimVec1[0] == dimVec2[0],   # TODO: mark error when mismatch
+        )
+
+        yield rewrite(
+            _shape_stack_copy_tail(dimVec1, dimVec2)
+        ).to(
+            Shape(),
+            dimVec1.length() == i64(0),
+            dimVec2.length() == i64(0),
+        )
+
+
 
     @staticmethod
     def transpose(orig: Term):
@@ -3367,7 +3388,6 @@ def test_attention():
         cache_k, # shape = (1, 256, 6, 48)
         cache_v, # shape = (1, 256, 6, 48)
     ))
-
 
 
 #######################################
