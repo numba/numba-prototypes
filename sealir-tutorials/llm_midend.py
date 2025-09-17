@@ -1799,7 +1799,7 @@ def ruleset_numpy_setitem(
                                  index1=Slice.from_term(index1)),
         # when
         TypeVar(ary).getType() == ad.toType(),
-        Py_Tuple(TermList(idxVec)),
+        indices == Py_Tuple(TermList(idxVec)),
         idxVec.length() == i64(2),
         idxVec[0] == index0,
         idxVec[1] == index1,
@@ -3274,6 +3274,9 @@ def attention(
     cache_k, # shape = (1, 256, 6, 48)
     cache_v, # shape = (1, 256, 6, 48)
 ):
+    # hack
+    start_pos = 0
+
     q_weight = np.transpose(attn_weights_q)
     k_weight = np.transpose(attn_weights_k)
     v_weight = np.transpose(attn_weights_v)
@@ -3329,6 +3332,8 @@ def attention(
     )
     # END inlined apply_rotary_emb()
 
+    # DEBUGGING HERE Slice.from_term
+    cache_k[:batch_size, start_pos : start_pos + seq_len] = xk
     return xk
 
 
