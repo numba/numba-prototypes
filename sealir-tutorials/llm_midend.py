@@ -3,12 +3,13 @@ import pytest
 import inspect
 import numpy as np
 import operator
+import math
 from functools import reduce
 from pprint import pprint
 from dataclasses import dataclass
 from types import FunctionType
 
-from ch04_1_typeinfer_ifelse import Type, TypeFloat64, TypeVar, NbOp_Add_Int64
+from ch04_1_typeinfer_ifelse import Type, TypeFloat64, TypeVar, NbOp_Add_Int64, Nb_CastI64ToF64
 from ch05_typeinfer_array import ArrayDesc, Broadcast, Dim, ruleset_broadcasting
 from ch05_typeinfer_array import (
     ExtendEGraphToRVSDG as _ch05_ExtendEGraphToRVSDG,
@@ -265,10 +266,24 @@ def ruleset_more_constant_folding(x: i64, y: i64, io: Term, res: Term):
         union(res.getPort(0)).with_(io),
     )
 
+@ruleset
+def ruleset_more_typing(term: Term):
+    # literal int is int64
+    yield rule(
+        term == Term.LiteralI64(_wc(i64))
+    ).then(
+        set_(TypeVar(term).getType()).to(TypeInt64),
+    )
+
 
 #######################################
 
 # Install numpy function rules
+@function(cost=1000)
+def NpyOp_AsArray(io: Term, operand: Term) -> Term: ...
+
+@function
+def NpyOp_AsArray_F64(scalar: Term) -> Term: ...
 
 
 @function(cost=1000)
@@ -553,6 +568,58 @@ class Shape(Expr):
 @function(cost=1)
 def ArrayType(ndim: i64Like, dtype: Type, shape: Shape, layout: DataLayout) -> ArrayDesc:
     ...
+
+
+
+@function
+def math_unary_func(fname: StringLike) -> Term: ...
+
+@function
+def MathOp_Sqrt_F64(x: Term) -> Term: ...
+
+
+class MathRules:
+    module_name = "math"
+
+    @staticmethod
+    def sqrt(orig: Term):
+        yield rewrite(orig, subsume=True).to(math_unary_func("sqrt"))
+
+        @ruleset
+        def handle_sqrt(
+            io: Term,
+            argVec: Vec[Term],
+            arg: Term,
+            res: Term,
+        ):
+            callee = Py_Call(func=math_unary_func("sqrt"), io=io, args=TermList(argVec))
+            yield rewrite(callee.getPort(1)).to(
+                MathOp_Sqrt_F64(arg),
+                # when
+                arg == argVec[0],
+                argVec.length() == i64(1),
+                TypeVar(arg).getType() == TypeFloat64,  # argument must be float64
+            )
+            yield rewrite(callee.getPort(0)).to(io)  # Pure op
+
+            # Casting
+            yield rewrite(callee.getPort(1)).to(
+                MathOp_Sqrt_F64(Nb_CastI64ToF64(arg)),
+                # when
+                arg == argVec[0],
+                argVec.length() == i64(1),
+                TypeVar(arg).getType() == TypeInt64,
+            )
+
+            # Typing
+            yield rule(
+                res == MathOp_Sqrt_F64(arg),
+            ).then(
+                set_(TypeVar(res).getType()).to(TypeFloat64)
+            )
+
+
+        yield handle_sqrt
 
 
 class NumPyRules:
@@ -1360,6 +1427,55 @@ class NumPyRules:
 
         yield handle_copy
 
+    @staticmethod
+    def asarray(orig: Term):
+        yield rewrite(orig, subsume=True).to(npy_asarray())
+
+        @ruleset
+        def handle_asarray(
+            io: Term,
+            argVec: Vec[Term],
+            arg: Term,
+            res: Term,
+        ):
+            callee = Py_Call(npy_asarray(), io, TermList(argVec))
+
+            # arity=1
+            yield rewrite(callee.getPort(1)).to(
+                NpyOp_AsArray(io, arg),
+                # when
+                argVec.length() == i64(1),
+                arg == argVec[0]
+            )
+            # no output effect
+            yield rewrite(callee.getPort(0)).to(io)
+
+            # Typing for asarray(scalar)
+            yield rewrite(res).to(
+                NpyOp_AsArray_F64(arg),
+                # when
+                res == NpyOp_AsArray(io, arg),
+                TypeVar(arg).getType() == TypeFloat64,
+            )
+
+            @function(cost=1000)
+            def _get_arraydesc_from_asarray(op: Term) -> ArrayDesc: ...
+
+            yield rule(
+                res == NpyOp_AsArray_F64(arg),
+            ).then(
+                set_(TypeVar(res).getType()).to((_ad:=_get_arraydesc_from_asarray(res)).toType()),
+                set_(_ad.ndim).to(i64(1)),
+                set_(_ad.dim(0)).to(Dim.fixed(1)),
+                set_(_ad.dataLayout).to(DataLayout.c_contiguous()),
+                set_(_ad.dtype).to(TypeFloat64),
+            )
+
+
+
+
+        yield handle_asarray
+
 
 @ruleset
 def ruleset_numpy_promote_binop(
@@ -1371,6 +1487,7 @@ def ruleset_numpy_promote_binop(
                 ModuleGetAttr(Module("numpy"), opname), io, termlist(lhs, rhs)
             ),
             # when
+            # any operand is a ndarray
             TypeVar(operand).getType() == arraydesc.toType(),
         )
 
@@ -1922,9 +2039,14 @@ def npy_matmul() -> Term: ...
 def npy_copy() -> Term: ...
 
 
+@function
+def npy_asarray() -> Term: ...
+
+
 
 loaded_module = {
     "numpy": NumPyRules,
+    "math": MathRules,
 }
 
 
@@ -1941,6 +2063,7 @@ def module_function_rule_lookup(modname: str):
 def make_function_rule(module_mapping: dict[str, str]):
     for modname in module_mapping.values():
         if modname in loaded_module:
+            print("SETUP module rules", modname)
             rules = module_function_rule_lookup(modname)
             others = []
             for rule in rules:
@@ -2384,6 +2507,7 @@ class MlirBackend(_ch06_MlirBackend):
         if in_shape == out_shape:
             return array_val
 
+
         element_type = ir.F64Type.get()
 
         # Use SubView-based broadcasting for numpy broadcast semantics
@@ -2433,7 +2557,7 @@ class MlirBackend(_ch06_MlirBackend):
 
 
     def _gen_binop_ufunc(self, lhs_val, rhs_val, lhs_shape, rhs_shape, outshape, op):
-        from mlir.dialects import arith, func, memref, linalg, math
+        from mlir.dialects import arith, func, memref, linalg
         from mlir import ir
 
         with _mlir_location_from_frame(f"binop({op})"):
@@ -2507,7 +2631,7 @@ class MlirBackend(_ch06_MlirBackend):
         return result
 
     def _gen_reduce_ufunc(self, opval, axis, inshape: list[int], outshape: list[int], op):
-        from mlir.dialects import arith, func, memref, linalg, math
+        from mlir.dialects import arith, func, memref, linalg
         from mlir import ir
 
         nd = len(inshape)
@@ -2550,14 +2674,18 @@ class MlirBackend(_ch06_MlirBackend):
         return result
 
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
-        from mlir.dialects import arith, func, memref, linalg, math
+        from mlir.dialects import arith, func, memref, linalg, math as mlir_math
         from mlir import ir
         be: LlamaBackend = self.codegen
         match op, operands:
+            case "MathOp_Sqrt_F64<x>", (operand,):
+                operand = (yield operand)
+                return mlir_math.sqrt(operand)
+
             case "NpyOp_Exp_Shaped<io, operand, inshape, outshape>", (io, operand, inshape, outshape):
                 (yield io)
                 operand = (yield operand)
-                result = self._gen_unary_ufunc(operand, inshape, outshape, op=math.exp)
+                result = self._gen_unary_ufunc(operand, inshape, outshape, op=mlir_math.exp)
                 return result
 
             case "NpyOp_Add_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
@@ -2792,6 +2920,15 @@ class MlirBackend(_ch06_MlirBackend):
                 result = memref.alloc(ir.MemRefType.get(shape, element_type), [], [])
                 memref.copy(ary_val, result)
                 return io_val, result
+
+            case "NpyOp_AsArray_F64<scalar>", (scalar,):
+                scalar_val = (yield scalar)
+                element_type = ir.F64Type.get()
+                memref_type = ir.MemRefType.get([1], element_type)
+                result = memref.alloc(memref_type, [], [])
+                linalg.fill(scalar_val, outs=[result])
+                return result
+
             case _:
                 raise NotImplementedError(f"_lower_llm_ops | {op} | {operands}")
 
@@ -2942,6 +3079,7 @@ def run_compiler(target_function, args):
                 | ruleset_tuple
                 | ruleset_slice
                 | ruleset_more_constant_folding
+                | ruleset_more_typing
             ),
             pipeline_report=report,
             # pipeline_debug=True,
@@ -3350,7 +3488,11 @@ def attention(
     xq = np.transpose(xq, (0, 2, 1, 3))
     xk = np.transpose(ks, (0, 2, 1, 3))
     xv = np.transpose(vs, (0, 2, 1, 3))
-    return xv
+
+    # FIXME static_broadcast doesn't do dim-expansion.
+    _divisor = np.asarray(math.sqrt(head_dim)).reshape((1, 1, 1, 1))
+    attention_scores = np.matmul(xq, np.transpose(xk, (0, 1, 3, 2))) / _divisor
+    return attention_scores
 
 
 
