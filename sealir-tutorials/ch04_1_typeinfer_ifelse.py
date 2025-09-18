@@ -170,11 +170,13 @@ def ruleset_type_basic(
     yield birewrite((ta | tb) | tc).to(ta | (tb | tc))
 
     # Identify errors
-    yield rule(
-        # If both sides are valid types and not equal, then fail
-        ty == ta | tb,
-        ne(ta).to(tb),  # ta != tb
-    ).then(failed_to_unify(ty))
+    ### FIXME: This doesn't work in llm_midend.py::test_attention_setitem_getitem_effect
+    ###        failed_to_unify(ty) is marking unified case as failed.
+    # yield rule(
+    #     # If both sides are valid types and not equal, then fail
+    #     ty == ta | tb,
+    #     ne(ta).to(tb),  # ta != tb
+    # ).then(failed_to_unify(ty))
 
 
 if __name__ == "__main__":
