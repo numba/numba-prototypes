@@ -1020,7 +1020,7 @@ class MyCostModel(CostModel):
             return self.get_simple(1)
         elif op.startswith("Py_"):
             # Penalize Python operations
-            return self.get_simple(float("1e9"))
+            return self.get_simple(float("1e20"))
         elif op.startswith("Nb_"):
             return self.get_simple(cost)
         # Fallthrough to parent's cost function
