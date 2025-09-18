@@ -512,6 +512,7 @@ def egraph_saturation_with_error_checking(
     ruleset: Ruleset,
     pipeline_debug: bool = False,
     pipeline_report=Report.Sink(),
+    display_egraph=False,
 ) -> EGraphOutput:
     with pipeline_report.nest("Egraph Saturation") as report:
         # Define graph root that points to the function
@@ -525,6 +526,12 @@ def egraph_saturation_with_error_checking(
         # Run all the rules until saturation
         runreport = egraph.run(ruleset.saturate())
         report.append("saturation report", runreport.updated)
+
+        if display_egraph:
+            # egraph.display()
+            from sealir.model_explorer.core import prepare_egraph, visualize_egraph
+            # visualize_egraph(egraph, filepath="debug")
+            prepare_egraph(egraph, filepath="debug")
 
         if pipeline_debug:
             report.append("[debug] saturated egraph", egraph)
@@ -554,16 +561,12 @@ def pipeline_egraph_extraction(
     converter_class,
     cost_model,
     pipeline_report=Report.Sink(),
-    display_egraph=False,
+
 ) -> EGraphExtractionOutput:
     with pipeline_report.nest(
         "EGraph Extraction", default_expanded=True
     ) as report:
         stats = {}
-        if display_egraph:
-            # egraph.display()
-            from sealir.model_explorer.core import prepare_egraph, visualize_egraph
-            visualize_egraph(egraph, filepath="debug")
         try:
             # This is the same as ch4.1
             cost, extracted = egraph_extraction(
