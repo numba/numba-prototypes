@@ -3268,7 +3268,7 @@ def apply_rotary_emb(xq, xk, freqs_cos, freqs_sin):
     return np.stack((xq_out, xk_out), axis=-1)
 
 
-def test_apply_rotary_emb():
+def test_apply_rotary_emb_full():
     np.random.seed(0)
 
     batch_size, seq_len, n_heads, dims = 1, 5, 6, 288
@@ -3507,7 +3507,7 @@ def attention(
     return output
 
 
-def test_attention():
+def test_attention_full():
     np.random.seed(0)
 
     x = np.random.random((1, 5, 288))
@@ -3601,5 +3601,4 @@ def main():
     np.testing.assert_allclose(res, desired)
 
 if __name__ == "__main__":
-    # test_apply_rotary_emb()
     main()
