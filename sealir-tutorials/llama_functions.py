@@ -1,4 +1,5 @@
-
+import os
+import pathlib
 from mlir.ir import *
 from mlir.dialects import arith, memref, scf, func, linalg, math, affine
 import numpy as np
@@ -418,6 +419,29 @@ class Backend:
 
         return fn_name
 
+    def gen_array_broadcast_old(self, module, dims, new_shape, broadcast_along):
+        fn_name = self.gen_fn_name("broadcast")
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
+            memref_type_res = MemRefType.get(list(new_shape), element_type)
+            func_type = FunctionType.get([memref_type, memref_type_res], [])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                input_memref, output_memref = func_op.arguments
+                linalg.broadcast(
+                    input_memref,
+                    outs=[output_memref],
+                    dimensions=broadcast_along
+                )
+                func.ReturnOp([])
+
+        return fn_name
+
     def gen_array_broadcast(self, module, in_shape, out_shape, axis):
         fn_name = self.gen_fn_name("broadcast")
 
@@ -477,6 +501,59 @@ class Backend:
 
     def gen_array_index(self, module):
         fn_name = self.gen_fn_name("index")
+
+        return fn_name
+
+    def gen_array_stack_old(self, module, dims, num_inputs, axis, sizes_along_axis):
+        fn_name = self.gen_fn_name("stack")
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            index_type = IndexType.get()
+            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * dims, element_type)
+            func_type = FunctionType.get([memref_type] * (num_inputs + 1), [])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                input_args = func_op.arguments[:-1]
+                output_memref = func_op.arguments[-1]
+                curr_offset = 0
+
+                for input_arg, size_along_axis in zip(input_args, sizes_along_axis):
+
+                    out_shape = [ShapedType.get_dynamic_size()] * dims
+                    out_shape[axis] = size_along_axis
+
+                    offsets = [0] * dims
+                    offsets[axis] = curr_offset
+
+                    strides = [1] * dims
+                    strides[axis] = num_inputs
+
+                    out_strides = [ShapedType.get_dynamic_stride_or_offset()] * dims
+                    out_strides[axis] = num_inputs
+
+                    out_layout = StridedLayoutAttr.get(curr_offset, out_strides)
+                    memref_type_out = MemRefType.get(out_shape, element_type, layout=out_layout)
+                    sizes = [memref.dim(func_op.arguments[0], arith.constant(index_type, i)) for i in range(dims)]
+                    sizes.pop(axis)
+                    subview = memref.SubViewOp(
+                        memref_type_out,
+                        output_memref,
+                        offsets=[],
+                        sizes=sizes,
+                        strides=[],
+                        static_offsets=DenseI64ArrayAttr.get(offsets),
+                        static_sizes=DenseI64ArrayAttr.get(out_shape),
+                        static_strides=DenseI64ArrayAttr.get(strides)
+                    ).result
+
+                    memref.copy(input_arg, subview)
+                    curr_offset += 1
+
+                func.ReturnOp([])
 
         return fn_name
 
@@ -846,9 +923,7 @@ class Backend:
 
             with InsertionPoint(func_op.add_entry_block()):
                 input_memref, output_memref = func_op.arguments
-                # Use inline version
-                result = self.gen_inline_array_transpose(input_memref, permutation, dtype)
-                memref.copy(result, output_memref)
+                linalg.transpose(input_memref, outs=[output_memref], permutation=permutation)
                 func.ReturnOp([])
 
         return fn_name
@@ -1301,7 +1376,7 @@ def main():
     arr_exp = backend.gen_array_unary(module, softmax_ndim, math.exp, None)
     arr_sum_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.addf, None)
     arr_div = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.divf, None)
-    arr_broadcast = backend.gen_array_broadcast(module, softmax_ndim - 1, softmax_input_shape, broadcast_along=[softmax_ndim - 1])
+    arr_broadcast = backend.gen_array_broadcast_old(module, softmax_ndim - 1, softmax_input_shape, broadcast_along=[softmax_ndim - 1])
 
     arr_transpose = backend.gen_array_transpose(module, 2)
     arr_expand = backend.gen_array_expand_dims(module, 2, (0,))
@@ -1314,18 +1389,18 @@ def main():
     arr_take_1 = backend.gen_array_take(module, 5, 4, 1)
     arr_reshape_3 = backend.gen_array_reshape(module, 5, (batch_size, seq_len, n_local_heads, head_dim // 2))
     arr_expand_2 = backend.gen_array_expand_dims(module, 2, (0, 2))
-    arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, n_local_heads, head_dim // 2), broadcast_along=[0, 2])
+    arr_broadcast_2 = backend.gen_array_broadcast_old(module, 2, (batch_size, seq_len, n_local_heads, head_dim // 2), broadcast_along=[0, 2])
     arr_add = backend.gen_array_binary(module, 4, 4, arith.addf, None)
     arr_sub_1 = backend.gen_array_binary(module, 4, 4, arith.subf, None)
     arr_mul = backend.gen_array_binary(module, 4, 4, arith.mulf, None)
-    arr_stack = backend.gen_array_stack(module, 4, 2, 3, (head_dim // 2, head_dim // 2))
+    arr_stack = backend.gen_array_stack_old(module, 4, 2, 3, (head_dim // 2, head_dim // 2))
 
     arr_transpose_2 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3))
     arr_setitem = backend.gen_array_setitem(module, 4, (None, slice(0, seq_len)))
     arr_getitem = backend.gen_array_getitem(module, 4, (None, slice(0, seq_len)))
     arr_transpose_3 = backend.gen_array_transpose(module, 4, (0, 1, 3, 2), None)
     arr_matmul_1 = backend.gen_array_matmul(module, 4, None)
-    arr_broadcast_3 = backend.gen_array_broadcast(module, 2, (batch_size, n_local_heads, seq_len, seq_len), broadcast_along=[0, 1])
+    arr_broadcast_3 = backend.gen_array_broadcast_old(module, 2, (batch_size, n_local_heads, seq_len, seq_len), broadcast_along=[0, 1])
     arr_add_2 = backend.gen_array_binary(module, 4, 4, arith.addf, None)
     arr_matmul_2 = backend.gen_array_matmul(module, 4, None)
     arr_transpose_4 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3), None)
@@ -1346,21 +1421,21 @@ def main():
     ff_arr_transpose = backend.gen_array_transpose(module, 2)
     ff_arr_transpose_2 = backend.gen_array_transpose(module, 2)
     ff_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
-    ff_arr_broadcast = backend.gen_array_broadcast(module, 2, (batch_size, dims, silu_dims), broadcast_along=[0])
-    ff_arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, silu_dims, dims), broadcast_along=[0])
+    ff_arr_broadcast = backend.gen_array_broadcast_old(module, 2, (batch_size, dims, silu_dims), broadcast_along=[0])
+    ff_arr_broadcast_2 = backend.gen_array_broadcast_old(module, 2, (batch_size, silu_dims, dims), broadcast_along=[0])
     ff_arr_matmul = backend.gen_array_matmul(module, 3, None)
     ff_arr_matmul_2 = backend.gen_array_matmul(module, 3, None)
 
     # RMSNorm
     rms_arr_square = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
     rms_arr_sum_reduce = backend.gen_array_reduce(module, 3, (2,), arith.addf, None)
-    rms_arr_broadcast = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, dims), broadcast_along=[2])
+    rms_arr_broadcast = backend.gen_array_broadcast_old(module, 2, (batch_size, seq_len, dims), broadcast_along=[2])
     rms_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
     rms_arr_fill = backend.gen_array_fill_value(module, 3, None)
     rms_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
     rms_arr_sqrt = backend.gen_array_unary(module, 3, math.sqrt, None)
     rms_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
-    rms_arr_broadcast_2 = backend.gen_array_broadcast(module, 1, (batch_size, seq_len, dims), broadcast_along=[0, 1])
+    rms_arr_broadcast_2 = backend.gen_array_broadcast_old(module, 1, (batch_size, seq_len, dims), broadcast_along=[0, 1])
 
     # Transformer
     tran_arr_add = backend.gen_array_binary(module, input_ndim, input_ndim, arith.addf, None)
@@ -1370,7 +1445,7 @@ def main():
     llm_arr_fill = backend.gen_array_fill_value(module, 2, None)
     llm_arr_triu = backend.gen_array_triu(module, 2, None)
     llm_arr_matmul = backend.gen_array_matmul(module, 3, None)
-    llm_arr_expand_2 = backend.gen_array_broadcast(module, 2, (batch_size, batch_size, dims), broadcast_along=[0])
+    llm_arr_expand_2 = backend.gen_array_broadcast_old(module, 2, (batch_size, batch_size, dims), broadcast_along=[0])
 
     print("Generated MLIR:")
     print(str(module))
@@ -2059,8 +2134,9 @@ def main():
 
     args = ModelArgs()
     print(f"Using precision: {args.dtype}")
-    tokenizer = Tokenizer("/home/kc611/Desktop/Workspaces/base/llama3.np/tokenizer.model.np")
-    model = llama_init("/home/kc611/Desktop/Workspaces/base/llama3.np/stories15M.model.npz", args)
+    LLM_DATA_FOLDER = pathlib.Path(os.environ.get("LLM_DATA_FOLDER"))
+    tokenizer = Tokenizer(LLM_DATA_FOLDER / "tokenizer.model.np")
+    model = llama_init(LLM_DATA_FOLDER / "stories15M.model.npz", args)
 
     prompt = "Once upon a time"
 
@@ -2084,3 +2160,7 @@ def main():
     print("Function executed succesfully.")
 
     print("\n" + "=" * 50 + "\n")
+
+
+if __name__ == "__main__":
+    main()
