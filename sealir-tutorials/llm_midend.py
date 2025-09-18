@@ -3420,7 +3420,7 @@ def attention(
     cache_k, # shape = (1, 256, 6, 48)
     cache_v, # shape = (1, 256, 6, 48)
 ):
-    # hack
+    # HACK
     start_pos = 0
 
     q_weight = np.transpose(attn_weights_q)
@@ -3490,8 +3490,21 @@ def attention(
     # FIXME static_broadcast doesn't do dim-expansion.
     _divisor = np.asarray(math.sqrt(head_dim)).reshape((1, 1, 1, 1))
     attention_scores = np.matmul(xq, np.transpose(xk, (0, 1, 3, 2))) / _divisor
-    return attention_scores
 
+    # attention_scores = attention_scores + mask[None, None, :, :]
+    attention_scores = attention_scores + mask.reshape((1, 1) + mask.shape)
+
+    # BEGIN inlined softmax
+    softmax_x = attention_scores
+    exp_x = np.exp(softmax_x - np.max(softmax_x, axis=-1, keepdims=True))
+    softmax_out = exp_x / np.sum(exp_x, axis=-1, keepdims=True)
+    # END
+    attn = softmax_out
+
+    output =  np.matmul(attn, xv)
+    output = np.transpose(output, (0, 2, 1, 3)).reshape((batch_size, seq_len, -1))
+    output = np.matmul(output, o_weight)
+    return output
 
 
 def test_attention():
