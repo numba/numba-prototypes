@@ -7,6 +7,8 @@ import mlir.execution_engine as execution_engine
 import mlir.runtime as runtime
 import ctypes
 from ctypes.util import find_library
+from utils.llama3.llama3 import ModelArgs, Tokenizer, llama_init
+from copy import deepcopy
 
 import math as pymath
 
@@ -421,7 +423,7 @@ class Backend:
 
         if axis == -1:
             axis = len(out_shape) - 1
-        
+
         if out_shape[axis] % in_shape[axis]:
             raise ValueError("Array cannot be broadcasted to given shape along this axis")
 
@@ -453,7 +455,7 @@ class Backend:
                     out_strides = [ShapedType.get_dynamic_stride_or_offset()] * (ndim)
                     out_strides[-1] = 1
 
-                    out_off = ShapedType.get_dynamic_stride_or_offset() if i !=0 else 0                    
+                    out_off = ShapedType.get_dynamic_stride_or_offset() if i !=0 else 0
                     out_layout = StridedLayoutAttr.get(out_off, out_strides)
                     memref_type_out_inner = MemRefType.get(in_shape, element_type, layout=out_layout)
                     subview = memref.SubViewOp(
@@ -998,7 +1000,6 @@ class Backend:
                 continue
             elif isinstance(index, int):
                 out_shape[index] = 1
-                # out_strides[index] = 1
                 offsets[axis] = index
                 modified_axes.append(axis)
             elif isinstance(index, slice):
@@ -1011,7 +1012,6 @@ class Backend:
                     index_stop = index.stop
 
                 out_shape[axis] = (index_stop - index_start) // index_step
-                # out_strides[axis] = index_step
                 offsets[axis] = index_start
                 modified_axes.append(axis)
             else:
@@ -1204,7 +1204,7 @@ class Backend:
 
     def gen_array_setitem_shaped(self, module, in_shape, indices):
         fn_name = self.gen_fn_name("setitem")
-        
+
         dims = len(in_shape)
         assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
 
@@ -1289,6 +1289,10 @@ def main():
     input_shape = (batch_size, seq_len, dims)
     softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
 
+    silu_dims = 768
+    norm_eps = 1e-06
+    weight_size = 32000
+
     input_ndim = len(input_shape)
     softmax_ndim = len(softmax_input_shape)
 
@@ -1330,6 +1334,43 @@ def main():
     arr_sqrt = backend.gen_array_unary(module, 4, math.sqrt, None)
     arr_div_2 = backend.gen_array_binary(module, 4, 4, arith.divf, None)
 
+    # SILU
+    silu_arr_neg = backend.gen_array_unary(module, 3, arith.negf, None)
+    silu_arr_exp = backend.gen_array_unary(module, 3, math.exp, None)
+    silu_arr_fill = backend.gen_array_fill_value(module, 3, None)
+    silu_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
+    silu_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+    silu_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
+
+    # Feed forward
+    ff_arr_transpose = backend.gen_array_transpose(module, 2)
+    ff_arr_transpose_2 = backend.gen_array_transpose(module, 2)
+    ff_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+    ff_arr_broadcast = backend.gen_array_broadcast(module, 2, (batch_size, dims, silu_dims), broadcast_along=[0])
+    ff_arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, silu_dims, dims), broadcast_along=[0])
+    ff_arr_matmul = backend.gen_array_matmul(module, 3, None)
+    ff_arr_matmul_2 = backend.gen_array_matmul(module, 3, None)
+
+    # RMSNorm
+    rms_arr_square = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+    rms_arr_sum_reduce = backend.gen_array_reduce(module, 3, (2,), arith.addf, None)
+    rms_arr_broadcast = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, dims), broadcast_along=[2])
+    rms_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
+    rms_arr_fill = backend.gen_array_fill_value(module, 3, None)
+    rms_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
+    rms_arr_sqrt = backend.gen_array_unary(module, 3, math.sqrt, None)
+    rms_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+    rms_arr_broadcast_2 = backend.gen_array_broadcast(module, 1, (batch_size, seq_len, dims), broadcast_along=[0, 1])
+
+    # Transformer
+    tran_arr_add = backend.gen_array_binary(module, input_ndim, input_ndim, arith.addf, None)
+
+    # Llama forward
+    llm_arr_getitem = backend.gen_array_getitem(module, 2, (slice(0, seq_len),))
+    llm_arr_fill = backend.gen_array_fill_value(module, 2, None)
+    llm_arr_triu = backend.gen_array_triu(module, 2, None)
+    llm_arr_matmul = backend.gen_array_matmul(module, 3, None)
+    llm_arr_expand_2 = backend.gen_array_broadcast(module, 2, (batch_size, batch_size, dims), broadcast_along=[0])
 
     print("Generated MLIR:")
     print(str(module))
@@ -1432,7 +1473,49 @@ def main():
     arr_sqrt = backend.jit_compile(module, arr_sqrt, ((batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),), None)
     arr_div_2 = backend.jit_compile(module, arr_div_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),))
 
-    print("Function compiled successfully!")
+    # SILU
+    silu_arr_neg = backend.jit_compile(module, silu_arr_neg, ((batch_size, seq_len, silu_dims),), ((batch_size, seq_len, silu_dims),), None)
+    silu_arr_exp = backend.jit_compile(module, silu_arr_exp, ((batch_size, seq_len, silu_dims),), ((batch_size, seq_len, silu_dims),), None)
+
+    silu_arr_fill = backend.jit_compile(module, silu_arr_fill, (None,), ((batch_size, seq_len, silu_dims),), None)
+    silu_arr_add =  backend.jit_compile(module, silu_arr_add, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    silu_arr_mul =  backend.jit_compile(module, silu_arr_mul, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    silu_arr_div =  backend.jit_compile(module, silu_arr_div, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+
+    # Feed forward
+    ff_arr_transpose = backend.jit_compile(module, ff_arr_transpose, ((dims, silu_dims),), ((silu_dims, dims),))
+    ff_arr_transpose_2 = backend.jit_compile(module, ff_arr_transpose_2, ((silu_dims, dims),), ((dims, silu_dims),))
+    ff_arr_mul = backend.jit_compile(module, ff_arr_mul, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    ff_arr_broadcast = backend.jit_compile(module, ff_arr_broadcast, ((dims, silu_dims),), ((batch_size, dims, silu_dims),))
+    ff_arr_broadcast_2 = backend.jit_compile(module, ff_arr_broadcast_2, ((silu_dims, dims),), ((batch_size, silu_dims, dims),))
+    ff_arr_matmul = backend.jit_compile(module, ff_arr_matmul, ((batch_size, seq_len, dims), (batch_size, dims, silu_dims)), ((batch_size, seq_len, silu_dims),))
+    ff_arr_matmul_2 = backend.jit_compile(module, ff_arr_matmul_2, ((batch_size, seq_len, silu_dims), (batch_size, silu_dims, dims)), ((batch_size, seq_len, dims),))
+
+    # RMSNorm
+    rms_arr_square = backend.jit_compile(module, rms_arr_square, ((batch_size, seq_len, dims),(batch_size, seq_len, dims)), ((batch_size, seq_len, dims),), None)
+    rms_arr_sum_reduce = backend.jit_compile(module, rms_arr_sum_reduce, ((batch_size, seq_len, dims),), ((batch_size, seq_len),), None)
+    rms_arr_broadcast = backend.jit_compile(module, rms_arr_broadcast, ((batch_size, seq_len),), ((batch_size, seq_len, dims),), None)
+    rms_arr_div = backend.jit_compile(module, rms_arr_div, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),), None)
+    rms_arr_fill = backend.jit_compile(module, rms_arr_fill, (None,), ((batch_size, seq_len, dims),), None)
+    rms_arr_add = backend.jit_compile(module, rms_arr_add, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),), None)
+    rms_arr_sqrt = backend.jit_compile(module, rms_arr_sqrt, ((batch_size, seq_len, dims),), ((batch_size, seq_len, dims),), None)
+    rms_arr_mul = backend.jit_compile(module, rms_arr_mul, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),))
+    rms_arr_broadcast_2 = backend.jit_compile(module, rms_arr_broadcast_2, ((dims,),), ((batch_size, seq_len, dims),), None)
+
+    # Transformer
+    tran_arr_add = backend.jit_compile(module, tran_arr_add, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),))
+
+    # Llama forward
+    llm_arr_getitem = backend.jit_compile(module, llm_arr_getitem, ((cache_size, head_dim // 2),), ((seq_len, head_dim // 2),), shared_libs=[find_library(x) for x in shared_libs])
+    llm_arr_fill = backend.jit_compile(module, llm_arr_fill, (None,), ((seq_len, seq_len),), None)
+    llm_arr_triu = backend.jit_compile(module, llm_arr_triu, ((seq_len, seq_len), None), ((seq_len, seq_len),), None)
+    llm_arr_matmul = backend.jit_compile(module, llm_arr_matmul, ((batch_size, batch_size, dims), (batch_size, dims, weight_size)), ((batch_size, batch_size, weight_size),))
+    llm_arr_expand_2 = backend.jit_compile(module, llm_arr_expand_2, ((dims, weight_size),), ((batch_size, dims, weight_size),))
+
+    # Llama generate
+
+    print("All functions compiled successfully!")
+    print("\n" + "=" * 50 + "\n")
 
     def softmax(x):
         """Compute softmax values for each sets of scores in x."""
@@ -1443,7 +1526,7 @@ def main():
         e_x = arr_exp(arr_sub(x, arr_broadcast(arr_max_reduce(x))))
         return arr_div(e_x, arr_broadcast(arr_sum_reduce(e_x)))
 
-    # print("Testing Softmax")
+    print("Testing Softmax")
 
     # Random input data
     softmax_input = np.random.random(softmax_input_shape)
@@ -1455,6 +1538,7 @@ def main():
     # Check Results
     assert np.allclose(numpy_result, mlir_result)
     print("Function executed and verified succesfully.")
+    print("\n" + "=" * 50 + "\n")
 
     def apply_rotary_emb(xq, xk, freqs_cos, freqs_sin):
         xqri = xq.reshape(*xq.shape[:-1], -1, 2)
@@ -1520,6 +1604,7 @@ def main():
     # Check Results
     assert np.allclose(numpy_result, mlir_result)
     print("Function executed and verified succesfully.")
+    print("\n" + "=" * 50 + "\n")
 
     def attention(
         x, # shape = (1, 5, 288)
@@ -1642,6 +1727,359 @@ def main():
 
     for res_np, res_mlir in zip(numpy_result, mlir_result):
         assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def silu(x):
+        result = x * (1 / (1 + np.exp(-x)))
+        return result
+
+    def silu_mlir(x):
+        result = silu_arr_mul(x, silu_arr_div(silu_arr_fill(1.0), (silu_arr_add(silu_arr_fill(1.0), silu_arr_exp(silu_arr_neg(x))))))
+        return result
+
+    print("Testing SILU")
+
+    silu_input = np.random.random(batch_size * seq_len * silu_dims).reshape(batch_size, seq_len, silu_dims)
+
+    numpy_result = silu(x=silu_input)
+    mlir_result = silu_mlir(x=silu_input)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def feed_forward(x, up_weight, gate_weight, down_weight):
+        swish = silu(x @ gate_weight.T)
+        x_v = x @ up_weight.T
+        x_ff = swish * x_v
+        x_out = x_ff @ down_weight.T
+        return x_out
+
+    def feed_forward_mlir(x, up_weight, gate_weight, down_weight):
+        swish = silu_mlir(ff_arr_matmul(x, ff_arr_broadcast(ff_arr_transpose_2(gate_weight))))
+        x_v = ff_arr_matmul(x, ff_arr_broadcast(ff_arr_transpose_2(up_weight)))
+        x_ff = ff_arr_mul(swish, x_v)
+        x_out = ff_arr_matmul_2(x_ff, ff_arr_broadcast_2(ff_arr_transpose(down_weight)))
+        return x_out
+
+    print("Testing feed forward")
+
+    x_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+    up_weight = np.random.random(silu_dims * dims).reshape(silu_dims, dims)
+    gate_weight = np.random.random(silu_dims * dims).reshape(silu_dims, dims)
+    down_weight = np.random.random(dims * silu_dims).reshape(dims, silu_dims)
+
+    numpy_result = feed_forward(x=x_input,
+                                up_weight=up_weight,
+                                gate_weight=gate_weight,
+                                down_weight=down_weight)
+    mlir_result = feed_forward_mlir(x=x_input,
+                                up_weight=up_weight,
+                                gate_weight=gate_weight,
+                                down_weight=down_weight)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def rmsnorm(x, weight, eps):
+        z_float = np.mean(x**2, -1, keepdims=True) + eps
+        z = x / np.sqrt(z_float)
+        result = z * weight
+        return result
+
+    def rmsnorm_mlir(x, weight, eps):
+        z_float = rms_arr_add(rms_arr_div(rms_arr_broadcast(rms_arr_sum_reduce(rms_arr_square(x, x))), rms_arr_fill(float(dims))), rms_arr_fill(float(eps)))
+        z = rms_arr_div(x, rms_arr_sqrt(z_float))
+        result = rms_arr_mul(z, rms_arr_broadcast_2(weight))
+        return result
+
+    print("Testing RMSNorm")
+
+    x_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+    weight = np.random.random(dims).reshape(dims)
+    eps = 1e-06
+
+    numpy_result = rmsnorm(x=x_input,
+                           weight=weight,
+                           eps=eps)
+    mlir_result = rmsnorm_mlir(x=x_input,
+                               weight=weight,
+                               eps=eps)
+
+
+    assert np.allclose(numpy_result, mlir_result)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def transformer_block(
+        x,
+        start_pos,
+        mask,
+        freqs_cos,
+        freqs_sin,
+        block_weights,
+        cache_k,
+        cache_v,
+    ):
+        attn_weights, ff_weights, in_norm_weight, post_norm_weight = block_weights
+
+        norm_x = rmsnorm(x, in_norm_weight, norm_eps)
+        h1, cache_k, cache_v = attention(
+            norm_x,
+            start_pos,
+            mask,
+            freqs_cos,
+            freqs_sin,
+            attn_weights,
+            cache_k,
+            cache_v,
+        )
+        z = x + h1
+        norm_z = rmsnorm(z, post_norm_weight, norm_eps)
+        h2 = feed_forward(norm_z, *ff_weights)
+        out = z + h2
+        return out, cache_k, cache_v
+
+    def transformer_block_mlir(
+        x,
+        start_pos,
+        mask,
+        freqs_cos,
+        freqs_sin,
+        block_weights,
+        cache_k,
+        cache_v,
+    ):
+        attn_weights, ff_weights, in_norm_weight, post_norm_weight = block_weights
+
+        norm_x = rmsnorm_mlir(x, in_norm_weight, norm_eps)
+        h1, cache_k, cache_v = attention_mlir(
+            norm_x,
+            start_pos,
+            mask,
+            freqs_cos,
+            freqs_sin,
+            attn_weights,
+            cache_k,
+            cache_v,
+        )
+        z = tran_arr_add(x, h1)
+        norm_z = rmsnorm_mlir(z, post_norm_weight, norm_eps)
+        h2 = feed_forward_mlir(norm_z, *ff_weights)
+        out = tran_arr_add(z, h2)
+        return out, cache_k, cache_v
+
+    print("Testing Transformer Layer")
+
+    x_input = np.random.random(batch_size * seq_len * dims).reshape(batch_size, seq_len, dims)
+    start_pos = 0
+    mask = np.random.random(seq_len * seq_len).reshape(seq_len, seq_len)
+    freqs_cos = np.random.random(seq_len * head_dim // 2).reshape(seq_len, head_dim // 2)
+    freqs_sin = np.random.random(seq_len * head_dim // 2).reshape(seq_len, head_dim // 2)
+    block_weights = [
+        [np.random.random(dims*dims).reshape(dims, dims) for _ in range(4)],
+        [
+            np.random.random(silu_dims * dims).reshape(silu_dims, dims),
+            np.random.random(silu_dims * dims).reshape(silu_dims, dims),
+            np.random.random(silu_dims * dims).reshape(dims, silu_dims),
+        ],
+        np.random.random(dims).reshape(dims),
+        np.random.random(dims).reshape(dims),
+    ]
+
+    cache_k = np.random.random(batch_size * cache_size * n_heads * head_dim).reshape(batch_size, cache_size, n_heads, head_dim)
+    cache_v = np.random.random(batch_size * cache_size * n_heads * head_dim).reshape(batch_size, cache_size, n_heads, head_dim)
+
+    numpy_result = transformer_block(x=x_input,
+                                     start_pos=start_pos,
+                                     mask=mask,
+                                     freqs_cos=freqs_cos,
+                                     freqs_sin=freqs_sin,
+                                     block_weights=block_weights,
+                                     cache_k=cache_k,
+                                     cache_v=cache_v)
+
+    mlir_result = transformer_block_mlir(x=x_input,
+                                     start_pos=start_pos,
+                                     mask=mask,
+                                     freqs_cos=freqs_cos,
+                                     freqs_sin=freqs_sin,
+                                     block_weights=block_weights,
+                                     cache_k=cache_k,
+                                     cache_v=cache_v)
+
+    for res_np, res_mlir in zip(numpy_result, mlir_result):
+        assert np.allclose(res_np, res_mlir)
+
+    print("Function executed succesfully.")
+
+    print("\n" + "=" * 50 + "\n")
+
+    def llama_forward(model, input_ids, start_pos):
+        args = model["args"]
+        dtype = model["dtype"]
+
+        _, seq_len = input_ids.shape
+        h = model["tok_embedding"][input_ids]
+
+        freqs_cos = model["freqs_cos"][start_pos : start_pos + seq_len]
+        freqs_sin = model["freqs_sin"][start_pos : start_pos + seq_len]
+
+        mask = None
+        if seq_len > 1:
+            mask = np.full((seq_len, seq_len), float("-inf"), dtype=dtype)
+            mask = np.triu(mask, k=1)
+            zeros_shape = (seq_len, start_pos)
+            mask = np.concatenate([np.zeros(zeros_shape, dtype=dtype), mask], axis=1)
+
+        caches_k = model["caches_k"]
+        caches_v = model["caches_v"]
+
+        for i, block in enumerate(model["layer_blocks"]):
+            h, caches_k[i], caches_v[i] = transformer_block(
+                h,
+                start_pos,
+                mask,
+                freqs_cos,
+                freqs_sin,
+                block,
+                caches_k[i],
+                caches_v[i],
+            )
+
+        h = rmsnorm(h, model["norm_weight"], args.norm_eps)
+        logit = h[:, [-1], :] @ model["lm_head_weight"]
+        return logit
+
+    def llama_generate(model, input_ids, max_new_tokens):
+        batch_size, prompt_len = input_ids.shape
+        current_len = prompt_len
+        next_id = None  # Initialize next_id to avoid undefined variable error
+        for i in range(max_new_tokens):
+            current_pos = prompt_len + i
+            if i == 0:
+                current_input_ids = input_ids
+                pos = 0
+            else:
+                current_input_ids = next_id
+                pos = current_pos - 1
+            logits = llama_forward(model, current_input_ids, pos)
+            next_id = np.argmax(logits[:, -1, :], axis=-1, keepdims=True).astype(np.int32)
+            yield next_id
+            current_len += 1
+            if current_len >= model["args"].max_seq_len:
+                break
+
+    def llama_forward_mlir(model, input_ids, start_pos):
+        args = model["args"]
+        dtype = model["dtype"]
+        tok_embedding = model["tok_embedding"]
+        freqs_cos = model["freqs_cos"]
+        freqs_sin = model["freqs_sin"]
+        caches_k = model["caches_k"]
+        caches_v = model["caches_v"]
+        layer_blocks = model["layer_blocks"]
+        norm_weight = model["norm_weight"]
+        lm_head_weight = model["lm_head_weight"]
+
+        _, seq_len = input_ids.shape
+        h = tok_embedding[input_ids]
+
+        freqs_cos = llm_arr_getitem(freqs_cos)
+        freqs_sin = llm_arr_getitem(freqs_sin)
+
+        mask = None
+        if seq_len > 1:
+            mask = llm_arr_fill(float("-inf"))
+            mask = llm_arr_triu(mask, 1)
+            # TODO: On first iteration start pos is zero so this evaliates to shape (5, 0)
+            # which we can't really handle in MLIR as of now
+
+            # zeros_shape = (seq_len, start_pos)
+            # mask = np.concatenate([np.zeros(zeros_shape, dtype=dtype), mask], axis=1)
+
+        for i, block in enumerate(layer_blocks):
+            # TODO: Right now we index at compile time, this is a runtime index,
+            # will need handling seperately, but mid-end should be able to take care of this
+            # particular case depending upon how we implement
+            h, caches_k[i], caches_v[i] = transformer_block_mlir(
+                h,
+                start_pos,
+                mask,
+                freqs_cos,
+                freqs_sin,
+                block,
+                caches_k[i],
+                caches_v[i],
+            )
+
+        h = rmsnorm_mlir(h, norm_weight, args.norm_eps)
+        # TODO: We don't support this kind of indexing yet
+        h_input = h[:, [-1], :]
+
+        logit = llm_arr_matmul(h_input, llm_arr_expand_2(lm_head_weight))
+        return logit
+
+    def llama_generate_mlir(model, input_ids, max_new_tokens):
+        batch_size, prompt_len = input_ids.shape
+        current_len = prompt_len
+        next_id = None  # Initialize next_id to avoid undefined variable error
+        for i in range(max_new_tokens):
+            current_pos = prompt_len + i
+            if i == 0:
+                current_input_ids = input_ids
+                pos = 0
+            else:
+                current_input_ids = next_id
+                pos = current_pos - 1
+            logits = llama_forward_mlir(model, current_input_ids, pos)
+            # TODO: We don't support this kind of indexing yet
+            argmax_inp = logits[:, -1, :]
+            # TODO: We will need argmax support
+            next_id = np.argmax(argmax_inp, axis=-1, keepdims=True).astype(np.int32)
+            yield next_id
+            current_len += 1
+            if current_len >= model["args"].max_seq_len:
+                break
+
+
+    print("Testing Llama Generate")
+
+    args = ModelArgs()
+    print(f"Using precision: {args.dtype}")
+    tokenizer = Tokenizer("/home/kc611/Desktop/Workspaces/base/llama3.np/tokenizer.model.np")
+    model = llama_init("/home/kc611/Desktop/Workspaces/base/llama3.np/stories15M.model.npz", args)
+
+    prompt = "Once upon a time"
+
+    print("Prompt", f"\n{prompt}")
+    input_ids = np.array([tokenizer.encode(prompt)])
+
+    model_mlir = deepcopy(model)
+
+    for id_val, id_val_mlir in zip(llama_generate(model, input_ids, args.max_new_tokens), llama_generate_mlir(model_mlir, input_ids, args.max_new_tokens)):
+        output_id = id_val[0].tolist()
+        if output_id[-1] in [tokenizer.eos_id, tokenizer.bos_id]:
+            break
+        print("Numpy Output Token: ", output_id, tokenizer.decode(output_id))
+
+        output_id_mlir = id_val_mlir[0].tolist()
+        if output_id_mlir[-1] in [tokenizer.eos_id, tokenizer.bos_id]:
+            break
+        print("MLIR Output Token: ", output_id_mlir, tokenizer.decode(output_id_mlir))
+        break
 
     print("Function executed succesfully.")
 
