@@ -1,4 +1,5 @@
-
+import os
+import pathlib
 from mlir.ir import *
 from mlir.dialects import arith, memref, scf, func, linalg, math, affine
 import numpy as np
@@ -12,7 +13,7 @@ from copy import deepcopy
 
 import math as pymath
 
-_DEBUG = False
+_DEBUG = True
 _VERIFY = False
 _FUZZ = False
 
@@ -418,7 +419,7 @@ class Backend:
 
         return fn_name
 
-    def gen_array_broadcast(self, module, dims, new_shape, broadcast_along):
+    def gen_array_broadcast_old(self, module, dims, new_shape, broadcast_along):
         fn_name = self.gen_fn_name("broadcast")
 
         with module.context, InsertionPoint(module.body), Location.unknown():
@@ -441,12 +442,69 @@ class Backend:
 
         return fn_name
 
+    def gen_array_broadcast(self, module, in_shape, out_shape, axis):
+        fn_name = self.gen_fn_name("broadcast")
+
+        if axis == -1:
+            axis = len(out_shape) - 1
+
+        if out_shape[axis] % in_shape[axis]:
+            raise ValueError("Array cannot be broadcasted to given shape along this axis")
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            ndim = len(out_shape)
+            element_type = F64Type.get()
+            index_type = IndexType.get()
+            memref_type = MemRefType.get([ShapedType.get_dynamic_size()] * ndim, element_type)
+            memref_type_out = MemRefType.get([ShapedType.get_dynamic_size()] * ndim, element_type)
+            func_type = FunctionType.get([memref_type], [memref_type_out])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                input_arg, = func_op.arguments
+                output_memref = memref.alloc(memref_type_out, [arith.constant(index_type, s) for s in out_shape], [])
+                curr_offset = 0
+
+                loop_times = out_shape[axis] // in_shape[axis]
+
+                for i in range(loop_times):
+                    offsets = [0] * (ndim)
+                    offsets[axis] = i
+
+                    strides = [1] * (ndim)
+                    # strides[axis] = loop_times
+
+                    out_strides = [ShapedType.get_dynamic_stride_or_offset()] * (ndim)
+                    out_strides[-1] = 1
+
+                    out_off = ShapedType.get_dynamic_stride_or_offset() if i !=0 else 0
+                    out_layout = StridedLayoutAttr.get(out_off, out_strides)
+                    memref_type_out_inner = MemRefType.get(in_shape, element_type, layout=out_layout)
+                    subview = memref.SubViewOp(
+                        memref_type_out_inner,
+                        output_memref,
+                        offsets=[],
+                        sizes=[],
+                        strides=[],
+                        static_offsets=DenseI64ArrayAttr.get(offsets),
+                        static_sizes=DenseI64ArrayAttr.get(in_shape),
+                        static_strides=DenseI64ArrayAttr.get(strides)
+                    ).result
+
+                    memref.copy(input_arg, subview)
+
+                func.ReturnOp([output_memref])
+
+        return fn_name
+
     def gen_array_index(self, module):
         fn_name = self.gen_fn_name("index")
 
         return fn_name
 
-    def gen_array_stack(self, module, dims, num_inputs, axis, sizes_along_axis):
+    def gen_array_stack_old(self, module, dims, num_inputs, axis, sizes_along_axis):
         fn_name = self.gen_fn_name("stack")
 
         with module.context, InsertionPoint(module.body), Location.unknown():
@@ -496,6 +554,76 @@ class Backend:
                     curr_offset += 1
 
                 func.ReturnOp([])
+
+        return fn_name
+
+    def gen_array_stack(self, module, num_inputs, inp_shape, out_shape, axis):
+        fn_name = self.gen_fn_name("stack")
+
+        if axis == -1:
+            axis = len(out_shape) - 1
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            ndim = len(out_shape) - 1
+            element_type = F64Type.get()
+            index_type = IndexType.get()
+            memref_type = MemRefType.get(inp_shape, element_type)
+            memref_type_out = MemRefType.get(out_shape, element_type)
+            func_type = FunctionType.get([memref_type] * num_inputs, [memref_type_out])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                input_args = func_op.arguments
+                output_memref = memref.alloc(memref_type_out, [], [])
+                curr_offset = 0
+                input_shape = list(inp_shape)
+                input_shape.insert(axis, 1)
+
+                strides = [1] * (ndim + 1)
+                strides[axis] = num_inputs
+
+                out_strides = [1] * (ndim + 1)
+                for i in range(len(out_shape) - 2, -1, -1):
+                    out_strides[i] = out_strides[i+1] * out_shape[i+1]
+                out_strides[axis] *= num_inputs
+
+                for input_arg in input_args:
+
+                    offsets = [0] * (ndim + 1)
+                    offsets[axis] = curr_offset
+                    out_layout = StridedLayoutAttr.get(curr_offset, out_strides)
+                    memref_type_out_inner = MemRefType.get(input_shape, element_type, layout=out_layout)
+                    subview = memref.SubViewOp(
+                        memref_type_out_inner,
+                        output_memref,
+                        offsets=[],
+                        sizes=[],
+                        strides=[],
+                        static_offsets=DenseI64ArrayAttr.get(offsets),
+                        static_sizes=DenseI64ArrayAttr.get(input_shape),
+                        static_strides=DenseI64ArrayAttr.get(strides)
+                    ).result
+
+                    re_shape = list(out_shape)
+                    re_shape[axis] = 1
+                    memref_type_in_inner = MemRefType.get(re_shape, element_type)
+
+                    reassociation = Backend.build_mlir_reassociation(ndim, [axis-1])
+
+                    input_arg_exp = memref.expand_shape(
+                        memref_type_in_inner,
+                        input_arg,
+                        reassociation=reassociation,
+                        output_shape=[],
+                        static_output_shape=DenseI64ArrayAttr.get(re_shape)
+                    )
+
+                    memref.copy(input_arg_exp, subview)
+                    curr_offset += 1
+
+                func.ReturnOp([output_memref])
 
         return fn_name
 
@@ -551,6 +679,35 @@ class Backend:
                 )
                 memref.copy(res, func_op.arguments[1])
                 func.ReturnOp([])
+
+        return fn_name
+
+    def gen_array_expand_dims_shaped(self, module, in_shape, axes):
+        fn_name = self.gen_fn_name("expand_dims")
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type = MemRefType.get(in_shape, element_type)
+            result_shape = list(in_shape)
+            for i in sorted(axes):
+                result_shape.insert(i, 1)
+            dims = len(in_shape)
+
+            memref_type_res = MemRefType.get(result_shape, element_type)
+            func_type = FunctionType.get([memref_type], [memref_type_res])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                reassociation = Backend.build_mlir_reassociation(dims, axes)
+                res = memref.expand_shape(memref_type_res,
+                    func_op.arguments[0],
+                    reassociation=reassociation,
+                    output_shape=[], # [2, 3, 4]
+                    static_output_shape=DenseI64ArrayAttr.get(result_shape) # [dyn, dyn, 1, dyn, 1]
+                )
+                func.ReturnOp([res])
 
         return fn_name
 
@@ -657,6 +814,99 @@ class Backend:
 
         return fn_name
 
+    def gen_array_matmul_shaped(self, module, lhs_shape, rhs_shape, out_shape):
+        fn_name = self.gen_fn_name("matmul")
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type_lhs = MemRefType.get(lhs_shape, element_type)
+            memref_type_rhs = MemRefType.get(rhs_shape, element_type)
+            memref_type_out = MemRefType.get(out_shape, element_type)
+            func_type = FunctionType.get([memref_type_lhs, memref_type_rhs], [memref_type_out])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+            dims = len(out_shape)
+
+            with InsertionPoint(func_op.add_entry_block()):
+                a, b, = func_op.arguments
+
+                total_dims = dims + 1
+
+                batch_exprs = [AffineExpr.get_dim(i) for i in range(dims - 2)]
+                m_expr = AffineExpr.get_dim(dims - 2)  # M dimension
+                n_expr = AffineExpr.get_dim(dims - 1)  # N dimension
+                k_expr = AffineExpr.get_dim(dims)      # K dimension (reduction)
+
+                map_a = AffineMap.get(total_dims, 0, batch_exprs + [m_expr, k_expr])
+                map_b = AffineMap.get(total_dims, 0, batch_exprs + [k_expr, n_expr])
+                map_c = AffineMap.get(total_dims, 0, batch_exprs + [m_expr, n_expr])
+
+                indexing_maps = ArrayAttr.get([
+                    AffineMapAttr.get(map_a),
+                    AffineMapAttr.get(map_b),
+                    AffineMapAttr.get(map_c)
+                ])
+
+                iterator_types = ArrayAttr.get([
+                    StringAttr.get("parallel") for _ in range(dims - 1)  # batch + M + N
+                ] + [StringAttr.get("reduction")])  # K
+
+                out = memref.alloc(memref_type_out, [], [])
+                zero = arith.ConstantOp(element_type, 0.0)
+                linalg.fill(zero, outs=[out])
+
+                generic_op = linalg.generic(
+                    inputs=[a, b], outputs=[out], result_tensors=[],
+                    indexing_maps=indexing_maps,
+                    iterator_types=iterator_types
+                )
+
+                block = generic_op.regions[0].blocks.append(element_type, element_type, element_type)
+                with InsertionPoint(block):
+                    a_val, b_val, acc_val = block.arguments
+                    mul = arith.mulf(a_val, b_val)
+                    add = arith.addf(acc_val, mul)
+                    linalg.yield_([add])
+
+                func.ReturnOp([out])
+
+        return fn_name
+
+    def gen_inline_array_transpose(self, ary_val, permutation=None, dtype=None):
+        """Inline version of transpose that returns the transposed memref directly."""
+        # Get input shape information
+        input_type = ary_val.type
+        if not isinstance(input_type, MemRefType):
+            raise TypeError("Input must be a MemRef type")
+
+        in_shape = input_type.shape
+        dims = len(in_shape)
+
+        if permutation is None:
+            permutation = [i for i in range(dims).__reversed__()]
+
+        return self.gen_inline_array_transpose_shaped(ary_val, in_shape, permutation=permutation, dtype=dtype)
+
+    def gen_inline_array_transpose_shaped(self, ary_val, in_shape, permutation=None, dtype=None):
+        """Inline version of transpose_shaped that returns the transposed memref directly."""
+        if permutation is None:
+            permutation = [i for i in range(len(in_shape)).__reversed__()]
+
+        element_type = F64Type.get()
+        permutation = list(permutation)
+        out_shape = [in_shape[i] for i in permutation]
+
+        # Verify permutation dimensions match
+        for i, j in enumerate(permutation):
+            assert out_shape[i] == in_shape[j]
+
+        memref_type_out = MemRefType.get(out_shape, element_type)
+        output_memref = memref.alloc(memref_type_out, [], [])
+        linalg.transpose(ary_val, outs=[output_memref], permutation=permutation)
+
+        return output_memref
+
     def gen_array_transpose(self, module, dims, permutation = None, dtype = None):
         fn_name = self.gen_fn_name("transpose")
 
@@ -675,6 +925,31 @@ class Backend:
                 input_memref, output_memref = func_op.arguments
                 linalg.transpose(input_memref, outs=[output_memref], permutation=permutation)
                 func.ReturnOp([])
+
+        return fn_name
+
+    def gen_array_transpose_shaped(self, module, in_shape, permutation = None, dtype = None):
+        fn_name = self.gen_fn_name("transpose")
+
+        if permutation is None:
+            permutation=[i for i in range(len(in_shape)).__reversed__()]
+
+        out_shape = [in_shape[i] for i in permutation]
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type_in = MemRefType.get(in_shape, element_type)
+            memref_type_out = MemRefType.get(out_shape, element_type)
+            func_type = FunctionType.get([memref_type_in], [memref_type_out])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                input_memref, = func_op.arguments
+                # Use inline version
+                output_memref = self.gen_inline_array_transpose_shaped(input_memref, in_shape, permutation, dtype)
+                func.ReturnOp([output_memref])
 
         return fn_name
 
@@ -859,6 +1134,72 @@ class Backend:
 
         return fn_name
 
+
+    def gen_array_getitem_shaped(self, module, in_shape, out_shape, indices):
+        fn_name = self.gen_fn_name("getitem")
+
+        dims = len(in_shape)
+
+        assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
+        if len(indices) < dims:
+            indices = list(indices) + ([None] * (dims - len(indices)))
+
+        offsets = [0] * dims
+        strides = [1] * dims
+        out_strides = [1] * dims
+
+        for i in range(dims-1,0,-1):
+            out_strides[i-1] = out_strides[i] * in_shape[i]
+
+        modified_axes = []
+
+        for axis, index in enumerate(indices):
+            if index is None:
+                continue
+            elif isinstance(index, int):
+                offsets[axis] = index
+                modified_axes.append(axis)
+            elif isinstance(index, slice):
+                index_start = index.start if index.start is not None else 0
+                index_step = index.step if index.step is not None else 1
+                index_stop = 0
+                if index.stop is None:
+                    raise ValueError("Slices with undefined stop not supported")
+                else:
+                    index_stop = index.stop
+
+                offsets[axis] = index_start
+                modified_axes.append(axis)
+            else:
+                raise TypeError(f"Unknown index type {type(index)}")
+
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            index_type = IndexType.get()
+            memref_type_in = MemRefType.get(in_shape, element_type)
+            memref_type_out = MemRefType.get(out_shape, element_type, layout=StridedLayoutAttr.get(0, out_strides))
+            func_type = FunctionType.get([memref_type_in], [memref_type_out])
+
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
+
+            with InsertionPoint(func_op.add_entry_block()):
+                input_memref, = func_op.arguments
+                subview = memref.SubViewOp(
+                    memref_type_out,
+                    input_memref,
+                    offsets=[],
+                    sizes=[],
+                    strides=[],
+                    static_offsets=DenseI64ArrayAttr.get(offsets),
+                    static_sizes=DenseI64ArrayAttr.get(out_shape),
+                    static_strides=DenseI64ArrayAttr.get(strides)
+                ).result
+
+                func.ReturnOp([subview])
+
+        return fn_name
+
     def gen_array_setitem(self, module, dims, indices):
         fn_name = self.gen_fn_name("setitem")
         assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
@@ -936,133 +1277,201 @@ class Backend:
 
         return fn_name
 
-context = Context()
-context.load_all_available_dialects()
+    def gen_array_setitem_shaped(self, module, in_shape, indices):
+        fn_name = self.gen_fn_name("setitem")
 
-with context:
-    module = Module.create(loc=Location.unknown())
+        dims = len(in_shape)
+        assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
 
-backend = Backend()
+        if len(indices) < dims:
+            indices = list(indices) + ([None] * (dims - len(indices)))
 
-batch_size, seq_len, n_heads, dims, cache_size = 1, 5, 6, 288, 256
-n_local_heads, head_dim = n_heads, dims // n_heads
+        val_shape = in_shape.copy()
+        offsets = [0] * dims
+        strides = [1] * dims
 
-input_shape = (batch_size, seq_len, dims)
-softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
+        modified_axes = []
 
-silu_dims = 768
-norm_eps = 1e-06
-weight_size = 32000
+        for axis, index in enumerate(indices):
+            if index is None:
+                continue
+            elif isinstance(index, int):
+                val_shape[index] = 1
+                offsets[axis] = index
+                modified_axes.append(axis)
+            elif isinstance(index, slice):
+                index_start = index.start if index.start is not None else 0
+                index_step = index.step if index.step is not None else 1
+                index_stop = 0
+                if index.stop is None:
+                    raise ValueError("Slices with undefined stop not supported")
+                else:
+                    index_stop = index.stop
 
-input_ndim = len(input_shape)
-softmax_ndim = len(softmax_input_shape)
+                val_shape[axis] = (index_stop - index_start) // index_step
+                offsets[axis] = index_start
+                modified_axes.append(axis)
+            else:
+                raise TypeError(f"Unknown index type {type(index)}")
 
-arr_max_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.maximumf, None)
-arr_sub = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.subf, None)
-arr_exp = backend.gen_array_unary(module, softmax_ndim, math.exp, None)
-arr_sum_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.addf, None)
-arr_div = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.divf, None)
-arr_broadcast = backend.gen_array_broadcast(module, softmax_ndim - 1, softmax_input_shape, broadcast_along=[softmax_ndim - 1])
+        out_strides = [1] * dims
 
-arr_transpose = backend.gen_array_transpose(module, 2)
-arr_expand = backend.gen_array_expand_dims(module, 2, (0,))
-arr_reshape_exp_1 = backend.gen_array_reshape(module, 2, (batch_size, dims, dims))
-arr_matmul = backend.gen_array_matmul(module, 3, None)
-arr_reshape = backend.gen_array_reshape(module, 3, (batch_size, seq_len, n_local_heads, head_dim))
+        for i in range(dims-1,0,-1):
+            out_strides[i-1] = out_strides[i] * in_shape[i]
 
-arr_reshape_2 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, n_local_heads, head_dim // 2, 2))
-arr_take_0 = backend.gen_array_take(module, 5, 4, 0)
-arr_take_1 = backend.gen_array_take(module, 5, 4, 1)
-arr_reshape_3 = backend.gen_array_reshape(module, 5, (batch_size, seq_len, n_local_heads, head_dim // 2))
-arr_expand_2 = backend.gen_array_expand_dims(module, 2, (0, 2))
-arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, n_local_heads, head_dim // 2), broadcast_along=[0, 2])
-arr_add = backend.gen_array_binary(module, 4, 4, arith.addf, None)
-arr_sub_1 = backend.gen_array_binary(module, 4, 4, arith.subf, None)
-arr_mul = backend.gen_array_binary(module, 4, 4, arith.mulf, None)
-arr_stack = backend.gen_array_stack(module, 4, 2, 3, (head_dim // 2, head_dim // 2))
+        with module.context, InsertionPoint(module.body), Location.unknown():
+            element_type = F64Type.get()
+            memref_type = MemRefType.get(in_shape, element_type)
+            memref_type_out = MemRefType.get(val_shape, element_type)
+            memref_type_subview = MemRefType.get(val_shape, element_type, layout=StridedLayoutAttr.get(0, out_strides))
+            func_type = FunctionType.get([memref_type, memref_type_out], [])
 
-arr_transpose_2 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3))
-arr_setitem = backend.gen_array_setitem(module, 4, (None, slice(0, seq_len)))
-arr_getitem = backend.gen_array_getitem(module, 4, (None, slice(0, seq_len)))
-arr_transpose_3 = backend.gen_array_transpose(module, 4, (0, 1, 3, 2), None)
-arr_matmul_1 = backend.gen_array_matmul(module, 4, None)
-arr_broadcast_3 = backend.gen_array_broadcast(module, 2, (batch_size, n_local_heads, seq_len, seq_len), broadcast_along=[0, 1])
-arr_add_2 = backend.gen_array_binary(module, 4, 4, arith.addf, None)
-arr_matmul_2 = backend.gen_array_matmul(module, 4, None)
-arr_transpose_4 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3), None)
-arr_reshape_4 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, dims))
-arr_fill = backend.gen_array_fill_value(module, 4, None)
-arr_sqrt = backend.gen_array_unary(module, 4, math.sqrt, None)
-arr_div_2 = backend.gen_array_binary(module, 4, 4, arith.divf, None)
+            func_op = func.FuncOp(fn_name, func_type)
+            func_op.attributes["llvm.emit_c_interface"] = UnitAttr.get()
 
-# SILU
-silu_arr_neg = backend.gen_array_unary(module, 3, arith.negf, None)
-silu_arr_exp = backend.gen_array_unary(module, 3, math.exp, None)
-silu_arr_fill = backend.gen_array_fill_value(module, 3, None)
-silu_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
-silu_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
-silu_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
+            with InsertionPoint(func_op.add_entry_block()):
+                arr_memref, value_memref = func_op.arguments
 
-# Feed forward
-ff_arr_transpose = backend.gen_array_transpose(module, 2)
-ff_arr_transpose_2 = backend.gen_array_transpose(module, 2)
-ff_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
-ff_arr_broadcast = backend.gen_array_broadcast(module, 2, (batch_size, dims, silu_dims), broadcast_along=[0])
-ff_arr_broadcast_2 = backend.gen_array_broadcast(module, 2, (batch_size, silu_dims, dims), broadcast_along=[0])
-ff_arr_matmul = backend.gen_array_matmul(module, 3, None)
-ff_arr_matmul_2 = backend.gen_array_matmul(module, 3, None)
+                subview = memref.SubViewOp(
+                    memref_type_subview,
+                    arr_memref,
+                    offsets=[],
+                    sizes=[],
+                    strides=[],
+                    static_offsets=DenseI64ArrayAttr.get(offsets),
+                    static_sizes=DenseI64ArrayAttr.get(val_shape),
+                    static_strides=DenseI64ArrayAttr.get(strides)
+                ).result
 
-# RMSNorm
-rms_arr_square = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
-rms_arr_sum_reduce = backend.gen_array_reduce(module, 3, (2,), arith.addf, None)
-rms_arr_broadcast = backend.gen_array_broadcast(module, 2, (batch_size, seq_len, dims), broadcast_along=[2])
-rms_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
-rms_arr_fill = backend.gen_array_fill_value(module, 3, None)
-rms_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
-rms_arr_sqrt = backend.gen_array_unary(module, 3, math.sqrt, None)
-rms_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
-rms_arr_broadcast_2 = backend.gen_array_broadcast(module, 1, (batch_size, seq_len, dims), broadcast_along=[0, 1])
+                memref.copy(value_memref, subview)
+                func.ReturnOp([])
 
-# Transformer
-tran_arr_add = backend.gen_array_binary(module, input_ndim, input_ndim, arith.addf, None)
+        return fn_name
 
-# Llama forward
-llm_arr_getitem = backend.gen_array_getitem(module, 2, (slice(0, seq_len),))
-llm_arr_fill = backend.gen_array_fill_value(module, 2, None)
-llm_arr_triu = backend.gen_array_triu(module, 2, None)
-llm_arr_matmul = backend.gen_array_matmul(module, 3, None)
-llm_arr_expand_2 = backend.gen_array_broadcast(module, 2, (batch_size, batch_size, dims), broadcast_along=[0])
+def main():
 
-# Llama generate
+    context = Context()
+    context.load_all_available_dialects()
 
+    with context:
+        module = Module.create(loc=Location.unknown())
 
-print("Generated MLIR:")
-print(str(module))
-print("\n" + "="*50 + "\n")
+    backend = Backend()
 
-if _VERIFY:
-    print("Running verification...")
-    from utils import MLIRVerifier
+    batch_size, seq_len, n_heads, dims, cache_size = 1, 5, 6, 288, 256
+    n_local_heads, head_dim = n_heads, dims // n_heads
 
-    verifier = MLIRVerifier(module)
+    input_shape = (batch_size, seq_len, dims)
+    softmax_input_shape = (batch_size, n_local_heads, seq_len, seq_len)
 
-    verifier.verify(
-        [
-            "lower-affine",
-            "convert-linalg-to-loops",
-            "expand-strided-metadata",
-            "lower-affine",
-            "convert-scf-to-cf",
-            "finalize-memref-to-llvm",
-            "convert-math-to-libm",
-            "convert-func-to-llvm",
-            "convert-index-to-llvm",
-            "reconcile-unrealized-casts"
-        ],
-        "outs"
-    )
+    silu_dims = 768
+    norm_eps = 1e-06
+    weight_size = 32000
 
-if __name__ == "__main__":
+    input_ndim = len(input_shape)
+    softmax_ndim = len(softmax_input_shape)
+
+    arr_max_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.maximumf, None)
+    arr_sub = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.subf, None)
+    arr_exp = backend.gen_array_unary(module, softmax_ndim, math.exp, None)
+    arr_sum_reduce = backend.gen_array_reduce(module, softmax_ndim, (softmax_ndim - 1,), arith.addf, None)
+    arr_div = backend.gen_array_binary(module, softmax_ndim, softmax_ndim, arith.divf, None)
+    arr_broadcast = backend.gen_array_broadcast_old(module, softmax_ndim - 1, softmax_input_shape, broadcast_along=[softmax_ndim - 1])
+
+    arr_transpose = backend.gen_array_transpose(module, 2)
+    arr_expand = backend.gen_array_expand_dims(module, 2, (0,))
+    arr_reshape_exp_1 = backend.gen_array_reshape(module, 2, (batch_size, dims, dims))
+    arr_matmul = backend.gen_array_matmul(module, 3, None)
+    arr_reshape = backend.gen_array_reshape(module, 3, (batch_size, seq_len, n_local_heads, head_dim))
+
+    arr_reshape_2 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, n_local_heads, head_dim // 2, 2))
+    arr_take_0 = backend.gen_array_take(module, 5, 4, 0)
+    arr_take_1 = backend.gen_array_take(module, 5, 4, 1)
+    arr_reshape_3 = backend.gen_array_reshape(module, 5, (batch_size, seq_len, n_local_heads, head_dim // 2))
+    arr_expand_2 = backend.gen_array_expand_dims(module, 2, (0, 2))
+    arr_broadcast_2 = backend.gen_array_broadcast_old(module, 2, (batch_size, seq_len, n_local_heads, head_dim // 2), broadcast_along=[0, 2])
+    arr_add = backend.gen_array_binary(module, 4, 4, arith.addf, None)
+    arr_sub_1 = backend.gen_array_binary(module, 4, 4, arith.subf, None)
+    arr_mul = backend.gen_array_binary(module, 4, 4, arith.mulf, None)
+    arr_stack = backend.gen_array_stack_old(module, 4, 2, 3, (head_dim // 2, head_dim // 2))
+
+    arr_transpose_2 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3))
+    arr_setitem = backend.gen_array_setitem(module, 4, (None, slice(0, seq_len)))
+    arr_getitem = backend.gen_array_getitem(module, 4, (None, slice(0, seq_len)))
+    arr_transpose_3 = backend.gen_array_transpose(module, 4, (0, 1, 3, 2), None)
+    arr_matmul_1 = backend.gen_array_matmul(module, 4, None)
+    arr_broadcast_3 = backend.gen_array_broadcast_old(module, 2, (batch_size, n_local_heads, seq_len, seq_len), broadcast_along=[0, 1])
+    arr_add_2 = backend.gen_array_binary(module, 4, 4, arith.addf, None)
+    arr_matmul_2 = backend.gen_array_matmul(module, 4, None)
+    arr_transpose_4 = backend.gen_array_transpose(module, 4, (0, 2, 1, 3), None)
+    arr_reshape_4 = backend.gen_array_reshape(module, 4, (batch_size, seq_len, dims))
+    arr_fill = backend.gen_array_fill_value(module, 4, None)
+    arr_sqrt = backend.gen_array_unary(module, 4, math.sqrt, None)
+    arr_div_2 = backend.gen_array_binary(module, 4, 4, arith.divf, None)
+
+    # SILU
+    silu_arr_neg = backend.gen_array_unary(module, 3, arith.negf, None)
+    silu_arr_exp = backend.gen_array_unary(module, 3, math.exp, None)
+    silu_arr_fill = backend.gen_array_fill_value(module, 3, None)
+    silu_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
+    silu_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+    silu_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
+
+    # Feed forward
+    ff_arr_transpose = backend.gen_array_transpose(module, 2)
+    ff_arr_transpose_2 = backend.gen_array_transpose(module, 2)
+    ff_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+    ff_arr_broadcast = backend.gen_array_broadcast_old(module, 2, (batch_size, dims, silu_dims), broadcast_along=[0])
+    ff_arr_broadcast_2 = backend.gen_array_broadcast_old(module, 2, (batch_size, silu_dims, dims), broadcast_along=[0])
+    ff_arr_matmul = backend.gen_array_matmul(module, 3, None)
+    ff_arr_matmul_2 = backend.gen_array_matmul(module, 3, None)
+
+    # RMSNorm
+    rms_arr_square = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+    rms_arr_sum_reduce = backend.gen_array_reduce(module, 3, (2,), arith.addf, None)
+    rms_arr_broadcast = backend.gen_array_broadcast_old(module, 2, (batch_size, seq_len, dims), broadcast_along=[2])
+    rms_arr_div = backend.gen_array_binary(module, 3, 3, arith.divf, None)
+    rms_arr_fill = backend.gen_array_fill_value(module, 3, None)
+    rms_arr_add = backend.gen_array_binary(module, 3, 3, arith.addf, None)
+    rms_arr_sqrt = backend.gen_array_unary(module, 3, math.sqrt, None)
+    rms_arr_mul = backend.gen_array_binary(module, 3, 3, arith.mulf, None)
+    rms_arr_broadcast_2 = backend.gen_array_broadcast_old(module, 1, (batch_size, seq_len, dims), broadcast_along=[0, 1])
+
+    # Transformer
+    tran_arr_add = backend.gen_array_binary(module, input_ndim, input_ndim, arith.addf, None)
+
+    # Llama forward
+    llm_arr_getitem = backend.gen_array_getitem(module, 2, (slice(0, seq_len),))
+    llm_arr_fill = backend.gen_array_fill_value(module, 2, None)
+    llm_arr_triu = backend.gen_array_triu(module, 2, None)
+    llm_arr_matmul = backend.gen_array_matmul(module, 3, None)
+    llm_arr_expand_2 = backend.gen_array_broadcast_old(module, 2, (batch_size, batch_size, dims), broadcast_along=[0])
+
+    print("Generated MLIR:")
+    print(str(module))
+    print("\n" + "="*50 + "\n")
+
+    if _VERIFY:
+        print("Running verification...")
+        from utils import MLIRVerifier
+
+        verifier = MLIRVerifier(module)
+
+        verifier.verify(
+            [
+                "lower-affine",
+                "convert-linalg-to-loops",
+                "expand-strided-metadata",
+                "lower-affine",
+                "convert-scf-to-cf",
+                "finalize-memref-to-llvm",
+                "convert-math-to-libm",
+                "convert-func-to-llvm",
+                "convert-index-to-llvm",
+                "reconcile-unrealized-casts"
+            ],
+            "outs"
+        )
 
 
     if _FUZZ:
@@ -1140,9 +1549,9 @@ if __name__ == "__main__":
     arr_div_2 = backend.jit_compile(module, arr_div_2, ((batch_size, n_local_heads, seq_len, seq_len), (batch_size, n_local_heads, seq_len, seq_len),), ((batch_size, n_local_heads, seq_len, seq_len),))
 
     # SILU
-    silu_arr_neg = backend.jit_compile(module, silu_arr_neg, ((batch_size, seq_len, silu_dims),), ((batch_size, seq_len, silu_dims),), None) 
+    silu_arr_neg = backend.jit_compile(module, silu_arr_neg, ((batch_size, seq_len, silu_dims),), ((batch_size, seq_len, silu_dims),), None)
     silu_arr_exp = backend.jit_compile(module, silu_arr_exp, ((batch_size, seq_len, silu_dims),), ((batch_size, seq_len, silu_dims),), None)
- 
+
     silu_arr_fill = backend.jit_compile(module, silu_arr_fill, (None,), ((batch_size, seq_len, silu_dims),), None)
     silu_arr_add =  backend.jit_compile(module, silu_arr_add, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
     silu_arr_mul =  backend.jit_compile(module, silu_arr_mul, ((batch_size, seq_len, silu_dims), (batch_size, seq_len, silu_dims)), ((batch_size, seq_len, silu_dims),))
@@ -1170,7 +1579,7 @@ if __name__ == "__main__":
 
     # Transformer
     tran_arr_add = backend.jit_compile(module, tran_arr_add, ((batch_size, seq_len, dims), (batch_size, seq_len, dims)), ((batch_size, seq_len, dims),))
-    
+
     # Llama forward
     llm_arr_getitem = backend.jit_compile(module, llm_arr_getitem, ((cache_size, head_dim // 2),), ((seq_len, head_dim // 2),), shared_libs=[find_library(x) for x in shared_libs])
     llm_arr_fill = backend.jit_compile(module, llm_arr_fill, (None,), ((seq_len, seq_len),), None)
@@ -1482,7 +1891,7 @@ if __name__ == "__main__":
                                weight=weight,
                                eps=eps)
 
-    
+
     assert np.allclose(numpy_result, mlir_result)
 
     print("Function executed succesfully.")
@@ -1567,7 +1976,7 @@ if __name__ == "__main__":
 
     cache_k = np.random.random(batch_size * cache_size * n_heads * head_dim).reshape(batch_size, cache_size, n_heads, head_dim)
     cache_v = np.random.random(batch_size * cache_size * n_heads * head_dim).reshape(batch_size, cache_size, n_heads, head_dim)
-    
+
     numpy_result = transformer_block(x=x_input,
                                      start_pos=start_pos,
                                      mask=mask,
@@ -1725,8 +2134,9 @@ if __name__ == "__main__":
 
     args = ModelArgs()
     print(f"Using precision: {args.dtype}")
-    tokenizer = Tokenizer("/home/kc611/Desktop/Workspaces/base/llama3.np/tokenizer.model.np")
-    model = llama_init("/home/kc611/Desktop/Workspaces/base/llama3.np/stories15M.model.npz", args)
+    LLM_DATA_FOLDER = pathlib.Path(os.environ.get("LLM_DATA_FOLDER"))
+    tokenizer = Tokenizer(LLM_DATA_FOLDER / "tokenizer.model.np")
+    model = llama_init(LLM_DATA_FOLDER / "stories15M.model.npz", args)
 
     prompt = "Once upon a time"
 
@@ -1750,3 +2160,7 @@ if __name__ == "__main__":
     print("Function executed succesfully.")
 
     print("\n" + "=" * 50 + "\n")
+
+
+if __name__ == "__main__":
+    main()

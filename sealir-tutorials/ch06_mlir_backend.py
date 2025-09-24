@@ -91,7 +91,7 @@ from utils import IN_NOTEBOOK, Report, display
 # Define the core MLIR backend class that handles type lowering and
 # expression compilation.
 
-_DEBUG = False
+_DEBUG = True
 
 
 @dataclass(frozen=True)
@@ -142,7 +142,7 @@ class Backend:
         and data flow constructs.
         """
         context = self.context
-        self.loc = loc = ir.Location.unknown(context=context)
+        self.loc = loc = ir.Location.name(f"{self}.lower()", context=context)
         self.module = module = ir.Module.create(loc=loc)
 
         # Get the module body pointer so we can insert content into the
@@ -232,6 +232,9 @@ class Backend:
             module.dump()
         return module
 
+    def _cast_return_value(self, val):
+        return val
+
     def lower_expr(self, expr: SExpr, state: LowerStates):
         """Expression Lowering Implementation
 
@@ -257,7 +260,7 @@ class Backend:
 
                 portnames = [p.name for p in body.ports]
                 retval = outs[portnames.index(internal_prefix("ret"))]
-                func.ReturnOp([retval])
+                func.ReturnOp([self._cast_return_value(retval)])
             case rg.RegionBegin(inports=ins):
                 portvalues = []
                 for i, k in enumerate(ins):
@@ -432,7 +435,7 @@ class Backend:
                 return while_op_res
 
             case _:
-                raise NotImplementedError(expr, type(expr))
+                raise NotImplementedError(expr, type(expr), ase.as_tuple(expr))
 
     # ## JIT Compilation
     #

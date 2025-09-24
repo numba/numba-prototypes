@@ -170,11 +170,13 @@ def ruleset_type_basic(
     yield birewrite((ta | tb) | tc).to(ta | (tb | tc))
 
     # Identify errors
-    yield rule(
-        # If both sides are valid types and not equal, then fail
-        ty == ta | tb,
-        ne(ta).to(tb),  # ta != tb
-    ).then(failed_to_unify(ty))
+    ### FIXME: This doesn't work in llm_midend.py::test_attention_setitem_getitem_effect
+    ###        failed_to_unify(ty) is marking unified case as failed.
+    # yield rule(
+    #     # If both sides are valid types and not equal, then fail
+    #     ty == ta | tb,
+    #     ne(ta).to(tb),  # ta != tb
+    # ).then(failed_to_unify(ty))
 
 
 if __name__ == "__main__":
@@ -510,6 +512,7 @@ def egraph_saturation_with_error_checking(
     ruleset: Ruleset,
     pipeline_debug: bool = False,
     pipeline_report=Report.Sink(),
+    display_egraph=False,
 ) -> EGraphOutput:
     with pipeline_report.nest("Egraph Saturation") as report:
         # Define graph root that points to the function
@@ -523,6 +526,12 @@ def egraph_saturation_with_error_checking(
         # Run all the rules until saturation
         runreport = egraph.run(ruleset.saturate())
         report.append("saturation report", runreport.updated)
+
+        if display_egraph:
+            # egraph.display()
+            from sealir.model_explorer.core import prepare_egraph, visualize_egraph
+            # visualize_egraph(egraph, filepath="debug")
+            prepare_egraph(egraph, filepath="debug")
 
         if pipeline_debug:
             report.append("[debug] saturated egraph", egraph)
@@ -552,6 +561,7 @@ def pipeline_egraph_extraction(
     converter_class,
     cost_model,
     pipeline_report=Report.Sink(),
+
 ) -> EGraphExtractionOutput:
     with pipeline_report.nest(
         "EGraph Extraction", default_expanded=True
@@ -1010,7 +1020,7 @@ class MyCostModel(CostModel):
             return self.get_simple(1)
         elif op.startswith("Py_"):
             # Penalize Python operations
-            return self.get_simple(float("1e9"))
+            return self.get_simple(float("1e20"))
         elif op.startswith("Nb_"):
             return self.get_simple(cost)
         # Fallthrough to parent's cost function
