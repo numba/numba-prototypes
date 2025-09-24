@@ -3899,6 +3899,11 @@ def transformer_block(
 #######################################
 
 DEBUG = True
+PLOT = True
+n_repeats = 5
+n_runs = 10
+func1_name = "NumPy"
+func2_name = "MLIRGen"
 
 def _run_array_unary_test(target_function, inary):
     return _run_array_test(target_function, [inary])
@@ -3925,6 +3930,77 @@ def _run_array_test(target_function, args):
         print("DESIRED".center(80, '-'))
         print(desired)
     np.testing.assert_allclose(got, desired)
+
+    if PLOT:
+        import timeit
+        import matplotlib.pyplot as plt
+
+        # Collect multiple timing measurements for each function
+        times1 = []
+        times2 = []
+
+        print(f"Running {n_repeats} timing measurements, each with {n_runs} executions...")
+        
+        for i in range(n_repeats):
+            # Time function 1
+            t1 = timeit.Timer(lambda: target_function(*args))
+            time1 = t1.timeit(number=n_runs) / n_runs  # Average time per execution
+            times1.append(time1)
+            
+            # Time function 2
+            t2 = timeit.Timer(lambda: jit_func(*args))
+            time2 = t2.timeit(number=n_runs) / n_runs  # Average time per execution
+            times2.append(time2)
+
+            if (i + 1) % 10 == 0:
+                print(f"  Completed {i + 1}/{n_repeats} measurements")
+        
+        plt.boxplot([times1, times2], labels=[func1_name, func2_name])
+        plt.ylabel('Execution Time (milliseconds)')
+        plt.xlabel('Function')
+        plt.title('Function Performance Comparison')
+        plt.grid(True, alpha=0.3)
+
+        # Calculate and display statistics
+        stats_data = [
+            (times1, func1_name),
+            (times2, func2_name)
+        ]
+        
+        stats_text = []
+        for times, name in stats_data:
+            mean_time = np.mean(times)
+            std_time = np.std(times)
+            median_time = np.median(times)
+            min_time = np.min(times)
+            max_time = np.max(times)
+            stats_text.append(f"{name}:\n"
+                            f"  Mean: {mean_time:.4f} ms\n"
+                            f"  Std: {std_time:.4f} ms\n"
+                            f"  Median: {median_time:.4f} ms\n"
+                            f"  Range: [{min_time:.4f}, {max_time:.4f}] ms")
+        
+        # Add text box with statistics
+        textstr = '\n\n'.join(stats_text)
+        props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
+        plt.text(0.02, 0.98, textstr,  transform=plt.gca().transAxes, fontsize=9,
+                verticalalignment='top', bbox=props)
+        
+        # Add performance comparison
+        mean1 = np.mean(times1)
+        mean2 = np.mean(times2)
+        if mean1 < mean2:
+            faster = func1_name
+            ratio = mean2 / mean1
+        else:
+            faster = func2_name
+            ratio = mean1 / mean2
+        
+        comparison_text = f"{faster} is {ratio:.2f}x faster (on average)"
+        plt.figtext(0.5, 0.02, comparison_text, ha='center', fontsize=11, 
+                    fontweight='bold', color='darkgreen')
+        
+        plt.show()
 
 
 def expected_func(x):
@@ -3958,5 +4034,5 @@ def main():
         print(desired)
     np.testing.assert_allclose(res, desired)
 
-# if __name__ == "__main__":
-#     main()
+if __name__ == "__main__":
+    test_attention_full()
