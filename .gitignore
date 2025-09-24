@@ -1,6 +1,6 @@
 *.o
 *.so
 *.pyc
-__pycache__
+.*__pycache__
 pages/**
 .ipynb_checkpoints

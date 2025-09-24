@@ -2381,16 +2381,42 @@ def _mlir_location_from_frame(info: str=""):
 
     return Location.name(location_str)
 
-
-from llama_functions import Backend as LlamaBackend
 from ch06_mlir_backend import Backend as _ch06_MlirBackend, LowerStates
+
+_DEBUG = False
 
 class MlirBackend(_ch06_MlirBackend):
     def __init__(self):
         super().__init__()
 
-        self.codegen = LlamaBackend()
+    def run_passes(self, module):
+        from mlir.passmanager import PassManager
 
+        if _DEBUG:
+            module.dump()
+        pass_man = PassManager(context=module.context)
+
+        if _DEBUG:
+            module.context.enable_multithreading(False)
+        if _DEBUG:
+            # notebook may hang if ir_printing is enabled and and MLIR failed.
+            pass_man.enable_ir_printing()
+
+        pass_man.add("convert-linalg-to-loops")
+        pass_man.add("expand-strided-metadata")
+        pass_man.add("lower-affine")
+        pass_man.add("convert-scf-to-cf")
+        pass_man.add("finalize-memref-to-llvm")
+        pass_man.add("convert-math-to-libm")
+        pass_man.add("convert-func-to-llvm")
+        pass_man.add("convert-index-to-llvm")
+        pass_man.add("reconcile-unrealized-casts")
+        pass_man.enable_verifier(True)
+        pass_man.run(module.operation)
+        # Output LLVM-dialect MLIR
+        if _DEBUG:
+            module.dump()
+        return module
 
     def get_last_compiled_return_type(self):
         return self._retty
@@ -2553,6 +2579,380 @@ class MlirBackend(_ch06_MlirBackend):
                 static_strides=static_strides
             )
 
+    def _gen_take_shaped(self, ishape, oshape, ary_val, index, src_nd):
+        from mlir.dialects import memref
+        from mlir import ir
+    
+        axis = -1
+        element_type = ir.F64Type.get()
+        sub_shape = list(ishape)
+        sub_shape[axis] = 1
+
+        offsets = [0] * src_nd
+        offsets[axis] = index
+
+        strides = [1] * src_nd
+
+        calculated_strides = []
+        current_stride = 1
+        for i in reversed(range(src_nd)):
+            dim = ishape[i]
+
+            calculated_strides.insert(0, current_stride)
+            # Update stride for next outer dimension
+            current_stride *= dim
+
+        out_layout = ir.StridedLayoutAttr.get(index, calculated_strides)
+        memref_type_out = ir.MemRefType.get(sub_shape, element_type, layout=out_layout)
+
+
+        subview = memref.SubViewOp(
+            memref_type_out,
+            ary_val,
+            offsets=[],
+            sizes=[],
+            strides=[],
+            static_offsets=ir.DenseI64ArrayAttr.get(offsets),
+            static_sizes=ir.DenseI64ArrayAttr.get(sub_shape),
+            static_strides=ir.DenseI64ArrayAttr.get(strides)
+        ).result
+
+        result = ir.MemRefType.get(oshape, element_type, layout=ir.StridedLayoutAttr.get(index, calculated_strides[:-1]))
+
+        # collapse the axis
+        reassoc = [[x] for x in range(len(sub_shape))]
+        reassoc_target = reassoc.pop(axis)
+        reassoc[axis].extend(reassoc_target)
+        collapsed = memref.CollapseShapeOp(
+            src=subview,
+            result=result,
+            reassociation=reassoc,
+        ).result
+
+        # np.take returns a copy
+        copied = memref.alloc(ir.MemRefType.get(oshape, element_type), [], [])
+        memref.copy(collapsed, copied)
+
+        return copied
+
+
+    def _gen_array_stack_shaped(self, input_args, axis, inp_shape, out_shape):
+        from mlir.dialects import memref
+        from mlir import ir
+    
+        if axis == -1:
+            axis = len(out_shape) - 1
+
+        num_inputs = len(input_args)
+
+        ndim = len(out_shape) - 1
+        element_type = ir.F64Type.get()
+
+        memref_type_out = ir.MemRefType.get(out_shape, element_type)
+
+        output_memref = memref.alloc(memref_type_out, [], [])
+        curr_offset = 0
+        input_shape = list(inp_shape)
+        input_shape.insert(axis, 1)
+
+        strides = [1] * (ndim + 1)
+        strides[axis] = num_inputs
+
+        out_strides = [1] * (ndim + 1)
+        for i in range(len(out_shape) - 2, -1, -1):
+            out_strides[i] = out_strides[i+1] * out_shape[i+1]
+        out_strides[axis] *= num_inputs
+
+        for input_arg in input_args:
+
+            offsets = [0] * (ndim + 1)
+            offsets[axis] = curr_offset
+            out_layout = ir.StridedLayoutAttr.get(curr_offset, out_strides)
+            memref_type_out_inner = ir.MemRefType.get(input_shape, element_type, layout=out_layout)
+            subview = memref.SubViewOp(
+                memref_type_out_inner,
+                output_memref,
+                offsets=[],
+                sizes=[],
+                strides=[],
+                static_offsets=ir.DenseI64ArrayAttr.get(offsets),
+                static_sizes=ir.DenseI64ArrayAttr.get(input_shape),
+                static_strides=ir.DenseI64ArrayAttr.get(strides)
+            ).result
+
+            re_shape = list(out_shape)
+            re_shape[axis] = 1
+            memref_type_in_inner = ir.MemRefType.get(re_shape, element_type)
+
+            reassociation = self.build_mlir_reassociation(ndim, [axis-1])
+
+            input_arg_exp = memref.expand_shape(
+                memref_type_in_inner,
+                input_arg,
+                reassociation=reassociation,
+                output_shape=[],
+                static_output_shape=ir.DenseI64ArrayAttr.get(re_shape)
+            )
+
+            memref.copy(input_arg_exp, subview)
+            curr_offset += 1
+
+        return output_memref
+
+
+    @classmethod
+    def build_mlir_reassociation(cls, ndim, new_axes):
+        from mlir import ir
+
+        new_axes = sorted([ax if ax >= 0 else ndim + len(new_axes) + ax for ax in new_axes])
+        final_ndim = ndim + len(new_axes)
+        is_new_dim = [False] * final_ndim
+        for ax in new_axes:
+            is_new_dim[ax] = True
+
+        reassociation = []
+        current_group = []
+        for output_pos in range(final_ndim):
+            current_group.append(output_pos)
+            if not is_new_dim[output_pos]:
+                reassociation.append(current_group)
+                current_group = []
+
+        # Convert to MLIR ArrayAttr
+        attr_groups = []
+        for group in reassociation:
+            group_attrs = [ir.IntegerAttr.get(ir.IntegerType.get_signless(64), idx) for idx in group]
+            attr_groups.append(ir.ArrayAttr.get(group_attrs))
+
+        return ir.ArrayAttr.get(attr_groups)
+
+    def _gen_inline_array_transpose(self, ary_val, permutation=None, dtype=None):
+        """Inline version of transpose that returns the transposed memref directly."""
+        # Get input shape information
+        from mlir import ir
+
+        input_type = ary_val.type
+        if not isinstance(input_type, ir.MemRefType):
+            raise TypeError("Input must be a MemRef type")
+
+        in_shape = input_type.shape
+        dims = len(in_shape)
+
+        if permutation is None:
+            permutation = [i for i in range(dims).__reversed__()]
+
+        return self._gen_inline_array_transpose_shaped(ary_val, in_shape, permutation=permutation, dtype=dtype)
+
+    def _gen_inline_array_transpose_shaped(self, ary_val, in_shape, permutation=None, dtype=None):
+        """Inline version of transpose_shaped that returns the transposed memref directly."""
+        from mlir import ir
+        from mlir.dialects import memref, linalg
+
+        if permutation is None:
+            permutation = [i for i in range(len(in_shape)).__reversed__()]
+
+        element_type = ir.F64Type.get()
+        permutation = list(permutation)
+        out_shape = [in_shape[i] for i in permutation]
+
+        # Verify permutation dimensions match
+        for i, j in enumerate(permutation):
+            assert out_shape[i] == in_shape[j]
+
+        memref_type_out = ir.MemRefType.get(out_shape, element_type)
+        output_memref = memref.alloc(memref_type_out, [], [])
+        linalg.transpose(ary_val, outs=[output_memref], permutation=permutation)
+
+        return output_memref
+
+    def _gen_array_matmul_shaped(self, lhs_matrix, rhs_matrix, out_shape):
+        from mlir import ir
+        from mlir.dialects import memref, linalg, arith
+
+        element_type = ir.F64Type.get()
+        memref_type_out = ir.MemRefType.get(out_shape, element_type)
+
+        dims = len(out_shape)
+
+        total_dims = dims + 1
+
+        batch_exprs = [ir.AffineExpr.get_dim(i) for i in range(dims - 2)]
+        m_expr = ir.AffineExpr.get_dim(dims - 2)  # M dimension
+        n_expr = ir.AffineExpr.get_dim(dims - 1)  # N dimension
+        k_expr = ir.AffineExpr.get_dim(dims)      # K dimension (reduction)
+
+        map_a = ir.AffineMap.get(total_dims, 0, batch_exprs + [m_expr, k_expr])
+        map_b = ir.AffineMap.get(total_dims, 0, batch_exprs + [k_expr, n_expr])
+        map_c = ir.AffineMap.get(total_dims, 0, batch_exprs + [m_expr, n_expr])
+
+        indexing_maps = ir.ArrayAttr.get([
+            ir.AffineMapAttr.get(map_a),
+            ir.AffineMapAttr.get(map_b),
+            ir.AffineMapAttr.get(map_c)
+        ])
+
+        iterator_types = ir.ArrayAttr.get([
+            ir.StringAttr.get("parallel") for _ in range(dims - 1)  # batch + M + N
+        ] + [ir.StringAttr.get("reduction")])  # K
+
+        out = memref.alloc(memref_type_out, [], [])
+        zero = arith.ConstantOp(element_type, 0.0)
+        linalg.fill(zero, outs=[out])
+
+        generic_op = linalg.generic(
+            inputs=[lhs_matrix, rhs_matrix], outputs=[out], result_tensors=[],
+            indexing_maps=indexing_maps,
+            iterator_types=iterator_types
+        )
+
+        block = generic_op.regions[0].blocks.append(element_type, element_type, element_type)
+        with ir.InsertionPoint(block):
+            a_val, b_val, acc_val = block.arguments
+            mul = arith.mulf(a_val, b_val)
+            add = arith.addf(acc_val, mul)
+            linalg.yield_([add])
+
+        return out
+
+    def _gen_array_expand_dims_shaped(self, ary_val, axes, in_shape):
+        from mlir import ir
+        from mlir.dialects import memref
+
+        element_type = ir.F64Type.get()
+
+        result_shape = list(in_shape)
+        for i in sorted(axes):
+            result_shape.insert(i, 1)
+        dims = len(in_shape)
+
+        memref_type_res = ir.MemRefType.get(result_shape, element_type)
+
+        reassociation = self.build_mlir_reassociation(dims, axes)
+        res = memref.expand_shape(memref_type_res,
+            ary_val,
+            reassociation=reassociation,
+            output_shape=[], # [2, 3, 4]
+            static_output_shape=ir.DenseI64ArrayAttr.get(result_shape)
+        )
+
+        return res
+
+
+    def _gen_array_getitem_shaped(self, input_memref, indices, in_shape, out_shape):
+        from mlir import ir
+        from mlir.dialects import memref
+    
+        dims = len(in_shape)
+
+        assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
+        if len(indices) < dims:
+            indices = list(indices) + ([None] * (dims - len(indices)))
+
+        offsets = [0] * dims
+        strides = [1] * dims
+        out_strides = [1] * dims
+
+        for i in range(dims-1,0,-1):
+            out_strides[i-1] = out_strides[i] * in_shape[i]
+
+        modified_axes = []
+
+        for axis, index in enumerate(indices):
+            if index is None:
+                continue
+            elif isinstance(index, int):
+                offsets[axis] = index
+                modified_axes.append(axis)
+            elif isinstance(index, slice):
+                index_start = index.start if index.start is not None else 0
+                index_step = index.step if index.step is not None else 1
+                index_stop = 0
+                if index.stop is None:
+                    raise ValueError("Slices with undefined stop not supported")
+                else:
+                    index_stop = index.stop
+
+                offsets[axis] = index_start
+                modified_axes.append(axis)
+            else:
+                raise TypeError(f"Unknown index type {type(index)}")
+
+        element_type = ir.F64Type.get()
+        memref_type_out = ir.MemRefType.get(out_shape, element_type, layout=ir.StridedLayoutAttr.get(0, out_strides))
+
+        subview = memref.SubViewOp(
+            memref_type_out,
+            input_memref,
+            offsets=[],
+            sizes=[],
+            strides=[],
+            static_offsets=ir.DenseI64ArrayAttr.get(offsets),
+            static_sizes=ir.DenseI64ArrayAttr.get(out_shape),
+            static_strides=ir.DenseI64ArrayAttr.get(strides)
+        ).result
+
+        return subview
+
+
+    def _gen_array_setitem_shaped(self, arr_memref, value_memref, indices, in_shape):
+        from mlir import ir
+        from mlir.dialects import memref
+
+        dims = len(in_shape)
+        assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
+
+        if len(indices) < dims:
+            indices = list(indices) + ([None] * (dims - len(indices)))
+
+        val_shape = in_shape.copy()
+        offsets = [0] * dims
+        strides = [1] * dims
+
+        modified_axes = []
+
+        for axis, index in enumerate(indices):
+            if index is None:
+                continue
+            elif isinstance(index, int):
+                val_shape[index] = 1
+                offsets[axis] = index
+                modified_axes.append(axis)
+            elif isinstance(index, slice):
+                index_start = index.start if index.start is not None else 0
+                index_step = index.step if index.step is not None else 1
+                index_stop = 0
+                if index.stop is None:
+                    raise ValueError("Slices with undefined stop not supported")
+                else:
+                    index_stop = index.stop
+
+                val_shape[axis] = (index_stop - index_start) // index_step
+                offsets[axis] = index_start
+                modified_axes.append(axis)
+            else:
+                raise TypeError(f"Unknown index type {type(index)}")
+
+        out_strides = [1] * dims
+
+        for i in range(dims-1,0,-1):
+            out_strides[i-1] = out_strides[i] * in_shape[i]
+
+        element_type = ir.F64Type.get()
+        memref_type_subview = ir.MemRefType.get(val_shape, element_type, layout=ir.StridedLayoutAttr.get(0, out_strides))
+   
+        subview = memref.SubViewOp(
+            memref_type_subview,
+            arr_memref,
+            offsets=[],
+            sizes=[],
+            strides=[],
+            static_offsets=ir.DenseI64ArrayAttr.get(offsets),
+            static_sizes=ir.DenseI64ArrayAttr.get(val_shape),
+            static_strides=ir.DenseI64ArrayAttr.get(strides)
+        ).result
+
+        memref.copy(value_memref, subview)
+
 
     def _gen_binop_ufunc(self, lhs_val, rhs_val, lhs_shape, rhs_shape, outshape, op):
         from mlir.dialects import arith, func, memref, linalg
@@ -2672,9 +3072,9 @@ class MlirBackend(_ch06_MlirBackend):
         return result
 
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
-        from mlir.dialects import arith, func, memref, linalg, math as mlir_math
+        from mlir.dialects import arith, memref, linalg, math as mlir_math
         from mlir import ir
-        be: LlamaBackend = self.codegen
+
         match op, operands:
             case "MathOp_Sqrt_F64<x>", (operand,):
                 operand = (yield operand)
@@ -2727,61 +3127,10 @@ class MlirBackend(_ch06_MlirBackend):
             case "NpyOp_Take_Shaped_one_index<io, ary, index, axis, src_nd, inshape, outshape>", (io, ary, index, -1, src_nd, inshape, outshape):
                 # This is implementing np.take(ary, index, axis=-1)
                 (yield io)
-                axis = -1
-                element_type = ir.F64Type.get()
                 ary_val = (yield ary)
-                oshape = TypeSpeller.apply(outshape)
                 ishape = TypeSpeller.apply(inshape)
-
-                sub_shape = list(ishape)
-                sub_shape[axis] = 1
-
-                offsets = [0] * src_nd
-                offsets[axis] = index
-
-                strides = [1] * src_nd
-
-                calculated_strides = []
-                current_stride = 1
-                for i in reversed(range(src_nd)):
-                    dim = ishape[i]
-
-                    calculated_strides.insert(0, current_stride)
-                    # Update stride for next outer dimension
-                    current_stride *= dim
-
-                out_layout = ir.StridedLayoutAttr.get(index, calculated_strides)
-                memref_type_out = ir.MemRefType.get(sub_shape, element_type, layout=out_layout)
-
-
-                subview = memref.SubViewOp(
-                    memref_type_out,
-                    ary_val,
-                    offsets=[],
-                    sizes=[],
-                    strides=[],
-                    static_offsets=ir.DenseI64ArrayAttr.get(offsets),
-                    static_sizes=ir.DenseI64ArrayAttr.get(sub_shape),
-                    static_strides=ir.DenseI64ArrayAttr.get(strides)
-                ).result
-
-                result = ir.MemRefType.get(oshape, element_type, layout=ir.StridedLayoutAttr.get(index, calculated_strides[:-1]))
-
-                # collapse the axis
-                reassoc = [[x] for x in range(len(sub_shape))]
-                reassoc_target = reassoc.pop(axis)
-                reassoc[axis].extend(reassoc_target)
-                collapsed = memref.CollapseShapeOp(
-                    src=subview,
-                    result=result,
-                    reassociation=reassoc,
-                ).result
-
-                # np.take returns a copy
-                copied = memref.alloc(ir.MemRefType.get(oshape, element_type), [], [])
-                memref.copy(collapsed, copied)
-                return copied
-
+                oshape = TypeSpeller.apply(outshape)
+                return self._gen_take_shaped(ishape, oshape, ary_val, index, src_nd)
 
             case "NpyOp_Broadcast_To_Shaped<io, ary, inshape, outshape>", (io, ary, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
@@ -2801,17 +3150,7 @@ class MlirBackend(_ch06_MlirBackend):
                 ary_val_1 = (yield ary1)
                 ary_val_2 = (yield ary2)
 
-                fname_stack = be.gen_array_stack(self.module, 2, in_shape, out_shape, axis)
-                fn_stack = self._get_func_by_name(fname_stack)
-
-                [src_type_1, src_type_2] = fn_stack.type.inputs
-
-                element_type = src_type_1.element_type
-                memref_type_out = ir.MemRefType.get(out_shape, element_type)
-
-                result = func.call((memref_type_out,), fname_stack, [ary_val_1, ary_val_2])
-
-                return result
+                return self._gen_array_stack_shaped([ary_val_1, ary_val_2], axis, in_shape, out_shape)
 
             case "NpyOp_Transpose_Shaped_simple<io, array, inshape, outshape>", (io, ary, inshape, outshape):
                 # This is implementing np.transpose(ary)
@@ -2820,7 +3159,7 @@ class MlirBackend(_ch06_MlirBackend):
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
 
-                return be.gen_inline_array_transpose(ary_val)
+                return self._gen_inline_array_transpose(ary_val)
 
             case "NpyOp_Transpose_Shaped_explicit<io, array, inshape, reorder, outshape>", (io, ary, inshape, reorder, outshape):
                 # This is implementing np.transpose(ary)
@@ -2837,7 +3176,7 @@ class MlirBackend(_ch06_MlirBackend):
                 for i, j in enumerate(permutation):
                     assert out_shape[i] == in_shape[j]
 
-                return be.gen_inline_array_transpose_shaped(ary_val, in_shape, permutation)
+                return self._gen_inline_array_transpose_shaped(ary_val, in_shape, permutation)
 
             case "NpyOp_MatMul_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, out_shape>", (io, lhs, rhs, lhs_shape, rhs_shape, out_shape):
                 # np.matmul
@@ -2850,30 +3189,11 @@ class MlirBackend(_ch06_MlirBackend):
 
                 if len(lhs_shape) != len(rhs_shape):
                     if len(lhs_shape) > len(rhs_shape):
-                        exp_name = be.gen_array_expand_dims_shaped(self.module, rhs_shape, [i for i in range(len(lhs_shape)-len(rhs_shape))])
-                        rhs_shape = [1] * (len(lhs_shape) - len(rhs_shape)) + list(rhs_shape)
-
-                        rhs_type_new = ir.MemRefType.get(rhs_shape, self._get_func_by_name(exp_name).type.inputs[0].element_type)
-                        rhs_val = func.call((rhs_type_new,), exp_name, [rhs_val])
-
+                        rhs_val = self._gen_array_expand_dims_shaped(rhs_val, [i for i in range(len(lhs_shape)-len(rhs_shape))], rhs_shape)
                     else:
-                        exp_name = be.gen_array_expand_dims_shaped(self.module, lhs_shape, [i for i in range(len(rhs_shape)-len(lhs_shape))])
-                        lhs_shape = [1] * (len(rhs_shape) - len(lhs_shape)) + list(lhs_shape)
+                        lhs_val = self._gen_array_expand_dims_shaped(lhs_val, [i for i in range(len(rhs_shape)-len(lhs_shape))], lhs_shape)
 
-                        lhs_type_new = ir.MemRefType.get(lhs_shape, self._get_func_by_name(exp_name).type.inputs[0].element_type)
-                        lhs_val = func.call((lhs_type_new,), exp_name, [lhs_val])
-
-                fname_matmul = be.gen_array_matmul_shaped(self.module, lhs_shape, rhs_shape, out_shape)
-                fn_matmul = self._get_func_by_name(fname_matmul)
-
-                [src_type_1, src_type_2] = fn_matmul.type.inputs
-
-                element_type = src_type_1.element_type
-                memref_type_out = ir.MemRefType.get(out_shape, element_type)
-
-                result = func.call((memref_type_out,), fname_matmul, [lhs_val, rhs_val])
-
-                return result
+                return self._gen_array_matmul_shaped(lhs_val, rhs_val, out_shape)
 
             case "NpyOp_SetitemIO_Shaped_2d_index<io, ary, value, ishape, index0, index1>", (io, ary, value, ishape, index0, index1):
                 io_val = (yield io)
@@ -2883,8 +3203,7 @@ class MlirBackend(_ch06_MlirBackend):
                 ary_val = (yield ary)
                 value_val = (yield value)
 
-                fname_setitem = be.gen_array_setitem_shaped(self.module, ishape, (index0, index1))
-                func.call((), fname_setitem, [ary_val, value_val])
+                self._gen_array_setitem_shaped(ary_val, value_val, (index0, index1), ishape)
 
                 return (io_val,)
 
@@ -2895,21 +3214,8 @@ class MlirBackend(_ch06_MlirBackend):
                 oshape = TypeSpeller().apply(oshape)
                 ary_val = (yield ary)
 
-                fname_getitem = be.gen_array_getitem_shaped(self.module, ishape, oshape, (index0, index1))
-                fn_getitem = self._get_func_by_name(fname_getitem)
-                [src_type_1] = fn_getitem.type.inputs
+                return self._gen_array_getitem_shaped(ary_val, (index0, index1), ishape, oshape)
 
-                element_type = src_type_1.element_type
-                dims = len(ishape)
-
-                out_strides = [1] * dims
-                for i in range(dims-1,0,-1):
-                    out_strides[i-1] = out_strides[i] * ishape[i]
-
-                memref_type_out = ir.MemRefType.get(oshape, element_type, layout=ir.StridedLayoutAttr.get(0, out_strides))
-                result = func.call((memref_type_out,), fname_getitem, [ary_val])
-
-                return result
             case "NpyOp_Copy_Shaped<io, ary, shape>", (io, ary, shape):
                 io_val = (yield io)
                 ary_val = (yield ary)
@@ -2932,7 +3238,7 @@ class MlirBackend(_ch06_MlirBackend):
 
     def jit_compile(self, llmod, func_node: rg.Func, func_name="func"):
         from mlir import ir
-        optimized = self.codegen.run_passes(llmod)
+        optimized = self.run_passes(llmod)
 
         in_types, out_types = [], []
 
@@ -3537,6 +3843,58 @@ def test_attention_full():
         cache_v, # shape = (1, 256, 6, 48)
     ))
 
+def silu(x):
+    ones = np.asarray(1).reshape(1, 1, 1)
+    result = x * (ones / (ones + np.exp(-x)))
+    return result
+
+def test_silu_full():
+    np.random.seed(0)
+    silu_input = np.random.random(1 * 5 * 768).reshape(1, 5, 768)
+    _run_array_test(silu, (silu_input,))
+
+def feed_forward(x, up_weight, gate_weight, down_weight):
+    swish = silu(x @ gate_weight.T)
+    x_v = x @ up_weight.T
+    x_ff = swish * x_v
+    x_out = x_ff @ down_weight.T
+    return x_out
+
+def rmsnorm(x, weight, eps):
+    z_float = np.mean(x**2, -1, keepdims=True) + eps
+    z = x / np.sqrt(z_float)
+    result = z * weight
+    return result
+
+def transformer_block(
+    x,
+    start_pos,
+    mask,
+    freqs_cos,
+    freqs_sin,
+    block_weights,
+    cache_k,
+    cache_v,
+    norm_eps
+):
+    attn_weights, ff_weights, in_norm_weight, post_norm_weight = block_weights
+
+    norm_x = rmsnorm(x, in_norm_weight, norm_eps)
+    h1, cache_k, cache_v = attention(
+        norm_x,
+        start_pos,
+        mask,
+        freqs_cos,
+        freqs_sin,
+        attn_weights,
+        cache_k,
+        cache_v,
+    )
+    z = x + h1
+    norm_z = rmsnorm(z, post_norm_weight, norm_eps)
+    h2 = feed_forward(norm_z, *ff_weights)
+    out = z + h2
+    return out, cache_k, cache_v
 
 #######################################
 
@@ -3600,5 +3958,5 @@ def main():
         print(desired)
     np.testing.assert_allclose(res, desired)
 
-if __name__ == "__main__":
-    main()
+# if __name__ == "__main__":
+#     main()
