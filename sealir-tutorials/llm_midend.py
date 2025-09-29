@@ -2511,22 +2511,25 @@ class MlirBackend(_ch06_MlirBackend):
             if decl.sym_name.value == fname:
                 return decl
 
-    def _gen_reshape(self, ary_val, inshape: list[int], outshape: list[int]):
+    def _gen_reshape(self, ary_val, in_shapes=(), out_shape=()):
         from mlir.dialects import memref, arith
         from mlir import ir
+
         element_type = ir.F64Type.get()
         index_type = ir.IndexType.get()
 
-        shape_memref = memref.AllocOp(ir.MemRefType.get([len(outshape)], index_type), [], [])
-        memref_type_res = ir.MemRefType.get(outshape, element_type)
-        for idx, i in enumerate(outshape):
+        shape_memref = memref.AllocOp(ir.MemRefType.get([len(out_shape)], index_type), [], [])
+        memref_type_res = ir.MemRefType.get(out_shape, element_type)
+        for idx, i in enumerate(out_shape):
             memref.store(arith.constant(index_type, i), shape_memref, [arith.constant(index_type, idx)])
         out = memref.reshape(memref_type_res, ary_val, shape=shape_memref)
         return out
 
-    def _gen_static_broadcast(self, array_val, in_shape: list[int], out_shape: list[int]):
+    def _gen_static_broadcast(self, array_val, in_shapes=(), out_shape=()):
         from mlir.dialects import memref
         from mlir import ir
+
+        in_shape, = in_shapes
 
         if in_shape == out_shape:
             return array_val
@@ -2579,9 +2582,11 @@ class MlirBackend(_ch06_MlirBackend):
                 static_strides=static_strides
             )
 
-    def _gen_take_shaped(self, ishape, oshape, ary_val, index, src_nd):
+    def _gen_take_shaped(self, ary_val, index, src_nd, in_shapes=(), out_shape=()):
         from mlir.dialects import memref
         from mlir import ir
+
+        ishape, = in_shapes
     
         axis = -1
         element_type = ir.F64Type.get()
@@ -2617,7 +2622,7 @@ class MlirBackend(_ch06_MlirBackend):
             static_strides=ir.DenseI64ArrayAttr.get(strides)
         ).result
 
-        result = ir.MemRefType.get(oshape, element_type, layout=ir.StridedLayoutAttr.get(index, calculated_strides[:-1]))
+        result = ir.MemRefType.get(out_shape, element_type, layout=ir.StridedLayoutAttr.get(index, calculated_strides[:-1]))
 
         # collapse the axis
         reassoc = [[x] for x in range(len(sub_shape))]
@@ -2630,15 +2635,17 @@ class MlirBackend(_ch06_MlirBackend):
         ).result
 
         # np.take returns a copy
-        copied = memref.alloc(ir.MemRefType.get(oshape, element_type), [], [])
+        copied = memref.alloc(ir.MemRefType.get(out_shape, element_type), [], [])
         memref.copy(collapsed, copied)
 
         return copied
 
 
-    def _gen_array_stack_shaped(self, input_args, axis, inp_shape, out_shape):
+    def _gen_array_stack_shaped(self, input_args, axis, in_shapes=(), out_shape=()):
         from mlir.dialects import memref
         from mlir import ir
+
+        inp_shape, = in_shapes
     
         if axis == -1:
             axis = len(out_shape) - 1
@@ -2741,12 +2748,14 @@ class MlirBackend(_ch06_MlirBackend):
         if permutation is None:
             permutation = [i for i in range(dims).__reversed__()]
 
-        return self._gen_inline_array_transpose_shaped(ary_val, in_shape, permutation=permutation, dtype=dtype)
+        return self._gen_inline_array_transpose_shaped(ary_val, permutation=permutation, dtype=dtype, in_shapes=(in_shape,))
 
-    def _gen_inline_array_transpose_shaped(self, ary_val, in_shape, permutation=None, dtype=None):
+    def _gen_inline_array_transpose_shaped(self, ary_val, permutation=None, dtype=None, in_shapes=(), out_shape=()):
         """Inline version of transpose_shaped that returns the transposed memref directly."""
         from mlir import ir
         from mlir.dialects import memref, linalg
+
+        in_shape, = in_shapes
 
         if permutation is None:
             permutation = [i for i in range(len(in_shape)).__reversed__()]
@@ -2765,9 +2774,17 @@ class MlirBackend(_ch06_MlirBackend):
 
         return output_memref
 
-    def _gen_array_matmul_shaped(self, lhs_matrix, rhs_matrix, out_shape):
+    def _gen_array_matmul_shaped(self, lhs_matrix, rhs_matrix, in_shapes=(), out_shape=()):
         from mlir import ir
         from mlir.dialects import memref, linalg, arith
+
+        lhs_shape, rhs_shape = in_shapes
+
+        if len(lhs_shape) != len(rhs_shape):
+            if len(lhs_shape) > len(rhs_shape):
+                rhs_matrix = self._gen_array_expand_dims_shaped(rhs_matrix, [i for i in range(len(lhs_shape)-len(rhs_shape))], in_shapes=(rhs_shape,))
+            else:
+                lhs_matrix = self._gen_array_expand_dims_shaped(lhs_matrix, [i for i in range(len(rhs_shape)-len(lhs_shape))], in_shapes=(lhs_shape,))
 
         element_type = ir.F64Type.get()
         memref_type_out = ir.MemRefType.get(out_shape, element_type)
@@ -2814,9 +2831,11 @@ class MlirBackend(_ch06_MlirBackend):
 
         return out
 
-    def _gen_array_expand_dims_shaped(self, ary_val, axes, in_shape):
+    def _gen_array_expand_dims_shaped(self, ary_val, axes, in_shapes=(), out_shape=()):
         from mlir import ir
         from mlir.dialects import memref
+
+        in_shape, = in_shapes
 
         element_type = ir.F64Type.get()
 
@@ -2838,9 +2857,11 @@ class MlirBackend(_ch06_MlirBackend):
         return res
 
 
-    def _gen_array_getitem_shaped(self, input_memref, indices, in_shape, out_shape):
+    def _gen_array_getitem_shaped(self, input_memref, indices, in_shapes=(), out_shape=()):
         from mlir import ir
         from mlir.dialects import memref
+
+        in_shape, = in_shapes
     
         dims = len(in_shape)
 
@@ -2894,9 +2915,11 @@ class MlirBackend(_ch06_MlirBackend):
         return subview
 
 
-    def _gen_array_setitem_shaped(self, arr_memref, value_memref, indices, in_shape):
+    def _gen_array_setitem_shaped(self, arr_memref, value_memref, indices, in_shapes=(), out_shape=()):
         from mlir import ir
         from mlir.dialects import memref
+
+        in_shape, = in_shapes
 
         dims = len(in_shape)
         assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
@@ -2954,22 +2977,20 @@ class MlirBackend(_ch06_MlirBackend):
         memref.copy(value_memref, subview)
 
 
-    def _gen_binop_ufunc(self, lhs_val, rhs_val, lhs_shape, rhs_shape, outshape, op):
+    def _gen_binop_ufunc(self, lhs_val, rhs_val, op, in_shapes=(), out_shape=()):
         from mlir.dialects import arith, func, memref, linalg
         from mlir import ir
+        lhs_shape, rhs_shape = in_shapes
 
         with _mlir_location_from_frame(f"binop({op})"):
-            shape = TypeSpeller.apply(outshape)
-            lhs_shape = TypeSpeller.apply(lhs_shape)
-            rhs_shape = TypeSpeller.apply(rhs_shape)
             element_type = ir.F64Type.get()
             # broadcast
-            bc_lhs = self._gen_static_broadcast(lhs_val, lhs_shape, shape)
-            bc_rhs = self._gen_static_broadcast(rhs_val, rhs_shape, shape)
+            bc_lhs = self._gen_static_broadcast(lhs_val, in_shapes=(lhs_shape,), out_shape=out_shape)
+            bc_rhs = self._gen_static_broadcast(rhs_val, in_shapes=(rhs_shape,), out_shape=out_shape)
             # Do binop
-            nd = len(shape)
+            nd = len(out_shape)
 
-            result = memref.AllocOp(ir.MemRefType.get(shape, element_type), [], [])
+            result = memref.AllocOp(ir.MemRefType.get(out_shape, element_type), [], [])
             generic_op = linalg.GenericOp(
                 result_tensors=[],
                 inputs=[bc_lhs, bc_rhs],
@@ -2991,20 +3012,19 @@ class MlirBackend(_ch06_MlirBackend):
 
             return result
 
-    def _gen_unary_ufunc(self, operand, inshape, outshape, op):
+    def _gen_unary_ufunc(self, operand, op, in_shapes=(), out_shape=()):
         from mlir.dialects import memref, linalg
         from mlir import ir
 
-        oshape = TypeSpeller.apply(outshape)
-        nd = len(oshape)
-        element_type = operand.result.type.element_type
+        nd = len(out_shape)
+        element_type = ir.F64Type.get()
 
         (base, offset, *shapes_strides) = memref.extract_strided_metadata(operand)
         strides = shapes_strides[nd:]
         assert len(strides) == nd
 
         result = memref.AllocOp(
-            ir.MemRefType.get(oshape, element_type),
+            ir.MemRefType.get(out_shape, element_type),
             [], []
         )
 
@@ -3028,10 +3048,11 @@ class MlirBackend(_ch06_MlirBackend):
 
         return result
 
-    def _gen_reduce_ufunc(self, opval, axis, inshape: list[int], outshape: list[int], op):
+    def _gen_reduce_ufunc(self, opval, axis, op, in_shapes=(), out_shape=()):
         from mlir.dialects import arith, func, memref, linalg
         from mlir import ir
 
+        inshape, = in_shapes
         nd = len(inshape)
         if axis < 0:
             axis = nd + axis
@@ -3062,7 +3083,7 @@ class MlirBackend(_ch06_MlirBackend):
             linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
 
         # broadcast for keepdims
-        memref_type = ir.MemRefType.get(outshape, element_type)
+        memref_type = ir.MemRefType.get(out_shape, element_type)
         result = memref.AllocOp(memref_type, [], [])
         linalg.broadcast(
             result_reduced,
@@ -3083,24 +3104,25 @@ class MlirBackend(_ch06_MlirBackend):
             case "NpyOp_Exp_Shaped<io, operand, inshape, outshape>", (io, operand, inshape, outshape):
                 (yield io)
                 operand = (yield operand)
-                result = self._gen_unary_ufunc(operand, inshape, outshape, op=mlir_math.exp)
+                oshape = TypeSpeller.apply(outshape)
+                result = self._gen_unary_ufunc(operand, op=mlir_math.exp, in_shapes=(inshape,), out_shape=oshape)
                 return result
 
             case "NpyOp_Add_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
                 (yield io)
-                return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.addf)
+                return self._gen_binop_ufunc((yield lhs), (yield rhs), op=arith.addf, in_shapes=(lhs_shape, rhs_shape), out_shape=outshape)
 
             case "NpyOp_Subtract_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
                 (yield io)
-                return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.subf)
+                return self._gen_binop_ufunc((yield lhs), (yield rhs), op=arith.subf, in_shapes=(lhs_shape, rhs_shape), out_shape=outshape)
 
             case "NpyOp_Multiply_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
                 (yield io)
-                return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.mulf)
+                return self._gen_binop_ufunc((yield lhs), (yield rhs), op=arith.mulf, in_shapes=(lhs_shape, rhs_shape), out_shape=outshape)
 
             case "NpyOp_Divide_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
                 (yield io)
-                return self._gen_binop_ufunc((yield lhs), (yield rhs), lhs_shape, rhs_shape, outshape, op=arith.divf)
+                return self._gen_binop_ufunc((yield lhs), (yield rhs), op=arith.divf, in_shapes=(lhs_shape, rhs_shape), out_shape=outshape)
 
             case "NpyOp_Max_Shaped<io, operand, axis, keepdims, inshape, outshape>", (io, operand, axis, True, inshape, outshape):
                 # Implements np.max(operand, axis, keepdims=True)
@@ -3109,28 +3131,28 @@ class MlirBackend(_ch06_MlirBackend):
                 opval = (yield operand)
                 oshape = TypeSpeller.apply(outshape)
                 ishape = TypeSpeller.apply(inshape)
-                return self._gen_reduce_ufunc(opval, axis, ishape, oshape, op=op)
+                return self._gen_reduce_ufunc(opval, axis, op=op, in_shapes=(ishape,), out_shape=oshape)
 
             case "NpyOp_Sum_Shaped<io, operand, axis, keepdims, inshape, outshape>", (io, operand, axis, True, inshape, outshape):
                 op = arith.addf
                 opval = (yield operand)
                 oshape = TypeSpeller.apply(outshape)
                 ishape = TypeSpeller.apply(inshape)
-                return self._gen_reduce_ufunc(opval, axis, ishape, oshape, op=op)
+                return self._gen_reduce_ufunc(opval, axis, op=op, in_shapes=(ishape,), out_shape=oshape)
 
             case "NpyOp_Reshape_Shaped<io, ary, src_nd, inshape, outshape>", (io, ary, nd, inshape, outshape):
                 (yield io)
                 ishape = TypeSpeller.apply(inshape)
                 oshape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
-                return self._gen_reshape(ary_val, ishape, oshape)
+                return self._gen_reshape(ary_val, in_shapes=(ishape,), out_shape=oshape)
             case "NpyOp_Take_Shaped_one_index<io, ary, index, axis, src_nd, inshape, outshape>", (io, ary, index, -1, src_nd, inshape, outshape):
                 # This is implementing np.take(ary, index, axis=-1)
                 (yield io)
                 ary_val = (yield ary)
                 ishape = TypeSpeller.apply(inshape)
                 oshape = TypeSpeller.apply(outshape)
-                return self._gen_take_shaped(ishape, oshape, ary_val, index, src_nd)
+                return self._gen_take_shaped(ary_val, index, src_nd, in_shapes=(ishape,), out_shape=oshape)
 
             case "NpyOp_Broadcast_To_Shaped<io, ary, inshape, outshape>", (io, ary, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
@@ -3140,7 +3162,7 @@ class MlirBackend(_ch06_MlirBackend):
                 out_shape = TypeSpeller.apply(outshape)
                 ary_val = (yield ary)
 
-                return self._gen_static_broadcast(ary_val, in_shape, out_shape)
+                return self._gen_static_broadcast(ary_val, in_shapes=(in_shape,), out_shape=out_shape)
 
             case "NpyOp_Stack_2_Shaped<io, ary1, ary2, axis, inshape, outshape>", (io, ary1, ary2, axis, inshape, outshape):
                 # This is implementing np.broacast_to(ary, outshape)
@@ -3150,7 +3172,7 @@ class MlirBackend(_ch06_MlirBackend):
                 ary_val_1 = (yield ary1)
                 ary_val_2 = (yield ary2)
 
-                return self._gen_array_stack_shaped([ary_val_1, ary_val_2], axis, in_shape, out_shape)
+                return self._gen_array_stack_shaped([ary_val_1, ary_val_2], axis, in_shapes=(in_shape,), out_shape=out_shape)
 
             case "NpyOp_Transpose_Shaped_simple<io, array, inshape, outshape>", (io, ary, inshape, outshape):
                 # This is implementing np.transpose(ary)
@@ -3176,7 +3198,7 @@ class MlirBackend(_ch06_MlirBackend):
                 for i, j in enumerate(permutation):
                     assert out_shape[i] == in_shape[j]
 
-                return self._gen_inline_array_transpose_shaped(ary_val, in_shape, permutation)
+                return self._gen_inline_array_transpose_shaped(ary_val, permutation, dtype=element_type, in_shapes=(in_shape,), out_shape=out_shape)
 
             case "NpyOp_MatMul_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, out_shape>", (io, lhs, rhs, lhs_shape, rhs_shape, out_shape):
                 # np.matmul
@@ -3187,13 +3209,7 @@ class MlirBackend(_ch06_MlirBackend):
                 rhs_shape = TypeSpeller.apply(rhs_shape)
                 out_shape = TypeSpeller.apply(out_shape)
 
-                if len(lhs_shape) != len(rhs_shape):
-                    if len(lhs_shape) > len(rhs_shape):
-                        rhs_val = self._gen_array_expand_dims_shaped(rhs_val, [i for i in range(len(lhs_shape)-len(rhs_shape))], rhs_shape)
-                    else:
-                        lhs_val = self._gen_array_expand_dims_shaped(lhs_val, [i for i in range(len(rhs_shape)-len(lhs_shape))], lhs_shape)
-
-                return self._gen_array_matmul_shaped(lhs_val, rhs_val, out_shape)
+                return self._gen_array_matmul_shaped(lhs_val, rhs_val, in_shapes=(lhs_shape, rhs_shape), out_shape=out_shape)
 
             case "NpyOp_SetitemIO_Shaped_2d_index<io, ary, value, ishape, index0, index1>", (io, ary, value, ishape, index0, index1):
                 io_val = (yield io)
@@ -3203,7 +3219,7 @@ class MlirBackend(_ch06_MlirBackend):
                 ary_val = (yield ary)
                 value_val = (yield value)
 
-                self._gen_array_setitem_shaped(ary_val, value_val, (index0, index1), ishape)
+                self._gen_array_setitem_shaped(ary_val, value_val, (index0, index1), in_shapes=(ishape,), out_shape=())
 
                 return (io_val,)
 
@@ -3214,7 +3230,7 @@ class MlirBackend(_ch06_MlirBackend):
                 oshape = TypeSpeller().apply(oshape)
                 ary_val = (yield ary)
 
-                return self._gen_array_getitem_shaped(ary_val, (index0, index1), ishape, oshape)
+                return self._gen_array_getitem_shaped(ary_val, (index0, index1), in_shapes=(ishape,), out_shape=oshape)
 
             case "NpyOp_Copy_Shaped<io, ary, shape>", (io, ary, shape):
                 io_val = (yield io)
@@ -3899,11 +3915,12 @@ def transformer_block(
 #######################################
 
 DEBUG = True
-PLOT = True
+PLOT = False
 n_repeats = 5
 n_runs = 10
 func1_name = "NumPy"
 func2_name = "MLIRGen"
+done_names = set()
 
 def _run_array_unary_test(target_function, inary):
     return _run_array_test(target_function, [inary])
@@ -3930,6 +3947,12 @@ def _run_array_test(target_function, args):
         print("DESIRED".center(80, '-'))
         print(desired)
     np.testing.assert_allclose(got, desired)
+    fn_name = cres.fn.__name__
+
+    while fn_name in done_names:
+        fn_name = fn_name+"_"
+
+    done_names.add(fn_name)
 
     if PLOT:
         import timeit
@@ -3954,7 +3977,16 @@ def _run_array_test(target_function, args):
 
             if (i + 1) % 10 == 0:
                 print(f"  Completed {i + 1}/{n_repeats} measurements")
-        
+
+        with open("output.txt", "a") as file:
+            file.write(fn_name)
+            file.write("\n")
+            file.write(str(times1))
+            file.write("\n")
+            file.write(str(times2))
+            file.write("\n")
+            file.write("\n")
+
         plt.boxplot([times1, times2], labels=[func1_name, func2_name])
         plt.ylabel('Execution Time (milliseconds)')
         plt.xlabel('Function')
@@ -4002,6 +4034,110 @@ def _run_array_test(target_function, args):
         
         plt.show()
 
+#######################################
+# Inlined backend tests
+
+
+def _run_internal_tests(test_func_str, gen_fn_args, in_shapes, out_shape):
+    from mlir.dialects import func
+    from mlir import ir
+
+    test_backend = MlirBackend()
+    context = test_backend.context
+    loc = ir.Location.name(f"{test_backend}.lower()", context=context)
+    module = ir.Module.create(loc=loc)
+
+    # Get the module body pointer so we can insert content into the
+    # module.
+    module_body = ir.InsertionPoint(module.body)
+
+    with context, loc, module_body:
+        # Constuct a function that emits a callable C-interface.
+        element_type = ir.F64Type.get()
+        input_argtys = [ir.MemRefType.get(x, element_type) for x in in_shapes]
+        output_argty = [ir.MemRefType.get(out_shape, element_type)]
+
+        fun = func.FuncOp("func", (input_argtys, output_argty))
+        fun.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+        func_block = fun.add_entry_block()
+
+        # Define entry point
+        function_entry = ir.InsertionPoint(func_block)
+
+        # Within this function we declare the symbolic representation of
+        # input and output arrays of appropriate shapes using memrefs.
+        with function_entry:
+            test_fn_gen = getattr(test_backend, test_func_str)
+            ret = test_fn_gen(*fun.arguments, *gen_fn_args, in_shapes=in_shapes, out_shape=out_shape)
+            func.ReturnOp([ret])
+
+    test_backend.run_passes(module)
+
+    return test_backend.jit_compile_extra(module, input_argtys, output_argty)
+
+def test_unary():
+    from mlir.dialects import math as mlir_math
+
+    input_array = np.random.rand(3, 5)
+
+    def np_func(args):
+        return np.exp(args)
+
+    jit_func = _run_internal_tests("_gen_unary_ufunc", 
+                                   gen_fn_args=(mlir_math.exp,), 
+                                   in_shapes=((3, 5),), 
+                                   out_shape=(3, 5))
+
+    np.testing.assert_allclose(jit_func(input_array), 
+                               np_func(input_array))
+
+
+def test_binary():
+    from mlir.dialects import arith
+
+    input_array_1 = np.random.rand(3, 5)
+    input_array_2 = np.random.rand(3, 5)
+
+    def np_func(a, b):
+        return np.add(a, b)
+
+    jit_func = _run_internal_tests("_gen_binop_ufunc", 
+                                   gen_fn_args=(arith.addf,), 
+                                   in_shapes=((3, 5), (3, 5)), 
+                                   out_shape=(3, 5))
+
+    np.testing.assert_allclose(jit_func(input_array_1, input_array_2), 
+                               np_func(input_array_1, input_array_2))
+
+def test_reduce():
+    pass
+
+def test_reshape():
+    pass
+
+def test_take():
+    pass
+
+def test_broadcast():
+    pass
+
+def test_stack():
+    pass
+
+def test_transpose():
+    pass
+
+def test_matmul():
+    pass
+
+def test_setitem():
+    pass
+
+def test_getitem():
+    pass
+
+########################################
+# Main scripts
 
 def expected_func(x):
     exp_x = np.exp(x - np.max(x, axis=-1, keepdims=True))
@@ -4035,4 +4171,4 @@ def main():
     np.testing.assert_allclose(res, desired)
 
 if __name__ == "__main__":
-    test_attention_full()
+    test_unary()
