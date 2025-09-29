@@ -2588,7 +2588,7 @@ class MlirBackend(_ch06_MlirBackend):
         from mlir import ir
 
         ishape, = in_shapes
-    
+
         axis = -1
         element_type = ir.F64Type.get()
         sub_shape = list(ishape)
@@ -2647,7 +2647,7 @@ class MlirBackend(_ch06_MlirBackend):
         from mlir import ir
 
         inp_shape, = in_shapes
-    
+
         if axis == -1:
             axis = len(out_shape) - 1
 
@@ -2863,7 +2863,7 @@ class MlirBackend(_ch06_MlirBackend):
         from mlir.dialects import memref
 
         in_shape, = in_shapes
-    
+
         dims = len(in_shape)
 
         assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
@@ -2963,7 +2963,7 @@ class MlirBackend(_ch06_MlirBackend):
 
         element_type = ir.F64Type.get()
         memref_type_subview = ir.MemRefType.get(val_shape, element_type, layout=ir.StridedLayoutAttr.get(0, out_strides))
-   
+
         subview = memref.SubViewOp(
             memref_type_subview,
             arr_memref,
@@ -3898,11 +3898,12 @@ def test_attention_full():
     ))
 
 def silu(x):
-    ones = np.asarray(1).reshape(1, 1, 1)
-    result = x * (ones / (ones + np.exp(-x)))
+    # TODO: broadcast doesn't do add dimensions correctly yet
+    ones = np.asarray(1.0).reshape((1, 1, 1))
+    zeros = np.asarray(0.0).reshape((1,1,1))
+    result = x * (ones / (ones + np.exp(zeros - x)))
     return result
 
-@pytest.mark.skip(reason="Not implemented: needs exp")
 def test_silu_full():
     np.random.seed(0)
     silu_input = np.random.random(1 * 5 * 768).reshape(1, 5, 768)
@@ -4007,13 +4008,13 @@ def _run_array_test(target_function, args):
         times2 = []
 
         print(f"Running {n_repeats} timing measurements, each with {n_runs} executions...")
-        
+
         for i in range(n_repeats):
             # Time function 1
             t1 = timeit.Timer(lambda: target_function(*args))
             time1 = t1.timeit(number=n_runs) / n_runs  # Average time per execution
             times1.append(time1)
-            
+
             # Time function 2
             t2 = timeit.Timer(lambda: jit_func(*args))
             time2 = t2.timeit(number=n_runs) / n_runs  # Average time per execution
@@ -4042,7 +4043,7 @@ def _run_array_test(target_function, args):
             (times1, func1_name),
             (times2, func2_name)
         ]
-        
+
         stats_text = []
         for times, name in stats_data:
             mean_time = np.mean(times)
@@ -4055,13 +4056,13 @@ def _run_array_test(target_function, args):
                             f"  Std: {std_time:.4f} ms\n"
                             f"  Median: {median_time:.4f} ms\n"
                             f"  Range: [{min_time:.4f}, {max_time:.4f}] ms")
-        
+
         # Add text box with statistics
         textstr = '\n\n'.join(stats_text)
         props = dict(boxstyle='round', facecolor='wheat', alpha=0.5)
         plt.text(0.02, 0.98, textstr,  transform=plt.gca().transAxes, fontsize=9,
                 verticalalignment='top', bbox=props)
-        
+
         # Add performance comparison
         mean1 = np.mean(times1)
         mean2 = np.mean(times2)
@@ -4071,11 +4072,11 @@ def _run_array_test(target_function, args):
         else:
             faster = func2_name
             ratio = mean1 / mean2
-        
+
         comparison_text = f"{faster} is {ratio:.2f}x faster (on average)"
-        plt.figtext(0.5, 0.02, comparison_text, ha='center', fontsize=11, 
+        plt.figtext(0.5, 0.02, comparison_text, ha='center', fontsize=11,
                     fontweight='bold', color='darkgreen')
-        
+
         plt.show()
 
 #######################################
@@ -4136,12 +4137,12 @@ def test_unary():
     def np_func(args):
         return np.exp(args)
 
-    jit_func = _run_internal_tests("_gen_unary_ufunc", 
-                                   gen_fn_args=(mlir_math.exp,), 
-                                   in_shapes=((3, 5),), 
+    jit_func = _run_internal_tests("_gen_unary_ufunc",
+                                   gen_fn_args=(mlir_math.exp,),
+                                   in_shapes=((3, 5),),
                                    out_shape=(3, 5))
 
-    np.testing.assert_allclose(jit_func(input_array), 
+    np.testing.assert_allclose(jit_func(input_array),
                                np_func(input_array))
 
 
@@ -4154,12 +4155,12 @@ def test_binary():
     def np_func(a, b):
         return np.add(a, b)
 
-    jit_func = _run_internal_tests("_gen_binop_ufunc", 
-                                   gen_fn_args=(arith.addf,), 
-                                   in_shapes=((3, 5), (3, 5)), 
+    jit_func = _run_internal_tests("_gen_binop_ufunc",
+                                   gen_fn_args=(arith.addf,),
+                                   in_shapes=((3, 5), (3, 5)),
                                    out_shape=(3, 5))
 
-    np.testing.assert_allclose(jit_func(input_array_1, input_array_2), 
+    np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
                                np_func(input_array_1, input_array_2))
 
 def test_reduce():
