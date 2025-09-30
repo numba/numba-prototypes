@@ -3329,7 +3329,7 @@ class MlirBackend(_ch06_MlirBackend):
                 llmod, **execution_engine_params
             )
             # Manually invoke an empty function to force compilation
-            engine.invoke("global_init")
+            engine.invoke('global_init')
         else:
             engine = exec_engine
 
@@ -3951,6 +3951,16 @@ def transformer_block(
     h2 = feed_forward(norm_z, *ff_weights)
     out = z + h2
     return out, cache_k, cache_v
+
+
+def identity(x):
+    return x
+
+
+def test_identity():
+    x = np.random.random(10)
+    _run_array_test(identity, (x,))
+
 
 #######################################
 
