@@ -2403,6 +2403,8 @@ class MlirBackend(_ch06_MlirBackend):
             # notebook may hang if ir_printing is enabled and and MLIR failed.
             pass_man.enable_ir_printing()
 
+        pass_man.add("canonicalize")
+
         pass_man.add("convert-linalg-to-loops")
         pass_man.add("expand-strided-metadata")
         pass_man.add("lower-affine")
@@ -2810,8 +2812,8 @@ class MlirBackend(_ch06_MlirBackend):
         ])
 
         iterator_types = ir.ArrayAttr.get([
-            ir.StringAttr.get("parallel") for _ in range(dims - 1)  # batch + M + N
-        ] + [ir.StringAttr.get("reduction")])  # K
+            ir.Attribute.parse("#linalg.iterator_type<parallel>") for _ in range(dims)  # batch + M + N
+        ] + [ir.Attribute.parse("#linalg.iterator_type<reduction>")])  # K
 
         out = memref.alloc(memref_type_out, [], [])
         zero = arith.ConstantOp(element_type, 0.0)
@@ -3326,7 +3328,7 @@ class MlirBackend(_ch06_MlirBackend):
         # Use MLIR's own internal execution engine
         if exec_engine is None:
             engine = execution_engine.ExecutionEngine(
-                llmod, **execution_engine_params
+                llmod, opt_level=3, **execution_engine_params
             )
             # Manually invoke an empty function to force compilation
             engine.invoke('global_init')
