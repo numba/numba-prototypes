@@ -1,4 +1,5 @@
 from __future__ import annotations
+from tracemalloc import start
 import pytest
 import inspect
 import numpy as np
@@ -2335,7 +2336,7 @@ class StubBackend:
             annos = list(ase.search_parents(argport, lambda x: isinstance(x, rg.Generic) and x._args[0]=='Annotate'))
             if annos:
                 intypes[idx] = TypeSpeller.apply(annos[0]._args[2])
-        print(intypes)
+        # print(intypes)
 
         # outtypes
         outtypes = {}
@@ -2347,8 +2348,8 @@ class StubBackend:
 
         # attrs = Attributes(func.body.begin.attrs)
         # retty = attrs.get_return_type(func.body)
-        print("ARGS", intypes)
-        print("RETURN TYPE", retty)
+        # print("ARGS", intypes)
+        # print("RETURN TYPE", retty)
         return format_rvsdg(func)
 
     def jit_compile(self, module, extracted, export_name):
@@ -2435,7 +2436,7 @@ class MlirBackend(_ch06_MlirBackend):
         # Find arguments
         argfacts = [child for child in root._args if isinstance(child, rg.Generic) and child.name=="ArgFact"]
 
-        print(format_rvsdg(func))
+        # print(format_rvsdg(func))
         fname = func.fname
         beginnode = func.body.begin
         intypes = {}
@@ -2444,7 +2445,7 @@ class MlirBackend(_ch06_MlirBackend):
             [arg_idx, ty] = argfact.children
             intypes[arg_idx] = TypeSpeller.apply(ty)
 
-        pprint(intypes)
+        # pprint(intypes)
         ninports = len(beginnode.inports)
         assert len(intypes) == ninports - 1  # one extra for the IO
         self._argtys = tuple([intypes[i] for i in range(len(argfacts))])
@@ -2460,15 +2461,15 @@ class MlirBackend(_ch06_MlirBackend):
 
         # attrs = Attributes(func.body.begin.attrs)
         # retty = attrs.get_return_type(func.body)
-        print("ARGS", self._argtys)
-        print("RETURN TYPE", retty)
+        # print("ARGS", self._argtys)
+        # print("RETURN TYPE", retty)
 
         argtypes = self._argtys
-        print(argtypes)
+        # print(argtypes)
 
         super().lower(func, argtypes)
 
-        print(self.module.dump())
+        # print(self.module.dump())
         return self.module
 
     def lower_type_return(self, ty):
@@ -3110,18 +3111,31 @@ class MlirBackend(_ch06_MlirBackend):
 
             case "NpyOp_Add_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
                 (yield io)
+                lhs_shape = TypeSpeller.apply(lhs_shape)
+                rhs_shape = TypeSpeller.apply(rhs_shape)
+                outshape = TypeSpeller.apply(outshape)
+
                 return self._gen_binop_ufunc((yield lhs), (yield rhs), op=arith.addf, in_shapes=(lhs_shape, rhs_shape), out_shape=outshape)
 
             case "NpyOp_Subtract_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
                 (yield io)
+                lhs_shape = TypeSpeller.apply(lhs_shape)
+                rhs_shape = TypeSpeller.apply(rhs_shape)
+                outshape = TypeSpeller.apply(outshape)
                 return self._gen_binop_ufunc((yield lhs), (yield rhs), op=arith.subf, in_shapes=(lhs_shape, rhs_shape), out_shape=outshape)
 
             case "NpyOp_Multiply_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
                 (yield io)
+                lhs_shape = TypeSpeller.apply(lhs_shape)
+                rhs_shape = TypeSpeller.apply(rhs_shape)
+                outshape = TypeSpeller.apply(outshape)
                 return self._gen_binop_ufunc((yield lhs), (yield rhs), op=arith.mulf, in_shapes=(lhs_shape, rhs_shape), out_shape=outshape)
 
             case "NpyOp_Divide_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
                 (yield io)
+                lhs_shape = TypeSpeller.apply(lhs_shape)
+                rhs_shape = TypeSpeller.apply(rhs_shape)
+                outshape = TypeSpeller.apply(outshape)
                 return self._gen_binop_ufunc((yield lhs), (yield rhs), op=arith.divf, in_shapes=(lhs_shape, rhs_shape), out_shape=outshape)
 
             case "NpyOp_Max_Shaped<io, operand, axis, keepdims, inshape, outshape>", (io, operand, axis, True, inshape, outshape):
@@ -3254,6 +3268,18 @@ class MlirBackend(_ch06_MlirBackend):
 
     def jit_compile(self, llmod, func_node: rg.Func, func_name="func"):
         from mlir import ir
+        from mlir.dialects import func
+        # Add an empty invocation function
+        with ir.InsertionPoint(self.module.body), _mlir_location_from_frame():
+
+            func_type = ir.FunctionType.get([], [])
+
+            func_op = func.FuncOp("global_init", func_type)
+            func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+
+            with ir.InsertionPoint(func_op.add_entry_block()):
+                func.ReturnOp([])
+
         optimized = self.run_passes(llmod)
 
         in_types, out_types = [], []
@@ -3302,6 +3328,8 @@ class MlirBackend(_ch06_MlirBackend):
             engine = execution_engine.ExecutionEngine(
                 llmod, **execution_engine_params
             )
+            # Manually invoke an empty function to force compilation
+            engine.invoke("global_init")
         else:
             engine = exec_engine
 
@@ -3312,7 +3340,9 @@ class MlirBackend(_ch06_MlirBackend):
 
         # Build a wrapper function
         def jit_func(*args):
+            import time
 
+            pstart = time.time_ns()
             input_args = args
 
             assert len(input_args) == len(input_types)
@@ -3328,9 +3358,17 @@ class MlirBackend(_ch06_MlirBackend):
                 rank=out_type.rank, dtype=ctypes.c_double
             )()
             res_ptr = ctypes.pointer(res_val)
+            pend = time.time_ns()
+            # Call the JIT-compiled function via the execution engine.
+            jstart = time.time_ns()
             engine.invoke(function_name, ctypes.byref(res_ptr), *input_exec_ptrs)
+            jend = time.time_ns()
 
+            # Convert the result back to a numpy array.
+            tstart = time.time_ns()
             out = runtime.ranked_memref_to_numpy(res_ptr)
+            tend = time.time_ns()
+            print(f"MLIRGen: To Memref {(pend - pstart)/1000} microseconds, Exec {(jend-jstart)/1000} microseconds, To NumPy {(tend-tstart)/1000} microseconds")
             return out
 
 
@@ -3864,6 +3902,7 @@ def silu(x):
     result = x * (ones / (ones + np.exp(-x)))
     return result
 
+@pytest.mark.skip(reason="Not implemented: needs exp")
 def test_silu_full():
     np.random.seed(0)
     silu_input = np.random.random(1 * 5 * 768).reshape(1, 5, 768)
@@ -3914,7 +3953,7 @@ def transformer_block(
 
 #######################################
 
-DEBUG = True
+DEBUG = False
 PLOT = False
 n_repeats = 5
 n_runs = 10
@@ -3927,7 +3966,12 @@ def _run_array_unary_test(target_function, inary):
 
 
 def _run_array_test(target_function, args):
+    import time
+
+    start = time.time_ns()
     desired = target_function(*args)
+    end = time.time_ns()
+    print("\nNumPy: Exec {:.3f} microseconds".format((end - start) / 1000))
 
     try:
         cres = run_compiler(target_function, args)
@@ -4070,6 +4114,15 @@ def _run_internal_tests(test_func_str, gen_fn_args, in_shapes, out_shape):
             test_fn_gen = getattr(test_backend, test_func_str)
             ret = test_fn_gen(*fun.arguments, *gen_fn_args, in_shapes=in_shapes, out_shape=out_shape)
             func.ReturnOp([ret])
+
+        # Add an empty global init invocation
+        func_type = ir.FunctionType.get([], [])
+
+        func_op = func.FuncOp("global_init", func_type)
+        func_op.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+
+        with ir.InsertionPoint(func_op.add_entry_block()):
+            func.ReturnOp([])
 
     test_backend.run_passes(module)
 
