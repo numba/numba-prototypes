@@ -37,9 +37,10 @@ class MLIRVerifier:
 
         for idx, p in enumerate(passes):
             cmd = [self.mlir_opt_path, f"--{p}"]
+
             if output_info:
                 print(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, input=mlir_text, capture_output=True, text=True)
+            result = subprocess.run(' '.join(cmd), input=mlir_text, capture_output=True, text=True, shell=True)
             if result.returncode != 0 and output_info:
                 msg = f"Error running pass '{p}':\n{result.stderr}"
                 raise RuntimeError(msg)

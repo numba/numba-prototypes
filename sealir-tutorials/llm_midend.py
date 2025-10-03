@@ -2425,6 +2425,7 @@ class MlirBackend(_ch06_MlirBackend):
         passes = [
             "one-shot-bufferize='bufferize-function-boundaries'",
             "convert-linalg-to-affine-loops",
+            "affine-loop-fusion",
             "expand-strided-metadata",
             "lower-affine",
             "buffer-deallocation",
@@ -2435,7 +2436,7 @@ class MlirBackend(_ch06_MlirBackend):
             "convert-index-to-llvm",
             "reconcile-unrealized-casts",
         ]
-        output = pm.verify_passes(passes)
+        output = pm.verify_passes(passes, output_dir='mlir_outs')
         module = ir.Module.parse(output, context=module.context)
 
         # Output LLVM-dialect MLIR
@@ -3002,21 +3003,56 @@ class MlirBackend(_ch06_MlirBackend):
 
 
     def _gen_binop_ufunc(self, lhs_val, rhs_val, op, in_shapes=(), out_shape=()):
-        from mlir.dialects import arith, func, memref, linalg
+        from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
         from mlir import ir
         lhs_shape, rhs_shape = in_shapes
 
         with _mlir_location_from_frame(f"binop({op})"):
             element_type = ir.F64Type.get()
+
+            lhs_val = bufferization.to_tensor(lhs_val, restrict=True)
+            rhs_val = bufferization.to_tensor(rhs_val, restrict=True)
+
+            def do_broadcast(tensor_val, in_shape, out_shape):
+                if tuple(in_shape) == tuple(out_shape):
+                    return tensor_val
+                bc_out = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+
+                # Create proper affine maps for broadcast
+                # Input map: always read from index 0 for all dimensions
+                input_map = ir.AffineMap.get(len(out_shape), 0, [ir.AffineConstantExpr.get(0)])
+                # Output map: identity mapping for output dimensions
+                output_map = ir.AffineMap.get_identity(len(out_shape))
+
+                # Create iterator types - one parallel iterator for each output dimension
+                iterator_types = [ir.Attribute.parse("#linalg.iterator_type<parallel>") for _ in out_shape]
+
+                bc_op = linalg.GenericOp(
+                    [bc_out.type],
+                    inputs=[tensor_val],
+                    outputs=[bc_out],
+                    indexing_maps=[input_map, output_map],
+                    iterator_types=ir.ArrayAttr.get(iterator_types),
+                )
+                body = bc_op.regions[0].blocks.append(
+                    element_type, element_type
+                )
+                with ir.InsertionPoint(body):
+                    linalg.YieldOp([body.arguments[0]])
+
+                return bc_op
+
             # broadcast
-            bc_lhs = self._gen_static_broadcast(lhs_val, in_shapes=(lhs_shape,), out_shape=out_shape)
-            bc_rhs = self._gen_static_broadcast(rhs_val, in_shapes=(rhs_shape,), out_shape=out_shape)
+            print(in_shapes, '->', out_shape)
+            bc_lhs = do_broadcast(lhs_val, in_shapes[0], out_shape)
+            bc_rhs = do_broadcast(rhs_val, in_shapes[1], out_shape)
+
             # Do binop
             nd = len(out_shape)
 
-            result = memref.AllocOp(ir.MemRefType.get(out_shape, element_type), [], [])
+            result = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
             generic_op = linalg.GenericOp(
-                result_tensors=[],
+                result_tensors=[result.type],
                 inputs=[bc_lhs, bc_rhs],
                 outputs=[result],
                 indexing_maps=[
@@ -3034,7 +3070,9 @@ class MlirBackend(_ch06_MlirBackend):
             with ir.InsertionPoint(body):
                 linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
 
-            return result
+
+            memref_type = ir.MemRefType.get(out_shape, element_type)
+            return bufferization.to_memref(memref_type, generic_op)
 
     def _gen_unary_ufunc(self, operand, op, in_shapes=(), out_shape=()):
         from mlir.dialects import memref, linalg
@@ -3122,6 +3160,8 @@ class MlirBackend(_ch06_MlirBackend):
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
         from mlir.dialects import arith, memref, linalg, math as mlir_math
         from mlir import ir
+
+        print("_____", op)
 
         match op, operands:
             case "MathOp_Sqrt_F64<x>", (operand,):
