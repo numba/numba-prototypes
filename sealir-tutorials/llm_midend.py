@@ -2423,14 +2423,36 @@ class MlirBackend(_ch06_MlirBackend):
         pm = MLIRVerifier(module)
 
         passes = [
+            "canonicalize",
+            "cse",
+            "symbol-dce",
+
+
+            "linalg-fold-unit-extent-dims",
+            "linalg-generalize-named-ops",
+            "linalg-fuse-elementwise-ops",
+
             "one-shot-bufferize='bufferize-function-boundaries'",
-            "convert-linalg-to-affine-loops",
-            "affine-loop-fusion",
+            "buffer-hoisting",
+            # affine
+            "affine-simplify-structures",
+            "affine-scalrep",
+            "affine-loop-invariant-code-motion",
+            "affine-loop-fusion='mode=greedy'",
+            "affine-parallelize",
+
             "expand-strided-metadata",
             "lower-affine",
+
+            # cleanup
+            "canonicalize",
+            "cse",
+
+            # lower,
             "buffer-deallocation",
             "convert-scf-to-cf",
             "finalize-memref-to-llvm",
+            "convert-vector-to-llvm",
             "convert-math-to-libm",
             "convert-func-to-llvm",
             "convert-index-to-llvm",
@@ -3135,7 +3157,7 @@ class MlirBackend(_ch06_MlirBackend):
 
         # Necessary to fill zeros
         zero = arith.ConstantOp(element_type, 0.0)
-        linalg.fill(zero, outs=[result_reduced])
+        result_reduced = linalg.fill(zero, outs=[result_reduced])
 
         reduce_op = linalg.ReduceOp(
             result=[tensor_type], inputs=[opval_tensor], inits=[result_reduced], dimensions=[axis])
@@ -3537,7 +3559,7 @@ def softmax_x_minus_max(x):
 
 def test_softmax_x_minux_max_1d():
     np.random.seed(0)
-    _run_array_unary_test(softmax_x_minus_max, np.random.random(4))
+    _run_array_unary_test(softmax_x_minus_max, np.random.random(100000))
 
 
 def test_softmax_x_minux_max():
