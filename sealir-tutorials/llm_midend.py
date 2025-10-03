@@ -2391,31 +2391,53 @@ class MlirBackend(_ch06_MlirBackend):
         super().__init__()
 
     def run_passes(self, module):
+        from mlir import ir
         from mlir.passmanager import PassManager
+        from utils.mlir_utils import MLIRVerifier
 
         if _DEBUG:
             module.dump()
-        pass_man = PassManager(context=module.context)
+        # pass_man = PassManager(context=module.context)
+        # module.context.emit_error_diagnostics = True
 
-        if _DEBUG:
-            module.context.enable_multithreading(False)
-        if _DEBUG:
-            # notebook may hang if ir_printing is enabled and and MLIR failed.
-            pass_man.enable_ir_printing()
+        # if _DEBUG:
+        #     module.context.enable_multithreading(False)
+        # if _DEBUG:
+        #     # notebook may hang if ir_printing is enabled and and MLIR failed.
+        #     pass_man.enable_ir_printing()
 
-        pass_man.add("canonicalize")
+        # pass_man.add("canonicalize")
 
-        pass_man.add("convert-linalg-to-loops")
-        pass_man.add("expand-strided-metadata")
-        pass_man.add("lower-affine")
-        pass_man.add("convert-scf-to-cf")
-        pass_man.add("finalize-memref-to-llvm")
-        pass_man.add("convert-math-to-libm")
-        pass_man.add("convert-func-to-llvm")
-        pass_man.add("convert-index-to-llvm")
-        pass_man.add("reconcile-unrealized-casts")
-        pass_man.enable_verifier(True)
-        pass_man.run(module.operation)
+        # pass_man.add("convert-linalg-to-loops")
+        # pass_man.add("expand-strided-metadata")
+        # pass_man.add("lower-affine")
+        # pass_man.add("convert-scf-to-cf")
+        # pass_man.add("finalize-memref-to-llvm")
+        # pass_man.add("convert-math-to-libm")
+        # pass_man.add("convert-func-to-llvm")
+        # pass_man.add("convert-index-to-llvm")
+        # pass_man.add("reconcile-unrealized-casts")
+        # pass_man.enable_verifier(True)
+        # pass_man.run(module.operation)
+
+        pm = MLIRVerifier(module)
+
+        passes = [
+            "one-shot-bufferize='bufferize-function-boundaries'",
+            "convert-linalg-to-affine-loops",
+            "expand-strided-metadata",
+            "lower-affine",
+            "buffer-deallocation",
+            "convert-scf-to-cf",
+            "finalize-memref-to-llvm",
+            "convert-math-to-libm",
+            "convert-func-to-llvm",
+            "convert-index-to-llvm",
+            "reconcile-unrealized-casts",
+        ]
+        output = pm.verify_passes(passes)
+        module = ir.Module.parse(output, context=module.context)
+
         # Output LLVM-dialect MLIR
         if _DEBUG:
             module.dump()
@@ -2467,7 +2489,6 @@ class MlirBackend(_ch06_MlirBackend):
         # print("RETURN TYPE", retty)
 
         argtypes = self._argtys
-        # print(argtypes)
 
         super().lower(func, argtypes)
 
@@ -3052,7 +3073,7 @@ class MlirBackend(_ch06_MlirBackend):
         return result
 
     def _gen_reduce_ufunc(self, opval, axis, op, in_shapes=(), out_shape=()):
-        from mlir.dialects import arith, func, memref, linalg
+        from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
         from mlir import ir
 
         inshape, = in_shapes
@@ -3064,19 +3085,22 @@ class MlirBackend(_ch06_MlirBackend):
         element_type = ir.F64Type.get()
         reduced_shape = list(inshape)
         reduced_shape.pop(axis)
-        memref_type = ir.MemRefType.get(reduced_shape, element_type)
-        result_reduced = memref.AllocOp(memref_type, [], [])
+        # memref_type = ir.MemRefType.get(reduced_shape, element_type)
+        # result_reduced = memref.AllocOp(memref_type, [], [])
+
+        tensor_type = ir.RankedTensorType.get(reduced_shape, element_type)
+
+        result_reduced = tensor.empty(tensor_type, [])
+
+        opval_tensor = bufferization.to_tensor(opval, restrict=True)
+
 
         # Necessary to fill zeros
         zero = arith.ConstantOp(element_type, 0.0)
         linalg.fill(zero, outs=[result_reduced])
 
         reduce_op = linalg.ReduceOp(
-            result=[],
-            inputs=[opval],
-            inits=[result_reduced],
-            dimensions=[axis]
-        )
+            result=[tensor_type], inputs=[opval_tensor], inits=[result_reduced], dimensions=[axis])
 
         body = reduce_op.regions[0].blocks.append(
             element_type, element_type
@@ -3086,14 +3110,14 @@ class MlirBackend(_ch06_MlirBackend):
             linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
 
         # broadcast for keepdims
-        memref_type = ir.MemRefType.get(out_shape, element_type)
-        result = memref.AllocOp(memref_type, [], [])
-        linalg.broadcast(
-            result_reduced,
-            outs=[result],
+        bc_tensor = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+        broadcasted = linalg.broadcast(
+            reduce_op.results[0],
+            outs=[bc_tensor],
             dimensions=[axis]
         )
-        return result
+        memref_type = ir.MemRefType.get(out_shape, element_type)
+        return bufferization.to_memref(memref_type, broadcasted)
 
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
         from mlir.dialects import arith, memref, linalg, math as mlir_math
@@ -3344,33 +3368,34 @@ class MlirBackend(_ch06_MlirBackend):
         def jit_func(*args):
             import time
 
-            pstart = time.time_ns()
-            input_args = args
+            for _ in range(n_repeats):
+                pstart = time.time_ns()
+                input_args = args
 
-            assert len(input_args) == len(input_types)
+                assert len(input_args) == len(input_types)
 
-            input_exec_ptrs = [
-                self.get_exec_ptr(ty, val)[0]
-                for ty, val in zip(input_types, input_args)
-            ]
+                input_exec_ptrs = [
+                    self.get_exec_ptr(ty, val)[0]
+                    for ty, val in zip(input_types, input_args)
+                ]
 
-            with self.context:
-                assert out_type.element_type == ir.F64Type.get()
-            res_val = runtime.make_nd_memref_descriptor(
-                rank=out_type.rank, dtype=ctypes.c_double
-            )()
-            res_ptr = ctypes.pointer(res_val)
-            pend = time.time_ns()
-            # Call the JIT-compiled function via the execution engine.
-            jstart = time.time_ns()
-            engine.invoke(function_name, ctypes.byref(res_ptr), *input_exec_ptrs)
-            jend = time.time_ns()
+                with self.context:
+                    assert out_type.element_type == ir.F64Type.get()
+                res_val = runtime.make_nd_memref_descriptor(
+                    rank=out_type.rank, dtype=ctypes.c_double
+                )()
+                res_ptr = ctypes.pointer(res_val)
+                pend = time.time_ns()
+                # Call the JIT-compiled function via the execution engine.
+                jstart = time.time_ns()
+                engine.invoke(function_name, ctypes.byref(res_ptr), *input_exec_ptrs)
+                jend = time.time_ns()
 
-            # Convert the result back to a numpy array.
-            tstart = time.time_ns()
-            out = runtime.ranked_memref_to_numpy(res_ptr)
-            tend = time.time_ns()
-            print(f"MLIRGen: To Memref {(pend - pstart)/1000} microseconds, Exec {(jend-jstart)/1000} microseconds, To NumPy {(tend-tstart)/1000} microseconds")
+                # Convert the result back to a numpy array.
+                tstart = time.time_ns()
+                out = runtime.ranked_memref_to_numpy(res_ptr)
+                tend = time.time_ns()
+                print(f"MLIRGen: To Memref {(pend - pstart)/1000} microseconds, Exec {(jend-jstart)/1000} microseconds, To NumPy {(tend-tstart)/1000} microseconds")
             return out
 
 
@@ -3981,10 +4006,11 @@ def _run_array_unary_test(target_function, inary):
 def _run_array_test(target_function, args):
     import time
 
-    start = time.time_ns()
-    desired = target_function(*args)
-    end = time.time_ns()
-    print("\nNumPy: Exec {:.3f} microseconds".format((end - start) / 1000))
+    for _ in range(n_repeats):
+        start = time.time_ns()
+        desired = target_function(*args)
+        end = time.time_ns()
+        print("\nNumPy: Exec {:.3f} microseconds".format((end - start) / 1000))
 
     try:
         cres = run_compiler(target_function, args)
