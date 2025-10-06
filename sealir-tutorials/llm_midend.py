@@ -2423,41 +2423,80 @@ class MlirBackend(_ch06_MlirBackend):
         pm = MLIRVerifier(module)
 
         passes = [
-            "canonicalize",
-            "cse",
-            "symbol-dce",
+        # Phase 1: Clean up and canonicalize
+        "canonicalize",
+        "cse",
+        "symbol-dce",
+
+        # Phase 2: Linalg optimizations
+        "linalg-fold-unit-extent-dims",
+        "linalg-fuse-elementwise-ops",
+        "canonicalize",
+
+        # Phase 3: Bufferization
+        "one-shot-bufferize='bufferize-function-boundaries'",
+        "canonicalize",
+        "cse",
+
+        # Phase 4: Convert to loops
+        "linalg-generalize-named-ops",
+        "convert-linalg-to-affine-loops",
+
+        # Phase 5: Affine optimizations
+        "affine-loop-fusion='mode=greedy'",
+        "affine-scalrep",
+        "affine-loop-invariant-code-motion",
+        "affine-simplify-structures",
+        "affine-loop-coalescing",
+        "affine-loop-tile='tile-size=64'",
+        "affine-loop-unroll='unroll-factor=4 unroll-up-to-factor'",
+        # "affine-super-vectorize='vectorize-reductions'",
+        "affine-parallelize='parallel-reductions=true'",
+        "affine-loop-normalize",
+
+        # Phase 6: Memory optimizations
+        "normalize-memrefs",
+        "memref-expand",
+        "fold-memref-alias-ops",
+        "canonicalize",
+
+        "expand-strided-metadata",
+        "lower-affine",
 
 
-            "linalg-fold-unit-extent-dims",
-            "linalg-generalize-named-ops",
-            "linalg-fuse-elementwise-ops",
+        # === SCF OPTIMIZATIONS ===
+        # Phase 7: SCF-level optimizations (after lowering!)
+        "scf-parallel-loop-fusion",
+        "scf-for-loop-peeling",
+        "scf-for-loop-specialization",
+        # "for-loop-invariant-code-motion",
+        "canonicalize",
+        "cse",
 
-            "one-shot-bufferize='bufferize-function-boundaries'",
-            "buffer-hoisting",
-            # affine
-            "affine-simplify-structures",
-            "affine-scalrep",
-            "affine-loop-invariant-code-motion",
-            "affine-loop-fusion='mode=greedy'",
-            "affine-parallelize",
+        #     --buffer-deallocation                                  -   Adds all required dealloc operations for all allocations in the input program
+        #   --buffer-deallocation-simplification                   -   Optimizes `bufferization.dealloc` operation for more efficient codegen
+        #   --buffer-hoisting                                      -   Optimizes placement of allocation operations by moving them into common dominators and out of nested regions
+        #   --buffer-loop-hoisting
+        "promote-buffers-to-stack",
+        "mem2reg",
+        "buffer-deallocation",
 
-            "expand-strided-metadata",
-            "lower-affine",
 
-            # cleanup
-            "canonicalize",
-            "cse",
+        # "convert-scf-to-openmp",
 
-            # lower,
-            "buffer-deallocation",
-            "convert-scf-to-cf",
-            "finalize-memref-to-llvm",
-            "convert-vector-to-llvm",
-            "convert-math-to-libm",
-            "convert-func-to-llvm",
-            "convert-index-to-llvm",
-            "reconcile-unrealized-casts",
+        # Phase 8: Lower to LLVM
+        "convert-scf-to-cf",
+        "convert-cf-to-llvm",
+        "convert-vector-to-llvm",
+        "finalize-memref-to-llvm",
+        "convert-openmp-to-llvm",
+        "convert-math-to-libm",
+        "convert-math-to-llvm",
+        "convert-func-to-llvm",
+        "reconcile-unrealized-casts"
         ]
+
+
         output = pm.verify_passes(passes, output_dir='mlir_outs')
         module = ir.Module.parse(output, context=module.context)
 
@@ -3040,9 +3079,18 @@ class MlirBackend(_ch06_MlirBackend):
                     return tensor_val
                 bc_out = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
 
-                # Create proper affine maps for broadcast
-                # Input map: always read from index 0 for all dimensions
-                input_map = ir.AffineMap.get(len(out_shape), 0, [ir.AffineConstantExpr.get(0)])
+                # Create affine expressions that map to the broadcasted dimensions
+                # For a 2x1 -> 2x12 broadcast, you want (d0, d1) -> (d0, 0)
+                input_exprs = []
+                for i, (in_dim, out_dim) in enumerate(zip(in_shape, out_shape)):
+                    if in_dim == 1 and out_dim > 1:
+                        # This dimension is being broadcasted - use constant 0
+                        input_exprs.append(ir.AffineConstantExpr.get(0))
+                    else:
+                        # This dimension is not broadcasted - use the dimension variable
+                        input_exprs.append(ir.AffineDimExpr.get(i))
+
+                input_map = ir.AffineMap.get(len(out_shape), 0, input_exprs)
                 # Output map: identity mapping for output dimensions
                 output_map = ir.AffineMap.get_identity(len(out_shape))
 
@@ -3136,48 +3184,49 @@ class MlirBackend(_ch06_MlirBackend):
         from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
         from mlir import ir
 
-        inshape, = in_shapes
-        nd = len(inshape)
-        if axis < 0:
-            axis = nd + axis
+        with _mlir_location_from_frame(f"reduceop({op})"):
+            inshape, = in_shapes
+            nd = len(inshape)
+            if axis < 0:
+                axis = nd + axis
 
-        # Extract input dimensions for reduced result (all dims except the reduced one)
-        element_type = ir.F64Type.get()
-        reduced_shape = list(inshape)
-        reduced_shape.pop(axis)
-        # memref_type = ir.MemRefType.get(reduced_shape, element_type)
-        # result_reduced = memref.AllocOp(memref_type, [], [])
+            # Extract input dimensions for reduced result (all dims except the reduced one)
+            element_type = ir.F64Type.get()
+            reduced_shape = list(inshape)
+            reduced_shape.pop(axis)
+            # memref_type = ir.MemRefType.get(reduced_shape, element_type)
+            # result_reduced = memref.AllocOp(memref_type, [], [])
 
-        tensor_type = ir.RankedTensorType.get(reduced_shape, element_type)
+            tensor_type = ir.RankedTensorType.get(reduced_shape, element_type)
 
-        result_reduced = tensor.empty(tensor_type, [])
+            result_reduced = tensor.empty(tensor_type, [])
 
-        opval_tensor = bufferization.to_tensor(opval, restrict=True)
+            opval_tensor = bufferization.to_tensor(opval, restrict=True)
 
 
-        # Necessary to fill zeros
-        zero = arith.ConstantOp(element_type, 0.0)
-        result_reduced = linalg.fill(zero, outs=[result_reduced])
+            # Necessary to fill zeros
+            zero = arith.ConstantOp(element_type, 0.0)
+            result_reduced = linalg.fill(zero, outs=[result_reduced])
 
-        reduce_op = linalg.ReduceOp(
-            result=[tensor_type], inputs=[opval_tensor], inits=[result_reduced], dimensions=[axis])
+            reduce_op = linalg.ReduceOp(
+                result=[tensor_type], inputs=[opval_tensor], inits=[result_reduced], dimensions=[axis])
 
-        body = reduce_op.regions[0].blocks.append(
-            element_type, element_type
-        )
+            body = reduce_op.regions[0].blocks.append(
+                element_type, element_type
+            )
 
-        with ir.InsertionPoint(body):
-            linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
+            with ir.InsertionPoint(body):
+                linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
 
-        # broadcast for keepdims
-        bc_tensor = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
-        broadcasted = linalg.broadcast(
-            reduce_op.results[0],
-            outs=[bc_tensor],
-            dimensions=[axis]
-        )
-        memref_type = ir.MemRefType.get(out_shape, element_type)
-        return bufferization.to_memref(memref_type, broadcasted)
+            # broadcast for keepdims
+            bc_tensor = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+            broadcasted = linalg.broadcast(
+                reduce_op.results[0],
+                outs=[bc_tensor],
+                dimensions=[axis]
+            )
+            memref_type = ir.MemRefType.get(out_shape, element_type)
+            return bufferization.to_memref(memref_type, broadcasted)
 
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
         from mlir.dialects import arith, memref, linalg, math as mlir_math
@@ -3373,7 +3422,7 @@ class MlirBackend(_ch06_MlirBackend):
         in_types, out_types = [], []
 
         from ctypes.util import find_library
-        needed_shared_libs = ("mlir_c_runner_utils", "mlir_runner_utils")
+        needed_shared_libs = ("mlir_c_runner_utils", "mlir_runner_utils", "omp")
         shared_libs = [find_library(x) for x in needed_shared_libs]
 
         module = self.module
@@ -3419,6 +3468,7 @@ class MlirBackend(_ch06_MlirBackend):
             # Manually invoke an empty function to force compilation
             engine.invoke('global_init')
         else:
+            raise RuntimeError("unreachable")
             engine = exec_engine
 
         assert (
@@ -3458,6 +3508,8 @@ class MlirBackend(_ch06_MlirBackend):
                 out = runtime.ranked_memref_to_numpy(res_ptr)
                 tend = time.time_ns()
                 print(f"MLIRGen: To Memref {(pend - pstart)/1000} microseconds, Exec {(jend-jstart)/1000} microseconds, To NumPy {(tend-tstart)/1000} microseconds")
+
+            engine.dump_to_object_file("mlir_outs/binary.out")
             return out
 
 
@@ -3562,10 +3614,27 @@ def test_softmax_x_minux_max_1d():
     _run_array_unary_test(softmax_x_minus_max, np.random.random(100000))
 
 
+def test_softmax_x_minux_max_2d():
+    np.random.seed(0)
+    _run_array_unary_test(softmax_x_minus_max, np.random.random((1000, 1000)))
+
+
 def test_softmax_x_minux_max():
     np.random.seed(0)
     _run_array_unary_test(softmax_x_minus_max, np.random.random((1, 4)))
     _run_array_unary_test(softmax_x_minus_max, np.random.random((1, 2, 6, 4)))
+
+
+def binop_performance(x, y):
+    a = np.asarray(2.0)
+    return a * x + y
+
+
+def test_binop_performance_2d():
+    np.random.seed(0)
+    _run_array_test(binop_performance, (np.random.random((1000, 1000)),
+                                        np.random.random((1000, 1000))))
+
 
 
 def softmax_sum(x):
