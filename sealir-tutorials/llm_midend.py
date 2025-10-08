@@ -9,6 +9,7 @@ from functools import reduce
 from pprint import pprint
 from dataclasses import dataclass
 from types import FunctionType
+import time
 
 from ch04_1_typeinfer_ifelse import Type, TypeFloat64, TypeVar, NbOp_Add_Int64, Nb_CastI64ToF64
 from ch05_typeinfer_array import ArrayDesc, Broadcast, Dim, ruleset_broadcasting
@@ -2612,7 +2613,7 @@ class MlirBackend(_ch06_MlirBackend):
         return out
 
     def _gen_static_broadcast(self, array_val, in_shapes=(), out_shape=()):
-        from mlir.dialects import memref
+        from mlir.dialects import memref, linalg, tensor, bufferization
         from mlir import ir
 
         in_shape, = in_shapes
@@ -2620,53 +2621,47 @@ class MlirBackend(_ch06_MlirBackend):
         if in_shape == out_shape:
             return array_val
 
-
         element_type = ir.F64Type.get()
 
-        # Use SubView-based broadcasting for numpy broadcast semantics
-        static_offsets = []
-        static_sizes = []
-        calculated_strides = []
-        static_strides = []
+        array_val_tensor = bufferization.to_tensor(array_val, restrict=True)
 
-        # Calculate broadcasting dimensions with proper strides
-        # For n-dimensional arrays, stride[i] = product of dimensions[i+1:]
-        current_stride = 1
-        for i in reversed(range(len(in_shape))):
-            rhs_dim = in_shape[i]
-            out_dim = out_shape[i]
+        if tuple(in_shape) == tuple(out_shape):
+            return array_val
 
-            if rhs_dim == 1 and out_dim > 1:
-                # Broadcast dimension: stride = 0 to repeat the single element
-                static_offsets.insert(0, 0)
-                static_sizes.insert(0, out_dim)
-                calculated_strides.insert(0, 0)
-                static_strides.insert(0, 0)
+        bc_out = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+
+        # Create affine expressions that map to the broadcasted dimensions
+        # For a 2x1 -> 2x12 broadcast, you want (d0, d1) -> (d0, 0)
+        input_exprs = []
+        for i, (in_dim, out_dim) in enumerate(zip(in_shape, out_shape)):
+            if in_dim == 1 and out_dim > 1:
+                # This dimension is being broadcasted - use constant 0
+                input_exprs.append(ir.AffineConstantExpr.get(0))
             else:
-                # Non-broadcast dimension: use calculated stride
-                static_offsets.insert(0, 0)
-                static_sizes.insert(0, rhs_dim)
-                calculated_strides.insert(0, current_stride)
-                static_strides.insert(0, 1)
-                # Update stride for next outer dimension
-                current_stride *= rhs_dim
+                # This dimension is not broadcasted - use the dimension variable
+                input_exprs.append(ir.AffineDimExpr.get(i))
 
-        with _mlir_location_from_frame():
-            # Create the broadcasted memref type
-            layout = ir.StridedLayoutAttr.get(0, calculated_strides)
-            bc_memref_type = ir.MemRefType.get(out_shape, element_type, layout=layout)
+        input_map = ir.AffineMap.get(len(out_shape), 0, input_exprs)
+        # Output map: identity mapping for output dimensions
+        output_map = ir.AffineMap.get_identity(len(out_shape))
 
-            # Create subview for broadcasting
-            return memref.SubViewOp(
-                bc_memref_type,
-                array_val,
-                offsets=[],
-                sizes=[],
-                strides=[],
-                static_offsets=static_offsets,
-                static_sizes=static_sizes,
-                static_strides=static_strides
-            )
+        # Create iterator types - one parallel iterator for each output dimension
+        iterator_types = [ir.Attribute.parse("#linalg.iterator_type<parallel>") for _ in out_shape]
+
+        bc_op = linalg.GenericOp(
+            [bc_out.type],
+            inputs=[array_val_tensor],
+            outputs=[bc_out],
+            indexing_maps=[input_map, output_map],
+            iterator_types=ir.ArrayAttr.get(iterator_types),
+        )
+        body = bc_op.regions[0].blocks.append(
+            element_type, element_type
+        )
+        with ir.InsertionPoint(body):
+            linalg.YieldOp([body.arguments[0]])
+
+        return bufferization.to_memref(ir.MemRefType.get(out_shape, element_type), bc_op)
 
     def _gen_take_shaped(self, ary_val, index, src_nd, in_shapes=(), out_shape=()):
         from mlir.dialects import memref
@@ -2839,7 +2834,7 @@ class MlirBackend(_ch06_MlirBackend):
     def _gen_inline_array_transpose_shaped(self, ary_val, permutation=None, dtype=None, in_shapes=(), out_shape=()):
         """Inline version of transpose_shaped that returns the transposed memref directly."""
         from mlir import ir
-        from mlir.dialects import memref, linalg
+        from mlir.dialects import memref, linalg, bufferization, tensor
 
         in_shape, = in_shapes
 
@@ -2854,11 +2849,38 @@ class MlirBackend(_ch06_MlirBackend):
         for i, j in enumerate(permutation):
             assert out_shape[i] == in_shape[j]
 
-        memref_type_out = ir.MemRefType.get(out_shape, element_type)
-        output_memref = memref.alloc(memref_type_out, [], [])
-        linalg.transpose(ary_val, outs=[output_memref], permutation=permutation)
+        ary_val = bufferization.to_tensor(ary_val, restrict=True)
 
-        return output_memref
+        bc_out = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+
+        input_exprs = []
+        for i, (in_dim, out_dim) in enumerate(zip(in_shape, out_shape)):
+            input_exprs.append(ir.AffineDimExpr.get(i))
+        
+        input_exprs = [input_exprs[perm] for perm in permutation]
+
+        input_map = ir.AffineMap.get(len(out_shape), 0, input_exprs)
+        # Output map: identity mapping for output dimensions
+        output_map = ir.AffineMap.get_identity(len(out_shape))
+
+        # Create iterator types - one parallel iterator for each output dimension
+        iterator_types = [ir.Attribute.parse("#linalg.iterator_type<parallel>") for _ in out_shape]
+
+        bc_op = linalg.GenericOp(
+            [bc_out.type],
+            inputs=[ary_val],
+            outputs=[bc_out],
+            indexing_maps=[input_map, output_map],
+            iterator_types=ir.ArrayAttr.get(iterator_types),
+        )
+        body = bc_op.regions[0].blocks.append(
+            element_type, element_type
+        )
+        with ir.InsertionPoint(body):
+            linalg.YieldOp([body.arguments[0]])
+
+        memref_type = ir.MemRefType.get(out_shape, element_type)
+        return bufferization.to_memref(memref_type, bc_op)
 
     def _gen_array_matmul_shaped(self, lhs_matrix, rhs_matrix, in_shapes=(), out_shape=()):
         from mlir import ir
@@ -4294,15 +4316,28 @@ def _run_internal_tests(test_func_str, gen_fn_args, in_shapes, out_shape):
         with ir.InsertionPoint(func_op.add_entry_block()):
             func.ReturnOp([])
 
-    test_backend.run_passes(module)
+    module = test_backend.run_passes(module)
 
     return test_backend.jit_compile_extra(module, input_argtys, output_argty)
+
+def bench_np(np_func):
+
+    def wrapper(*args):
+        start = time.time_ns()
+        res = np_func(*args)
+        end = time.time_ns()
+        print("\nNumPy: Exec {:.3f} microseconds".format((end - start) / 1000))
+
+        return res
+
+    return wrapper
 
 def test_unary():
     from mlir.dialects import math as mlir_math
 
     input_array = np.random.rand(3, 5)
 
+    @bench_np
     def np_func(args):
         return np.exp(args)
 
@@ -4321,6 +4356,7 @@ def test_binary():
     input_array_1 = np.random.rand(3, 5)
     input_array_2 = np.random.rand(3, 5)
 
+    @bench_np
     def np_func(a, b):
         return np.add(a, b)
 
@@ -4333,31 +4369,146 @@ def test_binary():
                                np_func(input_array_1, input_array_2))
 
 def test_reduce():
-    pass
+    from mlir.dialects import arith
+
+    input_array_1 = np.random.rand(30, 50)
+
+    @bench_np
+    def np_func(a):
+        return np.sum(a, axis=1)
+
+    jit_func = _run_internal_tests("_gen_reduce_ufunc",
+                                   gen_fn_args=(1, arith.addf),
+                                   in_shapes=((30, 50),),
+                                   out_shape=(30, 1))
+
+    np.testing.assert_allclose(jit_func(input_array_1),
+                               np_func(input_array_1).reshape(-1, 1))
 
 def test_reshape():
-    pass
+    input_array_1 = np.random.rand(30, 50)
 
+    @bench_np
+    def np_func(a):
+        return np.reshape(a, (300, 5))
+
+    jit_func = _run_internal_tests("_gen_reshape",
+                                   gen_fn_args=(),
+                                   in_shapes=((30, 50),),
+                                   out_shape=(300, 5))
+
+    np.testing.assert_allclose(jit_func(input_array_1),
+                               np_func(input_array_1))
+
+@pytest.mark.skip("Not implemented")
 def test_take():
-    pass
+    input_array_1 = np.random.rand(3, 5)
+    input_array_2 = np.random.rand(3, 5)
+
+    def np_func(a, b):
+        return np.add(a, b)
+
+    jit_func = _run_internal_tests("_gen_binop_ufunc",
+                                   gen_fn_args=(arith.addf,),
+                                   in_shapes=((3, 5), (3, 5)),
+                                   out_shape=(3, 5))
+
+    np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
+                               np_func(input_array_1, input_array_2))
 
 def test_broadcast():
-    pass
+    input_array_1 = np.random.rand(1, 50)
 
+    @bench_np
+    def np_func(a):
+        return np.broadcast_to(a, (30, 50))
+
+    jit_func = _run_internal_tests("_gen_static_broadcast",
+                                   gen_fn_args=(),
+                                   in_shapes=((1, 50),),
+                                   out_shape=(30, 50))
+
+    np.testing.assert_allclose(jit_func(input_array_1),
+                               np_func(input_array_1))
+
+@pytest.mark.skip("Not implemented")
 def test_stack():
-    pass
+    input_array_1 = np.random.rand(3, 5)
+    input_array_2 = np.random.rand(3, 5)
+
+    def np_func(a, b):
+        return np.add(a, b)
+
+    jit_func = _run_internal_tests("_gen_binop_ufunc",
+                                   gen_fn_args=(arith.addf,),
+                                   in_shapes=((3, 5), (3, 5)),
+                                   out_shape=(3, 5))
+
+    np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
+                               np_func(input_array_1, input_array_2))
 
 def test_transpose():
-    pass
+    input_array_1 = np.random.rand(30, 50)
+    
+    @bench_np
+    def np_func(a):
+        return np.transpose(a)
 
+    jit_func = _run_internal_tests("_gen_inline_array_transpose_shaped",
+                                   gen_fn_args=(),
+                                   in_shapes=((30, 50),),
+                                   out_shape=(50, 30))
+
+    np.testing.assert_allclose(jit_func(input_array_1),
+                               np_func(input_array_1))
+
+@pytest.mark.skip("Not implemented")
 def test_matmul():
-    pass
+    input_array_1 = np.random.rand(3, 5)
+    input_array_2 = np.random.rand(3, 5)
 
+    def np_func(a, b):
+        return np.add(a, b)
+
+    jit_func = _run_internal_tests("_gen_binop_ufunc",
+                                   gen_fn_args=(arith.addf,),
+                                   in_shapes=((3, 5), (3, 5)),
+                                   out_shape=(3, 5))
+
+    np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
+                               np_func(input_array_1, input_array_2))
+
+@pytest.mark.skip("Not implemented")
 def test_setitem():
-    pass
+    input_array_1 = np.random.rand(3, 5)
+    input_array_2 = np.random.rand(3, 5)
 
+    def np_func(a, b):
+        return np.add(a, b)
+
+    jit_func = _run_internal_tests("_gen_binop_ufunc",
+                                   gen_fn_args=(arith.addf,),
+                                   in_shapes=((3, 5), (3, 5)),
+                                   out_shape=(3, 5))
+
+    np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
+                               np_func(input_array_1, input_array_2))
+
+@pytest.mark.skip("Not implemented")
 def test_getitem():
-    pass
+    input_array_1 = np.random.rand(3, 5)
+    input_array_2 = np.random.rand(3, 5)
+
+    def np_func(a, b):
+        return np.add(a, b)
+
+    jit_func = _run_internal_tests("_gen_binop_ufunc",
+                                   gen_fn_args=(arith.addf,),
+                                   in_shapes=((3, 5), (3, 5)),
+                                   out_shape=(3, 5))
+
+    np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
+                               np_func(input_array_1, input_array_2))
 
 ########################################
 # Main scripts
