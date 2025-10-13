@@ -2669,63 +2669,8 @@ class MlirBackend(_ch06_MlirBackend):
         return bufferization.to_memref(ir.MemRefType.get(out_shape, element_type), bc_op)
 
     def _gen_take_shaped(self, ary_val, index, src_nd, in_shapes=(), out_shape=()):
-        from mlir.dialects import memref
-        from mlir import ir
-
-        ishape, = in_shapes
-
-        axis = -1
-        element_type = ir.F64Type.get()
-        sub_shape = list(ishape)
-        sub_shape[axis] = 1
-
-        offsets = [0] * src_nd
-        offsets[axis] = index
-
-        strides = [1] * src_nd
-
-        calculated_strides = []
-        current_stride = 1
-        for i in reversed(range(src_nd)):
-            dim = ishape[i]
-
-            calculated_strides.insert(0, current_stride)
-            # Update stride for next outer dimension
-            current_stride *= dim
-
-        out_layout = ir.StridedLayoutAttr.get(index, calculated_strides)
-        memref_type_out = ir.MemRefType.get(sub_shape, element_type, layout=out_layout)
-
-
-        subview = memref.SubViewOp(
-            memref_type_out,
-            ary_val,
-            offsets=[],
-            sizes=[],
-            strides=[],
-            static_offsets=ir.DenseI64ArrayAttr.get(offsets),
-            static_sizes=ir.DenseI64ArrayAttr.get(sub_shape),
-            static_strides=ir.DenseI64ArrayAttr.get(strides)
-        ).result
-
-        result = ir.MemRefType.get(out_shape, element_type, layout=ir.StridedLayoutAttr.get(index, calculated_strides[:-1]))
-
-        # collapse the axis
-        reassoc = [[x] for x in range(len(sub_shape))]
-        reassoc_target = reassoc.pop(axis)
-        reassoc[axis].extend(reassoc_target)
-        collapsed = memref.CollapseShapeOp(
-            src=subview,
-            result=result,
-            reassociation=reassoc,
-        ).result
-
-        # np.take returns a copy
-        copied = memref.alloc(ir.MemRefType.get(out_shape, element_type), [], [])
-        memref.copy(collapsed, copied)
-
-        return copied
-
+        indices = [slice(None)]*(src_nd-1) + [index]
+        return self._gen_array_getitem_shaped(ary_val, indices, in_shapes, out_shape)
 
     def _gen_array_stack_shaped(self, input_args, axis, in_shapes=(), out_shape=()):
         from mlir.dialects import memref
@@ -2889,7 +2834,7 @@ class MlirBackend(_ch06_MlirBackend):
 
     def _gen_array_matmul_shaped(self, lhs_matrix, rhs_matrix, in_shapes=(), out_shape=()):
         from mlir import ir
-        from mlir.dialects import memref, linalg, arith
+        from mlir.dialects import memref, linalg, arith, tensor, bufferization
 
         lhs_shape, rhs_shape = in_shapes
 
@@ -2925,12 +2870,17 @@ class MlirBackend(_ch06_MlirBackend):
             ir.Attribute.parse("#linalg.iterator_type<parallel>") for _ in range(dims)  # batch + M + N
         ] + [ir.Attribute.parse("#linalg.iterator_type<reduction>")])  # K
 
-        out = memref.alloc(memref_type_out, [], [])
+        result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
+        bc_out = tensor.empty(result_tensor_type, [])
+
         zero = arith.ConstantOp(element_type, 0.0)
-        linalg.fill(zero, outs=[out])
+        linalg.fill(zero, outs=[bc_out])
+        lhs_matrix = bufferization.to_tensor(lhs_matrix, restrict=True)
+        rhs_matrix = bufferization.to_tensor(rhs_matrix, restrict=True)
 
         generic_op = linalg.generic(
-            inputs=[lhs_matrix, rhs_matrix], outputs=[out], result_tensors=[],
+            result_tensors=[result_tensor_type],
+            inputs=[lhs_matrix, rhs_matrix], outputs=[bc_out],
             indexing_maps=indexing_maps,
             iterator_types=iterator_types
         )
@@ -2942,7 +2892,7 @@ class MlirBackend(_ch06_MlirBackend):
             add = arith.addf(acc_val, mul)
             linalg.yield_([add])
 
-        return out
+        return bufferization.to_memref(memref_type_out, bc_out)
 
     def _gen_array_expand_dims_shaped(self, ary_val, axes, in_shapes=(), out_shape=()):
         from mlir import ir
@@ -2977,6 +2927,7 @@ class MlirBackend(_ch06_MlirBackend):
         in_shape, = in_shapes
 
         dims = len(in_shape)
+        out_shape_list = list(out_shape)
 
         assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
         if len(indices) < dims:
@@ -2984,35 +2935,24 @@ class MlirBackend(_ch06_MlirBackend):
 
         offsets = [0] * dims
         strides = [1] * dims
-        out_strides = [1] * dims
-
-        for i in range(dims-1,0,-1):
-            out_strides[i-1] = out_strides[i] * in_shape[i]
-
         modified_axes = []
 
         for axis, index in enumerate(indices):
             if index is None:
                 continue
             elif isinstance(index, int):
-                offsets[axis] = index
                 modified_axes.append(axis)
             elif isinstance(index, slice):
                 index_start = index.start if index.start is not None else 0
-                index_step = index.step if index.step is not None else 1
-                index_stop = 0
-                if index.stop is None:
-                    raise ValueError("Slices with undefined stop not supported")
-                else:
-                    index_stop = index.stop
-
                 offsets[axis] = index_start
-                modified_axes.append(axis)
             else:
                 raise TypeError(f"Unknown index type {type(index)}")
 
         element_type = ir.F64Type.get()
         input_memref_tensor = bufferization.to_tensor(input_memref, restrict=True)
+
+        for axis in modified_axes:
+            out_shape_list.insert(axis, 1)
 
         result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
         result_tensor = tensor.extract_slice(result_tensor_type,
@@ -3021,7 +2961,7 @@ class MlirBackend(_ch06_MlirBackend):
             sizes=[],
             strides=[],
             static_offsets=ir.DenseI64ArrayAttr.get(offsets),
-            static_sizes=ir.DenseI64ArrayAttr.get(out_shape),
+            static_sizes=ir.DenseI64ArrayAttr.get(out_shape_list),
             static_strides=ir.DenseI64ArrayAttr.get(strides)
         )
 
@@ -3033,7 +2973,7 @@ class MlirBackend(_ch06_MlirBackend):
         from mlir import ir
         from mlir.dialects import memref, bufferization, tensor
 
-        in_shape, = in_shapes
+        in_shape, b = in_shapes
 
         dims = len(in_shape)
         assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
@@ -4401,21 +4341,19 @@ def test_reshape():
     np.testing.assert_allclose(jit_func(input_array_1),
                                np_func(input_array_1))
 
-@pytest.mark.skip("Not implemented")
 def test_take():
-    input_array_1 = np.random.rand(3, 5)
-    input_array_2 = np.random.rand(3, 5)
+    input_array_1 = np.random.rand(30, 40, 50)
 
-    def np_func(a, b):
-        return np.add(a, b)
+    def np_func(a):
+        return np.take(a, indices=3, axis=1)
 
-    jit_func = _run_internal_tests("_gen_binop_ufunc",
-                                   gen_fn_args=(arith.addf,),
-                                   in_shapes=((3, 5), (3, 5)),
-                                   out_shape=(3, 5))
+    jit_func = _run_internal_tests("_gen_take_shaped",
+                                   gen_fn_args=(1, 3),
+                                   in_shapes=((30, 40, 50),),
+                                   out_shape=(30, 5))
 
-    np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
-                               np_func(input_array_1, input_array_2))
+    np.testing.assert_allclose(jit_func(input_array_1),
+                               np_func(input_array_1))
 
 def test_broadcast():
     input_array_1 = np.random.rand(1, 50)
@@ -4478,18 +4416,18 @@ def test_transpose():
     np.testing.assert_allclose(jit_func(input_array_1),
                                np_func(input_array_1))
 
-@pytest.mark.skip("Not implemented")
+
 def test_matmul():
-    input_array_1 = np.random.rand(3, 5)
-    input_array_2 = np.random.rand(3, 5)
+    input_array_1 = np.random.rand(30, 50)
+    input_array_2 = np.random.rand(50, 25)
 
     def np_func(a, b):
-        return np.add(a, b)
+        return np.matmul(a, b)
 
-    jit_func = _run_internal_tests("_gen_binop_ufunc",
-                                   gen_fn_args=(arith.addf,),
-                                   in_shapes=((3, 5), (3, 5)),
-                                   out_shape=(3, 5))
+    jit_func = _run_internal_tests("_gen_array_matmul_shaped",
+                                   gen_fn_args=(),
+                                   in_shapes=((30, 50), (50, 25)),
+                                   out_shape=(30, 25))
 
     np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
                                np_func(input_array_1, input_array_2))
@@ -4500,16 +4438,19 @@ def test_setitem():
     input_array_1 = np.random.rand(30, 40, 50)
     input_array_2 = np.random.rand(30, 5, 50)
 
+    jit_array_1 = input_array_1.copy()
+    jit_array_2 = input_array_2.copy()
+
     def np_func(a, b):
-        return a[slice(30), slice(5), slice(50)]
+        b[slice(30), slice(5), slice(50)] = a
 
     jit_func = _run_internal_tests("_gen_array_setitem_shaped",
-                                   gen_fn_args=(input_array_2, (slice(30), slice(5), slice(50)),),
-                                   in_shapes=([30, 40, 50],),
+                                   gen_fn_args=((slice(30), slice(5), slice(50)),),
+                                   in_shapes=([30, 40, 50], [30, 5, 50]),
                                    out_shape=())
-
-    np.testing.assert_allclose(jit_func(input_array_1),
-                               np_func(input_array_1, input_array_2))
+    jit_func(jit_array_1, jit_array_2)
+    np_func(input_array_1, input_array_2)
+    np.testing.assert_allclose(input_array_1, input_array_2)
 
 
 def test_getitem():
@@ -4521,7 +4462,7 @@ def test_getitem():
     jit_func = _run_internal_tests("_gen_array_getitem_shaped",
                                    gen_fn_args=((slice(0, 4), 3),),
                                    in_shapes=((30, 40, 50),),
-                                   out_shape=(4, 1, 50))
+                                   out_shape=(4, 50))
 
     np.testing.assert_allclose(jit_func(input_array_1),
                                np_func(input_array_1))
