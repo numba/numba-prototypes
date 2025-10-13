@@ -2673,10 +2673,8 @@ class MlirBackend(_ch06_MlirBackend):
         return self._gen_array_getitem_shaped(ary_val, indices, in_shapes, out_shape)
 
     def _gen_array_stack_shaped(self, input_args, axis, in_shapes=(), out_shape=()):
-        from mlir.dialects import memref
+        from mlir.dialects import memref, tensor, bufferization
         from mlir import ir
-
-        inp_shape, = in_shapes
 
         if axis == -1:
             axis = len(out_shape) - 1
@@ -2688,54 +2686,32 @@ class MlirBackend(_ch06_MlirBackend):
 
         memref_type_out = ir.MemRefType.get(out_shape, element_type)
 
-        output_memref = memref.alloc(memref_type_out, [], [])
-        curr_offset = 0
-        input_shape = list(inp_shape)
-        input_shape.insert(axis, 1)
+        bc_out = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
 
+        curr_offset = 0
         strides = [1] * (ndim + 1)
         strides[axis] = num_inputs
-
-        out_strides = [1] * (ndim + 1)
-        for i in range(len(out_shape) - 2, -1, -1):
-            out_strides[i] = out_strides[i+1] * out_shape[i+1]
-        out_strides[axis] *= num_inputs
+        out_shape_inner = list(out_shape)
+        out_shape_inner[axis] = 1
 
         for input_arg in input_args:
 
             offsets = [0] * (ndim + 1)
             offsets[axis] = curr_offset
-            out_layout = ir.StridedLayoutAttr.get(curr_offset, out_strides)
-            memref_type_out_inner = ir.MemRefType.get(input_shape, element_type, layout=out_layout)
-            subview = memref.SubViewOp(
-                memref_type_out_inner,
-                output_memref,
+
+            bc_out = tensor.insert_slice(
+                bufferization.to_tensor(input_arg, restrict=True), 
+                bc_out,
                 offsets=[],
                 sizes=[],
                 strides=[],
                 static_offsets=ir.DenseI64ArrayAttr.get(offsets),
-                static_sizes=ir.DenseI64ArrayAttr.get(input_shape),
+                static_sizes=ir.DenseI64ArrayAttr.get(out_shape_inner),
                 static_strides=ir.DenseI64ArrayAttr.get(strides)
-            ).result
-
-            re_shape = list(out_shape)
-            re_shape[axis] = 1
-            memref_type_in_inner = ir.MemRefType.get(re_shape, element_type)
-
-            reassociation = self.build_mlir_reassociation(ndim, [axis-1])
-
-            input_arg_exp = memref.expand_shape(
-                memref_type_in_inner,
-                input_arg,
-                reassociation=reassociation,
-                output_shape=[],
-                static_output_shape=ir.DenseI64ArrayAttr.get(re_shape)
             )
-
-            memref.copy(input_arg_exp, subview)
             curr_offset += 1
 
-        return output_memref
+        return bufferization.to_memref(memref_type_out, bc_out)
 
 
     @classmethod
@@ -4385,18 +4361,18 @@ def test_expand_dims():
     np.testing.assert_allclose(jit_func(input_array_1),
                                np_func(input_array_1))
 
-@pytest.mark.skip("Not implemented")
+@pytest.mark.skip("Value not an operand")
 def test_stack():
     input_array_1 = np.random.rand(3, 5)
     input_array_2 = np.random.rand(3, 5)
 
     def np_func(a, b):
-        return np.add(a, b)
+        return np.stack(a, b)
 
-    jit_func = _run_internal_tests("_gen_binop_ufunc",
-                                   gen_fn_args=(arith.addf,),
+    jit_func = _run_internal_tests("_gen_array_stack_shaped",
+                                   gen_fn_args=(-1,),
                                    in_shapes=((3, 5), (3, 5)),
-                                   out_shape=(3, 5))
+                                   out_shape=(3, 5, 2))
 
     np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
                                np_func(input_array_1, input_array_2))

@@ -1,8 +1,5 @@
 module {
   func.func @func(%arg0: memref<1x5x6xf64>, %arg1: memref<1x5x6xf64>) -> memref<1x5x6x2xf64, strided<[?, ?, ?, ?], offset: ?>> attributes {llvm.emit_c_interface} {
-    cf.br ^bb1
-  ^bb1:  // pred: ^bb0
-    %c0_i32 = arith.constant 0 : i32
     %0 = tensor.empty() : tensor<1x5x6x2xf64>
     %1 = bufferization.to_tensor %arg0 restrict : memref<1x5x6xf64>
     %inserted_slice = tensor.insert_slice %1 into %0[0, 0, 0, 0] [1, 5, 6, 1] [1, 1, 1, 2] : tensor<1x5x6xf64> into tensor<1x5x6x2xf64>
@@ -16,3 +13,4 @@ module {
     return
   }
 }
+
