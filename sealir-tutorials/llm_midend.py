@@ -2854,7 +2854,7 @@ class MlirBackend(_ch06_MlirBackend):
         lhs_matrix = bufferization.to_tensor(lhs_matrix, restrict=True)
         rhs_matrix = bufferization.to_tensor(rhs_matrix, restrict=True)
 
-        generic_op = linalg.generic(
+        generic_op = linalg.GenericOp(
             result_tensors=[result_tensor_type],
             inputs=[lhs_matrix, rhs_matrix], outputs=[bc_out],
             indexing_maps=indexing_maps,
@@ -2868,7 +2868,7 @@ class MlirBackend(_ch06_MlirBackend):
             add = arith.addf(acc_val, mul)
             linalg.yield_([add])
 
-        return bufferization.to_memref(memref_type_out, bc_out)
+        return bufferization.to_memref(memref_type_out, generic_op)
 
     def _gen_array_expand_dims_shaped(self, ary_val, axes, in_shapes=(), out_shape=()):
         from mlir import ir
@@ -2885,7 +2885,7 @@ class MlirBackend(_ch06_MlirBackend):
 
         ary_val_tensor = bufferization.to_tensor(ary_val, restrict=True)
 
-        result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
+        result_tensor_type = ir.RankedTensorType.get(result_shape, element_type)
         result_tensor = tensor.expand_shape(result_tensor_type,
             ary_val_tensor,
             reassociation=self.build_mlir_reassociation(dims, axes),
@@ -2893,7 +2893,7 @@ class MlirBackend(_ch06_MlirBackend):
             static_output_shape=ir.DenseI64ArrayAttr.get(result_shape)
         )
 
-        memref_type = ir.MemRefType.get(out_shape, element_type)
+        memref_type = ir.MemRefType.get(result_shape, element_type)
         return bufferization.to_memref(memref_type, result_tensor)
 
     def _gen_array_getitem_shaped(self, input_memref, indices, in_shapes=(), out_shape=()):
@@ -3099,8 +3099,6 @@ class MlirBackend(_ch06_MlirBackend):
 
         result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
         result_tensor = tensor.empty(result_tensor_type, [])
-        zero = arith.ConstantOp(element_type, 0.0)
-        result_tensor = linalg.fill(zero, outs=[result_tensor])
 
         generic_op = linalg.GenericOp(
             result_tensors=[result_tensor_type],
@@ -4480,4 +4478,4 @@ def main():
     np.testing.assert_allclose(res, desired)
 
 if __name__ == "__main__":
-    test_unary()
+    test_attention_matmul()
