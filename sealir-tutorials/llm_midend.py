@@ -2599,18 +2599,23 @@ class MlirBackend(_ch06_MlirBackend):
                 return decl
 
     def _gen_reshape(self, ary_val, in_shapes=(), out_shape=()):
-        from mlir.dialects import memref, arith
+        from mlir.dialects import memref, arith, bufferization, tensor
         from mlir import ir
 
         element_type = ir.F64Type.get()
         index_type = ir.IndexType.get()
+        if in_shapes == out_shape:
+            return ary_val
+    
+        array_val_tensor = bufferization.to_tensor(ary_val, restrict=True)
 
-        shape_memref = memref.AllocOp(ir.MemRefType.get([len(out_shape)], index_type), [], [])
-        memref_type_res = ir.MemRefType.get(out_shape, element_type)
+        shape_tensor = tensor.empty(ir.RankedTensorType.get([len(out_shape)], index_type), [])
+        memref_type_res = ir.RankedTensorType.get(out_shape, element_type)
         for idx, i in enumerate(out_shape):
-            memref.store(arith.constant(index_type, i), shape_memref, [arith.constant(index_type, idx)])
-        out = memref.reshape(memref_type_res, ary_val, shape=shape_memref)
-        return out
+            tensor.insert(arith.constant(index_type, i), shape_tensor, [arith.constant(index_type, idx)])
+        out = tensor.reshape(memref_type_res, array_val_tensor, shape=shape_tensor)
+
+        return bufferization.to_memref(ir.MemRefType.get(out_shape, element_type), out)
 
     def _gen_static_broadcast(self, array_val, in_shapes=(), out_shape=()):
         from mlir.dialects import memref, linalg, tensor, bufferization
@@ -2941,7 +2946,7 @@ class MlirBackend(_ch06_MlirBackend):
 
     def _gen_array_expand_dims_shaped(self, ary_val, axes, in_shapes=(), out_shape=()):
         from mlir import ir
-        from mlir.dialects import memref
+        from mlir.dialects import memref, bufferization, tensor
 
         in_shape, = in_shapes
 
@@ -2952,22 +2957,22 @@ class MlirBackend(_ch06_MlirBackend):
             result_shape.insert(i, 1)
         dims = len(in_shape)
 
-        memref_type_res = ir.MemRefType.get(result_shape, element_type)
+        ary_val_tensor = bufferization.to_tensor(ary_val, restrict=True)
 
-        reassociation = self.build_mlir_reassociation(dims, axes)
-        res = memref.expand_shape(memref_type_res,
-            ary_val,
-            reassociation=reassociation,
+        result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
+        result_tensor = tensor.expand_shape(result_tensor_type,
+            ary_val_tensor,
+            reassociation=self.build_mlir_reassociation(dims, axes),
             output_shape=[], # [2, 3, 4]
             static_output_shape=ir.DenseI64ArrayAttr.get(result_shape)
         )
 
-        return res
-
+        memref_type = ir.MemRefType.get(out_shape, element_type)
+        return bufferization.to_memref(memref_type, result_tensor)
 
     def _gen_array_getitem_shaped(self, input_memref, indices, in_shapes=(), out_shape=()):
         from mlir import ir
-        from mlir.dialects import memref
+        from mlir.dialects import memref, bufferization, tensor
 
         in_shape, = in_shapes
 
@@ -3007,25 +3012,26 @@ class MlirBackend(_ch06_MlirBackend):
                 raise TypeError(f"Unknown index type {type(index)}")
 
         element_type = ir.F64Type.get()
-        memref_type_out = ir.MemRefType.get(out_shape, element_type, layout=ir.StridedLayoutAttr.get(0, out_strides))
+        input_memref_tensor = bufferization.to_tensor(input_memref, restrict=True)
 
-        subview = memref.SubViewOp(
-            memref_type_out,
-            input_memref,
+        result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
+        result_tensor = tensor.extract_slice(result_tensor_type,
+            input_memref_tensor,
             offsets=[],
             sizes=[],
             strides=[],
             static_offsets=ir.DenseI64ArrayAttr.get(offsets),
             static_sizes=ir.DenseI64ArrayAttr.get(out_shape),
             static_strides=ir.DenseI64ArrayAttr.get(strides)
-        ).result
+        )
 
-        return subview
+        memref_type = ir.MemRefType.get(out_shape, element_type)
+        return bufferization.to_memref(memref_type, result_tensor)
 
 
     def _gen_array_setitem_shaped(self, arr_memref, value_memref, indices, in_shapes=(), out_shape=()):
         from mlir import ir
-        from mlir.dialects import memref
+        from mlir.dialects import memref, bufferization, tensor
 
         in_shape, = in_shapes
 
@@ -3068,22 +3074,16 @@ class MlirBackend(_ch06_MlirBackend):
         for i in range(dims-1,0,-1):
             out_strides[i-1] = out_strides[i] * in_shape[i]
 
-        element_type = ir.F64Type.get()
-        memref_type_subview = ir.MemRefType.get(val_shape, element_type, layout=ir.StridedLayoutAttr.get(0, out_strides))
-
-        subview = memref.SubViewOp(
-            memref_type_subview,
-            arr_memref,
+        tensor.insert_slice(
+            bufferization.to_tensor(value_memref, restrict=True), 
+            bufferization.to_tensor(arr_memref, restrict=True),
             offsets=[],
             sizes=[],
             strides=[],
             static_offsets=ir.DenseI64ArrayAttr.get(offsets),
             static_sizes=ir.DenseI64ArrayAttr.get(val_shape),
             static_strides=ir.DenseI64ArrayAttr.get(strides)
-        ).result
-
-        memref.copy(value_memref, subview)
-
+        )
 
     def _gen_binop_ufunc(self, lhs_val, rhs_val, op, in_shapes=(), out_shape=()):
         from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
@@ -3167,7 +3167,7 @@ class MlirBackend(_ch06_MlirBackend):
             return bufferization.to_memref(memref_type, generic_op)
 
     def _gen_unary_ufunc(self, operand, op, in_shapes=(), out_shape=()):
-        from mlir.dialects import memref, linalg
+        from mlir.dialects import memref, linalg, bufferization, tensor, arith
         from mlir import ir
 
         nd = len(out_shape)
@@ -3177,15 +3177,17 @@ class MlirBackend(_ch06_MlirBackend):
         strides = shapes_strides[nd:]
         assert len(strides) == nd
 
-        result = memref.AllocOp(
-            ir.MemRefType.get(out_shape, element_type),
-            [], []
-        )
+        operand_tensor = bufferization.to_tensor(operand, restrict=True)
+
+        result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
+        result_tensor = tensor.empty(result_tensor_type, [])
+        zero = arith.ConstantOp(element_type, 0.0)
+        result_tensor = linalg.fill(zero, outs=[result_tensor])
 
         generic_op = linalg.GenericOp(
-            result_tensors=[],
-            inputs=[operand],
-            outputs=[result],
+            result_tensors=[result_tensor_type],
+            inputs=[operand_tensor],
+            outputs=[result_tensor],
             indexing_maps=[
                 ir.AffineMap.get_identity(nd),
                 ir.AffineMap.get_identity(nd)
@@ -3200,7 +3202,8 @@ class MlirBackend(_ch06_MlirBackend):
         with ir.InsertionPoint(body):
             linalg.YieldOp([op(body.arguments[0])])
 
-        return result
+        memref_type = ir.MemRefType.get(out_shape, element_type)
+        return bufferization.to_memref(memref_type, generic_op.result_tensors)
 
     def _gen_reduce_ufunc(self, opval, axis, op, in_shapes=(), out_shape=()):
         from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
@@ -3216,8 +3219,6 @@ class MlirBackend(_ch06_MlirBackend):
             element_type = ir.F64Type.get()
             reduced_shape = list(inshape)
             reduced_shape.pop(axis)
-            # memref_type = ir.MemRefType.get(reduced_shape, element_type)
-            # result_reduced = memref.AllocOp(memref_type, [], [])
 
             tensor_type = ir.RankedTensorType.get(reduced_shape, element_type)
 
@@ -4431,6 +4432,21 @@ def test_broadcast():
     np.testing.assert_allclose(jit_func(input_array_1),
                                np_func(input_array_1))
 
+def test_expand_dims():
+    input_array_1 = np.random.rand(1, 50)
+
+    @bench_np
+    def np_func(a):
+        return np.expand_dims(a, axis=1)
+
+    jit_func = _run_internal_tests("_gen_array_expand_dims_shaped",
+                                   gen_fn_args=((1,),),
+                                   in_shapes=((1, 50),),
+                                   out_shape=(1, 1, 50))
+
+    np.testing.assert_allclose(jit_func(input_array_1),
+                               np_func(input_array_1))
+
 @pytest.mark.skip("Not implemented")
 def test_stack():
     input_array_1 = np.random.rand(3, 5)
@@ -4478,37 +4494,37 @@ def test_matmul():
     np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
                                np_func(input_array_1, input_array_2))
 
-@pytest.mark.skip("Not implemented")
+
+@pytest.mark.skip("Value not an operand")
 def test_setitem():
-    input_array_1 = np.random.rand(3, 5)
-    input_array_2 = np.random.rand(3, 5)
+    input_array_1 = np.random.rand(30, 40, 50)
+    input_array_2 = np.random.rand(30, 5, 50)
 
     def np_func(a, b):
-        return np.add(a, b)
+        return a[slice(30), slice(5), slice(50)]
 
-    jit_func = _run_internal_tests("_gen_binop_ufunc",
-                                   gen_fn_args=(arith.addf,),
-                                   in_shapes=((3, 5), (3, 5)),
-                                   out_shape=(3, 5))
+    jit_func = _run_internal_tests("_gen_array_setitem_shaped",
+                                   gen_fn_args=(input_array_2, (slice(30), slice(5), slice(50)),),
+                                   in_shapes=([30, 40, 50],),
+                                   out_shape=())
 
-    np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
+    np.testing.assert_allclose(jit_func(input_array_1),
                                np_func(input_array_1, input_array_2))
 
-@pytest.mark.skip("Not implemented")
+
 def test_getitem():
-    input_array_1 = np.random.rand(3, 5)
-    input_array_2 = np.random.rand(3, 5)
+    input_array_1 = np.random.rand(30, 40, 50)
 
-    def np_func(a, b):
-        return np.add(a, b)
+    def np_func(a):
+        return a[slice(0, 4), 3]
 
-    jit_func = _run_internal_tests("_gen_binop_ufunc",
-                                   gen_fn_args=(arith.addf,),
-                                   in_shapes=((3, 5), (3, 5)),
-                                   out_shape=(3, 5))
+    jit_func = _run_internal_tests("_gen_array_getitem_shaped",
+                                   gen_fn_args=((slice(0, 4), 3),),
+                                   in_shapes=((30, 40, 50),),
+                                   out_shape=(4, 1, 50))
 
-    np.testing.assert_allclose(jit_func(input_array_1, input_array_2),
-                               np_func(input_array_1, input_array_2))
+    np.testing.assert_allclose(jit_func(input_array_1),
+                               np_func(input_array_1))
 
 ########################################
 # Main scripts
