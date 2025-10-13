@@ -2949,7 +2949,7 @@ class MlirBackend(_ch06_MlirBackend):
         from mlir import ir
         from mlir.dialects import memref, bufferization, tensor
 
-        in_shape, b = in_shapes
+        in_shape, = in_shapes
 
         dims = len(in_shape)
         assert len(indices) <= dims, "Number of indices should be less than or equal to number of dimensions"
@@ -2990,7 +2990,7 @@ class MlirBackend(_ch06_MlirBackend):
         for i in range(dims-1,0,-1):
             out_strides[i-1] = out_strides[i] * in_shape[i]
 
-        tensor.insert_slice(
+        result_slice = tensor.insert_slice(
             bufferization.to_tensor(value_memref, restrict=True), 
             bufferization.to_tensor(arr_memref, restrict=True),
             offsets=[],
@@ -3000,6 +3000,8 @@ class MlirBackend(_ch06_MlirBackend):
             static_sizes=ir.DenseI64ArrayAttr.get(val_shape),
             static_strides=ir.DenseI64ArrayAttr.get(strides)
         )
+
+        memref.copy(bufferization.to_memref(ir.MemRefType.get(in_shape, ir.F64Type.get()), result_slice), arr_memref)
 
     def _gen_binop_ufunc(self, lhs_val, rhs_val, op, in_shapes=(), out_shape=()):
         from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
