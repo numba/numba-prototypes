@@ -3183,7 +3183,8 @@ class MlirBackend(_ch06_MlirBackend):
                 (yield io)
                 operand = (yield operand)
                 oshape = TypeSpeller.apply(outshape)
-                result = self._gen_unary_ufunc(operand, op=mlir_math.exp, in_shapes=(inshape,), out_shape=oshape)
+                ishape = TypeSpeller.apply(inshape)
+                result = self._gen_unary_ufunc(operand, op=mlir_math.exp, in_shapes=(ishape,), out_shape=oshape)
                 return result
 
             case "NpyOp_Add_Shaped<io, lhs, rhs, lhs_shape, rhs_shape, outshape>", (io, lhs, rhs, lhs_shape, rhs_shape, outshape):
