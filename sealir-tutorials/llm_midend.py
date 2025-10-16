@@ -3123,7 +3123,7 @@ class MlirBackend(_ch06_MlirBackend):
         memref_type = ir.MemRefType.get(out_shape, element_type)
         return bufferization.to_memref(memref_type, generic_op.result_tensors)
 
-    def _gen_reduce_ufunc(self, opval, axis, op, in_shapes=(), out_shape=()):
+    def _gen_reduce_ufunc(self, opval, axis, op, in_shapes=(), out_shape=(), *, initializer=0.0):
         from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
         from mlir import ir
 
@@ -3145,7 +3145,7 @@ class MlirBackend(_ch06_MlirBackend):
             opval_tensor = bufferization.to_tensor(ir.RankedTensorType.get(inshape, element_type), opval, restrict=True)
 
             # Necessary to fill zeros
-            zero = arith.ConstantOp(element_type, 0.0)
+            zero = arith.ConstantOp(element_type, initializer)
             result_reduced = linalg.fill(zero, outs=[result_reduced])
 
             reduce_op = linalg.ReduceOp(
@@ -3222,14 +3222,14 @@ class MlirBackend(_ch06_MlirBackend):
                 opval = (yield operand)
                 oshape = TypeSpeller.apply(outshape)
                 ishape = TypeSpeller.apply(inshape)
-                return self._gen_reduce_ufunc(opval, axis, op=op, in_shapes=(ishape,), out_shape=oshape)
+                return self._gen_reduce_ufunc(opval, axis, op=op, in_shapes=(ishape,), out_shape=oshape, initializer=float("-inf"))
 
             case "NpyOp_Sum_Shaped<io, operand, axis, keepdims, inshape, outshape>", (io, operand, axis, True, inshape, outshape):
                 op = arith.addf
                 opval = (yield operand)
                 oshape = TypeSpeller.apply(outshape)
                 ishape = TypeSpeller.apply(inshape)
-                return self._gen_reduce_ufunc(opval, axis, op=op, in_shapes=(ishape,), out_shape=oshape)
+                return self._gen_reduce_ufunc(opval, axis, op=op, in_shapes=(ishape,), out_shape=oshape, initializer=0.0)
 
             case "NpyOp_Reshape_Shaped<io, ary, src_nd, inshape, outshape>", (io, ary, nd, inshape, outshape):
                 (yield io)
@@ -4298,7 +4298,7 @@ def test_reduce():
     jit_func = _run_internal_tests("_gen_reduce_ufunc",
                                    gen_fn_args=(1, arith.addf),
                                    in_shapes=((30, 50),),
-                                   out_shape=(30, 1))
+                                   out_shape=(30, 1),)
 
     np.testing.assert_allclose(jit_func(input_array_1),
                                np_func(input_array_1).reshape(-1, 1))
