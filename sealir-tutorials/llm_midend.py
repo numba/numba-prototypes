@@ -2782,7 +2782,7 @@ class MlirBackend(_ch06_MlirBackend):
         input_exprs = []
         for i, (in_dim, out_dim) in enumerate(zip(in_shape, out_shape)):
             input_exprs.append(ir.AffineDimExpr.get(i))
-        
+
         input_exprs = [input_exprs[perm] for perm in permutation]
 
         input_map = ir.AffineMap.get(len(out_shape), 0, input_exprs)
@@ -2992,7 +2992,7 @@ class MlirBackend(_ch06_MlirBackend):
             out_strides[i-1] = out_strides[i] * in_shape[i]
 
         result_slice = tensor.insert_slice(
-            bufferization.to_tensor(ir.RankedTensorType.get(val_shape, element_type), value_memref, restrict=True), 
+            bufferization.to_tensor(ir.RankedTensorType.get(val_shape, element_type), value_memref, restrict=True),
             bufferization.to_tensor(ir.RankedTensorType.get(in_shape, element_type), arr_memref, restrict=True),
             offsets=[],
             sizes=[],
@@ -4380,7 +4380,7 @@ def test_stack():
 
 def test_transpose():
     input_array_1 = np.random.rand(30, 50)
-    
+
     @bench_np
     def np_func(a):
         return np.transpose(a)
