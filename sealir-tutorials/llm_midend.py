@@ -2700,7 +2700,7 @@ class MlirBackend(_ch06_MlirBackend):
             offsets[axis] = curr_offset
 
             bc_out = tensor.insert_slice(
-                bufferization.to_tensor(ir.RankedTensorType.get(input_arg.shape, element_type), input_arg, restrict=True), 
+                bufferization.to_tensor(ir.RankedTensorType.get(in_shapes[0], element_type), input_arg, restrict=True),
                 bc_out,
                 offsets=[],
                 sizes=[],
