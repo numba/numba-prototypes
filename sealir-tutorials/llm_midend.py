@@ -2606,10 +2606,10 @@ class MlirBackend(_ch06_MlirBackend):
         index_type = ir.IndexType.get()
         if in_shapes == out_shape:
             return ary_val
-    
-        array_val_tensor = bufferization.to_tensor(ary_val, restrict=True)
 
-        shape_tensor = tensor.empty(ir.RankedTensorType.get([len(out_shape)], index_type), [])
+        array_val_tensor = bufferization.to_tensor(ir.RankedTensorType.get(in_shapes[0], element_type), ary_val, restrict=True)
+
+        shape_tensor = tensor.empty([len(out_shape)], index_type)
         memref_type_res = ir.RankedTensorType.get(out_shape, element_type)
         for idx, i in enumerate(out_shape):
             tensor.insert(arith.constant(index_type, i), shape_tensor, [arith.constant(index_type, idx)])
@@ -2628,12 +2628,12 @@ class MlirBackend(_ch06_MlirBackend):
 
         element_type = ir.F64Type.get()
 
-        array_val_tensor = bufferization.to_tensor(array_val, restrict=True)
+        array_val_tensor = bufferization.to_tensor(ir.RankedTensorType.get(in_shape, element_type), array_val, restrict=True)
 
         if tuple(in_shape) == tuple(out_shape):
             return array_val
 
-        bc_out = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+        bc_out = tensor.empty(out_shape, element_type)
 
         # Create affine expressions that map to the broadcasted dimensions
         # For a 2x1 -> 2x12 broadcast, you want (d0, d1) -> (d0, 0)
@@ -2686,7 +2686,7 @@ class MlirBackend(_ch06_MlirBackend):
 
         memref_type_out = ir.MemRefType.get(out_shape, element_type)
 
-        bc_out = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+        bc_out = tensor.empty(out_shape, element_type)
 
         curr_offset = 0
         strides = [1] * (ndim + 1)
@@ -2700,7 +2700,7 @@ class MlirBackend(_ch06_MlirBackend):
             offsets[axis] = curr_offset
 
             bc_out = tensor.insert_slice(
-                bufferization.to_tensor(input_arg, restrict=True), 
+                bufferization.to_tensor(ir.RankedTensorType.get(input_arg.shape, element_type), input_arg, restrict=True), 
                 bc_out,
                 offsets=[],
                 sizes=[],
@@ -2775,9 +2775,9 @@ class MlirBackend(_ch06_MlirBackend):
         for i, j in enumerate(permutation):
             assert out_shape[i] == in_shape[j]
 
-        ary_val = bufferization.to_tensor(ary_val, restrict=True)
+        ary_val = bufferization.to_tensor(ir.RankedTensorType.get(in_shape, element_type), ary_val, restrict=True)
 
-        bc_out = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+        bc_out = tensor.empty(out_shape, element_type)
 
         input_exprs = []
         for i, (in_dim, out_dim) in enumerate(zip(in_shape, out_shape)):
@@ -2847,12 +2847,12 @@ class MlirBackend(_ch06_MlirBackend):
         ] + [ir.Attribute.parse("#linalg.iterator_type<reduction>")])  # K
 
         result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
-        bc_out = tensor.empty(result_tensor_type, [])
+        bc_out = tensor.empty(out_shape, element_type)
 
         zero = arith.ConstantOp(element_type, 0.0)
         linalg.fill(zero, outs=[bc_out])
-        lhs_matrix = bufferization.to_tensor(lhs_matrix, restrict=True)
-        rhs_matrix = bufferization.to_tensor(rhs_matrix, restrict=True)
+        lhs_matrix = bufferization.to_tensor(ir.RankedTensorType.get(lhs_shape, element_type), lhs_matrix, restrict=True)
+        rhs_matrix = bufferization.to_tensor(ir.RankedTensorType.get(rhs_shape, element_type), rhs_matrix, restrict=True)
 
         generic_op = linalg.GenericOp(
             result_tensors=[result_tensor_type],
@@ -2883,7 +2883,7 @@ class MlirBackend(_ch06_MlirBackend):
             result_shape.insert(i, 1)
         dims = len(in_shape)
 
-        ary_val_tensor = bufferization.to_tensor(ary_val, restrict=True)
+        ary_val_tensor = bufferization.to_tensor(ir.RankedTensorType.get(in_shape, element_type), ary_val, restrict=True)
 
         result_tensor_type = ir.RankedTensorType.get(result_shape, element_type)
         result_tensor = tensor.expand_shape(result_tensor_type,
@@ -2925,7 +2925,7 @@ class MlirBackend(_ch06_MlirBackend):
                 raise TypeError(f"Unknown index type {type(index)}")
 
         element_type = ir.F64Type.get()
-        input_memref_tensor = bufferization.to_tensor(input_memref, restrict=True)
+        input_memref_tensor = bufferization.to_tensor(ir.RankedTensorType.get(in_shapes[0], element_type), input_memref, restrict=True)
 
         for axis in modified_axes:
             out_shape_list.insert(axis, 1)
@@ -2958,6 +2958,7 @@ class MlirBackend(_ch06_MlirBackend):
             indices = list(indices) + ([None] * (dims - len(indices)))
 
         val_shape = in_shape.copy()
+        element_type = ir.F64Type.get()
         offsets = [0] * dims
         strides = [1] * dims
 
@@ -2991,8 +2992,8 @@ class MlirBackend(_ch06_MlirBackend):
             out_strides[i-1] = out_strides[i] * in_shape[i]
 
         result_slice = tensor.insert_slice(
-            bufferization.to_tensor(value_memref, restrict=True), 
-            bufferization.to_tensor(arr_memref, restrict=True),
+            bufferization.to_tensor(ir.RankedTensorType.get(val_shape, element_type), value_memref, restrict=True), 
+            bufferization.to_tensor(ir.RankedTensorType.get(in_shape, element_type), arr_memref, restrict=True),
             offsets=[],
             sizes=[],
             strides=[],
@@ -3001,7 +3002,7 @@ class MlirBackend(_ch06_MlirBackend):
             static_strides=ir.DenseI64ArrayAttr.get(strides)
         )
 
-        memref.copy(bufferization.to_memref(ir.MemRefType.get(in_shape, ir.F64Type.get()), result_slice), arr_memref)
+        memref.copy(bufferization.to_memref(ir.MemRefType.get(in_shape, element_type), result_slice), arr_memref)
 
     def _gen_binop_ufunc(self, lhs_val, rhs_val, op, in_shapes=(), out_shape=()):
         from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
@@ -3011,13 +3012,13 @@ class MlirBackend(_ch06_MlirBackend):
         with _mlir_location_from_frame(f"binop({op})"):
             element_type = ir.F64Type.get()
 
-            lhs_val = bufferization.to_tensor(lhs_val, restrict=True)
-            rhs_val = bufferization.to_tensor(rhs_val, restrict=True)
+            lhs_val = bufferization.to_tensor(ir.RankedTensorType.get(lhs_shape, element_type), lhs_val, restrict=True)
+            rhs_val = bufferization.to_tensor(ir.RankedTensorType.get(rhs_shape, element_type), rhs_val, restrict=True)
 
             def do_broadcast(tensor_val, in_shape, out_shape):
                 if tuple(in_shape) == tuple(out_shape):
                     return tensor_val
-                bc_out = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+                bc_out = tensor.empty(out_shape, element_type)
 
                 # Create affine expressions that map to the broadcasted dimensions
                 # For a 2x1 -> 2x12 broadcast, you want (d0, d1) -> (d0, 0)
@@ -3060,7 +3061,7 @@ class MlirBackend(_ch06_MlirBackend):
             # Do binop
             nd = len(out_shape)
 
-            result = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+            result = tensor.empty(out_shape, element_type)
             generic_op = linalg.GenericOp(
                 result_tensors=[result.type],
                 inputs=[bc_lhs, bc_rhs],
@@ -3090,15 +3091,16 @@ class MlirBackend(_ch06_MlirBackend):
 
         nd = len(out_shape)
         element_type = ir.F64Type.get()
+        inshape, = in_shapes
 
         (base, offset, *shapes_strides) = memref.extract_strided_metadata(operand)
         strides = shapes_strides[nd:]
         assert len(strides) == nd
-
-        operand_tensor = bufferization.to_tensor(operand, restrict=True)
+        operand_tensor_type = ir.RankedTensorType.get(inshape, element_type)
+        operand_tensor = bufferization.to_tensor(result=operand_tensor_type, memref=operand, restrict=True)
 
         result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
-        result_tensor = tensor.empty(result_tensor_type, [])
+        result_tensor = tensor.empty(out_shape, element_type)
 
         generic_op = linalg.GenericOp(
             result_tensors=[result_tensor_type],
@@ -3138,10 +3140,9 @@ class MlirBackend(_ch06_MlirBackend):
 
             tensor_type = ir.RankedTensorType.get(reduced_shape, element_type)
 
-            result_reduced = tensor.empty(tensor_type, [])
+            result_reduced = tensor.empty(reduced_shape, element_type)
 
-            opval_tensor = bufferization.to_tensor(opval, restrict=True)
-
+            opval_tensor = bufferization.to_tensor(ir.RankedTensorType.get(inshape, element_type), opval, restrict=True)
 
             # Necessary to fill zeros
             zero = arith.ConstantOp(element_type, 0.0)
@@ -3158,7 +3159,7 @@ class MlirBackend(_ch06_MlirBackend):
                 linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
 
             # broadcast for keepdims
-            bc_tensor = tensor.empty(ir.RankedTensorType.get(out_shape, element_type), [])
+            bc_tensor = tensor.empty(out_shape, element_type)
             broadcasted = linalg.broadcast(
                 reduce_op.results[0],
                 outs=[bc_tensor],
