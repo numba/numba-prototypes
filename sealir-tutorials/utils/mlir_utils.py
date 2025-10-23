@@ -29,19 +29,21 @@ class MLIRVerifier:
                     elif os.path.isdir(file_path):
                         os.rmdir(file_path)
                 except Exception as e:
-                    print(f"Error removing {file_path}: {e}")
+                    msg = f"Error removing {file_path}: {e}"
+                    raise RuntimeError(msg)
             with open(os.path.join(output_dir, f"input_module.mlir"), "w") as f:
                 f.write(mlir_text)
                 print(f"Input module written to: {os.path.join(output_dir, f'input_module.mlir')}")
 
         for idx, p in enumerate(passes):
             cmd = [self.mlir_opt_path, f"--{p}"]
+
             if output_info:
                 print(f"Running: {' '.join(cmd)}")
-            result = subprocess.run(cmd, input=mlir_text, capture_output=True, text=True)
+            result = subprocess.run(' '.join(cmd), input=mlir_text, capture_output=True, text=True, shell=True)
             if result.returncode != 0 and output_info:
-                print(f"Error running pass '{p}':")
-                print(result.stderr)
+                msg = f"Error running pass '{p}':\n{result.stderr}"
+                raise RuntimeError(msg)
                 return None
             else:
                 if output_info:
@@ -70,7 +72,8 @@ class MLIRVerifier:
         if translate_result.returncode != 0:
             if output_info:
                 print("mlir-translate verification failed:")
-                print(translate_result.stderr)
+                msg = translate_result.stderr
+                raise RuntimeError(msg)
             return False
         else:
             if output_info:

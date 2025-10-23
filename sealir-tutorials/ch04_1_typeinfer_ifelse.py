@@ -1103,7 +1103,7 @@ class Backend:
         self.initialize_llvm()
 
     def initialize_llvm(self):
-        llvm.initialize()
+        # llvm.initialize()
         llvm.initialize_native_target()
         llvm.initialize_native_asmprinter()
 
