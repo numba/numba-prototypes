@@ -2450,7 +2450,7 @@ class MlirBackend(_ch06_MlirBackend):
         "affine-simplify-structures",
         "affine-loop-coalescing",
         "affine-loop-tile='tile-size=64'",
-        "affine-loop-unroll='unroll-factor=4 unroll-up-to-factor'",
+        # "affine-loop-unroll='unroll-factor=4 unroll-up-to-factor'",
         # "affine-super-vectorize='vectorize-reductions'",
         "affine-parallelize='parallel-reductions=true'",
         "affine-loop-normalize",
@@ -2458,7 +2458,7 @@ class MlirBackend(_ch06_MlirBackend):
         # Phase 6: Memory optimizations
         "normalize-memrefs",
         "memref-expand",
-        "fold-memref-alias-ops",
+        # "fold-memref-alias-ops",
         "canonicalize",
 
         "expand-strided-metadata",
@@ -2480,7 +2480,7 @@ class MlirBackend(_ch06_MlirBackend):
         #   --buffer-loop-hoisting
         "promote-buffers-to-stack",
         "mem2reg",
-        "buffer-deallocation",
+        # "buffer-deallocation",
 
 
         # "convert-scf-to-openmp",
@@ -2615,7 +2615,7 @@ class MlirBackend(_ch06_MlirBackend):
             tensor.insert(arith.constant(index_type, i), shape_tensor, [arith.constant(index_type, idx)])
         out = tensor.reshape(memref_type_res, array_val_tensor, shape=shape_tensor)
 
-        return bufferization.to_memref(ir.MemRefType.get(out_shape, element_type), out)
+        return bufferization.to_buffer(ir.MemRefType.get(out_shape, element_type), out)
 
     def _gen_static_broadcast(self, array_val, in_shapes=(), out_shape=()):
         from mlir.dialects import memref, linalg, tensor, bufferization
@@ -2666,7 +2666,7 @@ class MlirBackend(_ch06_MlirBackend):
         with ir.InsertionPoint(body):
             linalg.YieldOp([body.arguments[0]])
 
-        return bufferization.to_memref(ir.MemRefType.get(out_shape, element_type), bc_op)
+        return bufferization.to_buffer(ir.MemRefType.get(out_shape, element_type), bc_op)
 
     def _gen_take_shaped(self, ary_val, index, src_nd, in_shapes=(), out_shape=()):
         indices = [slice(None)]*(src_nd-1) + [index]
@@ -2711,7 +2711,7 @@ class MlirBackend(_ch06_MlirBackend):
             )
             curr_offset += 1
 
-        return bufferization.to_memref(memref_type_out, bc_out)
+        return bufferization.to_buffer(memref_type_out, bc_out)
 
 
     @classmethod
@@ -2806,7 +2806,7 @@ class MlirBackend(_ch06_MlirBackend):
             linalg.YieldOp([body.arguments[0]])
 
         memref_type = ir.MemRefType.get(out_shape, element_type)
-        return bufferization.to_memref(memref_type, bc_op)
+        return bufferization.to_buffer(memref_type, bc_op)
 
     def _gen_array_matmul_shaped(self, lhs_matrix, rhs_matrix, in_shapes=(), out_shape=()):
         from mlir import ir
@@ -2870,7 +2870,7 @@ class MlirBackend(_ch06_MlirBackend):
             add = arith.addf(acc_val, mul)
             linalg.yield_([add])
 
-        return bufferization.to_memref(memref_type_out, generic_op)
+        return bufferization.to_buffer(memref_type_out, generic_op)
 
     def _gen_array_expand_dims_shaped(self, ary_val, axes, in_shapes=(), out_shape=()):
         from mlir import ir
@@ -2896,7 +2896,7 @@ class MlirBackend(_ch06_MlirBackend):
         )
 
         memref_type = ir.MemRefType.get(result_shape, element_type)
-        return bufferization.to_memref(memref_type, result_tensor)
+        return bufferization.to_buffer(memref_type, result_tensor)
 
     def _gen_array_getitem_shaped(self, input_memref, indices, in_shapes=(), out_shape=()):
         from mlir import ir
@@ -2945,7 +2945,7 @@ class MlirBackend(_ch06_MlirBackend):
         )
 
         memref_type = ir.MemRefType.get(out_shape, element_type)
-        return bufferization.to_memref(memref_type, result_tensor)
+        return bufferization.to_buffer(memref_type, result_tensor)
 
 
     def _gen_array_setitem_shaped(self, arr_memref, value_memref, indices, in_shapes=(), out_shape=()):
@@ -3005,7 +3005,7 @@ class MlirBackend(_ch06_MlirBackend):
             static_strides=ir.DenseI64ArrayAttr.get(strides)
         )
 
-        memref.copy(bufferization.to_memref(ir.MemRefType.get(in_shape, element_type), result_slice), arr_memref)
+        memref.copy(bufferization.to_buffer(ir.MemRefType.get(in_shape, element_type), result_slice), arr_memref)
 
     def _gen_binop_ufunc(self, lhs_val, rhs_val, op, in_shapes=(), out_shape=()):
         from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
@@ -3086,7 +3086,7 @@ class MlirBackend(_ch06_MlirBackend):
 
 
             memref_type = ir.MemRefType.get(out_shape, element_type)
-            return bufferization.to_memref(memref_type, generic_op)
+            return bufferization.to_buffer(memref_type, generic_op)
 
     def _gen_unary_ufunc(self, operand, op, in_shapes=(), out_shape=()):
         from mlir.dialects import memref, linalg, bufferization, tensor, arith
@@ -3100,7 +3100,7 @@ class MlirBackend(_ch06_MlirBackend):
         strides = shapes_strides[nd:]
         assert len(strides) == nd
         operand_tensor_type = ir.RankedTensorType.get(inshape, element_type)
-        operand_tensor = bufferization.to_tensor(result=operand_tensor_type, memref=operand, restrict=True)
+        operand_tensor = bufferization.to_tensor(result=operand_tensor_type, buffer=operand, restrict=True)
 
         result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
         result_tensor = tensor.empty(out_shape, element_type)
@@ -3124,7 +3124,7 @@ class MlirBackend(_ch06_MlirBackend):
             linalg.YieldOp([op(body.arguments[0])])
 
         memref_type = ir.MemRefType.get(out_shape, element_type)
-        return bufferization.to_memref(memref_type, generic_op.result_tensors)
+        return bufferization.to_buffer(memref_type, generic_op.result_tensors)
 
     def _gen_reduce_ufunc(self, opval, axis, op, in_shapes=(), out_shape=(), *, initializer=0.0):
         from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
@@ -3169,7 +3169,7 @@ class MlirBackend(_ch06_MlirBackend):
                 dimensions=[axis]
             )
             memref_type = ir.MemRefType.get(out_shape, element_type)
-            return bufferization.to_memref(memref_type, broadcasted)
+            return bufferization.to_buffer(memref_type, broadcasted)
 
     def _lower_llm_ops(self, op: str, operands: tuple, state: LowerStates):
         from mlir.dialects import arith, memref, linalg, math as mlir_math
