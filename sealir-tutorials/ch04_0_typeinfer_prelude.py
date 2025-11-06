@@ -45,7 +45,9 @@ from sealir.eqsat.rvsdg_extract import (
     CostModel,
     EGraphToRVSDG,
     egraph_extraction,
+    Extraction,
 )
+from sealir.rvsdg import grammar as rg
 from sealir.llvm_pyapi_backend import SSAValue
 
 from ch02_egraph_basic import (
@@ -63,6 +65,7 @@ from ch03_egraph_program_rewrites import (
     run_test,
 )
 from utils import IN_NOTEBOOK, Report, display
+
 
 # First, we need some modifications to the compiler-pipeline.
 # The middle-end is augmented with the following:
@@ -82,11 +85,16 @@ def pipeline_egraph_extraction(
     with pipeline_report.nest(
         "EGraph Extraction", default_expanded=True
     ) as report:
-        cost, extracted = egraph_extraction(
+        extraction = egraph_extraction(
             egraph,
+            cost_model=cost_model,  # <-------------- new
+
+        )
+        extresult = extraction.extract_graph_root()
+        cost = extresult.cost
+        extracted = extresult.extract_sexpr(
             rvsdg_expr,
             converter_class=converter_class,  # <---- new
-            cost_model=cost_model,  # <-------------- new
         )
         report.append("Cost", cost)
         report.append("Extracted", rvsdg.format_rvsdg(extracted))
@@ -143,7 +151,7 @@ if __name__ == "__main__":
     report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
         fn=add_x_y,
-        ruleset=basic_ruleset,
+        rule_schedule=basic_ruleset.saturate(),
         converter_class=EGraphToRVSDG,
         codegen_extension=None,
         cost_model=None,
@@ -301,6 +309,16 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
                 # Use parent's implementation for other terms.
                 return super().handle_Term(op, children, grm)
 
+    def handle_Type(self, key: str, op: str, children: dict | list, grm: Grammar):
+
+        match op, children:
+            case "Type", {"name": str(typename)}:
+                if typename == "Int64":
+                    return grm.write(
+                        rg.Generic(name="Type", children=tuple([typename]))
+                    )
+
+        raise NotImplementedError("handle_Type", op, children)
 
 # The LLVM code-generation also needs an extension:
 
@@ -352,7 +370,7 @@ if __name__ == "__main__":
     report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
         fn=add_x_y,
-        ruleset=typeinfer_ruleset,
+        rule_schedule=typeinfer_ruleset.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),
@@ -387,7 +405,7 @@ if __name__ == "__main__":
     report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
         fn=chained_additions,
-        ruleset=typeinfer_ruleset,
+        rule_schedule=typeinfer_ruleset.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),
@@ -427,7 +445,7 @@ if __name__ == "__main__":
     report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
         fn=chained_additions,
-        ruleset=optimized_ruleset,
+        rule_schedule=optimized_ruleset.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),

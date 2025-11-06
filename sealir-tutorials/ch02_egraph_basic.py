@@ -42,7 +42,7 @@ from egglog import EGraph
 from sealir import rvsdg
 from sealir.eqsat.rvsdg_convert import egraph_conversion
 from sealir.eqsat.rvsdg_eqsat import GraphRoot
-from sealir.eqsat.rvsdg_extract import egraph_extraction
+from sealir.eqsat.rvsdg_extract import egraph_extraction, EGraphToRVSDG, CostModel
 
 # We'll be extending from chapter 1.
 from ch01_basic_compiler import (
@@ -135,7 +135,10 @@ def pipeline_egraph_extraction(
     with pipeline_report.nest(
         "EGraph Extraction", default_expanded=True
     ) as report:
-        cost, extracted = egraph_extraction(egraph, rvsdg_expr)
+        extraction = egraph_extraction(egraph)
+        extresult = extraction.extract_graph_root()
+        extracted = extresult.extract_sexpr(rvsdg_expr, EGraphToRVSDG)
+        cost = extresult.cost
         report.append("Cost", cost)
         report.append("Extracted", rvsdg.format_rvsdg(extracted))
         return {"cost": cost, "extracted": extracted}
