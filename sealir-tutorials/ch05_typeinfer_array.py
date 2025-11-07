@@ -326,7 +326,7 @@ def ruleset_typeinfer_array_getitem(
 
 
 @function
-def ArrayType(ndim: i64, dtype: Type, dataLayout: DataLayout) -> Type: ...
+def FlattenArrayType(ndim: i64, dtype: Type, dataLayout: DataLayout) -> Type: ...
 
 
 @ruleset
@@ -337,7 +337,7 @@ def ruleset_finalize_arraydesc(
     datalayout: DataLayout,
 ):
     yield rewrite(ad.toType(), subsume=True).to(
-        ArrayType(ndim, dtype, datalayout),
+        FlattenArrayType(ndim, dtype, datalayout),
         ndim == ad.ndim,
         dtype == ad.dtype,
         datalayout == ad.dataLayout,
@@ -385,7 +385,7 @@ class ExtendEGraphToRVSDG(_ch04_2_ExtendEGraphToRVSDG):
         self, key: str, op: str, children: dict | list, grm: Grammar
     ):
         match op, children:
-            case "ArrayType", {
+            case "FlattenArrayType", {
                 "ndim": ndim,
                 "dtype": dtype,
                 "dataLayout": dataLayout,
