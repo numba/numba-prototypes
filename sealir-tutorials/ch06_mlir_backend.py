@@ -142,20 +142,50 @@ class Backend:
         and data flow constructs.
         """
         context = self.context
-        self.loc = loc = ir.Location.name(f"{self}.lower()", context=context)
+        self.loc = loc =  ir.Location.file(__file__, line=11, col=1, context=context)
         self.module = module = ir.Module.create(loc=loc)
 
         # Get the module body pointer so we can insert content into the
         # module.
         self.module_body = module_body = ir.InsertionPoint(module.body)
         # Convert SealIR types to MLIR types.
-        input_types = tuple([self.lower_type(x) for x in argtypes])
-        output_types = self.get_return_types(root)
+        input_types = tuple([self.lower_type(x) for x in argtypes] + list(self.get_return_types(root)))
+        import os
 
         with context, loc, module_body:
+            source_dir = os.path.dirname(__file__)
+            source_name = os.path.basename(__file__)
+
+            di_file_str = f'''#llvm.di_file<"{source_name}" in "{source_dir}">'''
+            di_compile_unit_str = f'''#llvm.di_compile_unit<
+                id = distinct[0]<>,
+                sourceLanguage = DW_LANG_C,
+                file = {di_file_str},
+                isOptimized = false,
+                emissionKind = Full
+            >
+            '''
+
+            di_subprogram_type_str = '''#llvm.di_subroutine_type<callingConvention = DW_CC_normal>'''
+            # This references the compile unit and namespace we created above
+            di_subprogram_str = f'''#llvm.di_subprogram<
+                id = distinct[1]<>,
+                compileUnit = {di_compile_unit_str},
+                scope = {di_file_str},
+                name = "namespace",
+                file = {di_file_str},
+                line = 1,
+                type = {di_subprogram_type_str},
+                subprogramFlags = Definition
+            >'''
+            di_subprogram = ir.Attribute.parse(di_subprogram_str)
+
             # Constuct a function that emits a callable C-interface.
-            fun = func.FuncOp(function_name, (input_types, output_types))
-            fun.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
+            file_loc = ir.Location.file(__file__, 120, 1)
+            fused_loc = ir.Location.fused([file_loc], metadata=di_subprogram)
+            fun = func.FuncOp(function_name, (input_types, ()), loc=fused_loc)
+            # fun = func.FuncOp(function_name, (input_types, ()))
+            # fun.attributes["llvm.emit_c_interface"] = ir.UnitAttr.get()
 
             # Define two blocks within the function, a constant block to
             # define all the constants and a function block for the
@@ -260,7 +290,10 @@ class Backend:
 
                 portnames = [p.name for p in body.ports]
                 retval = outs[portnames.index(internal_prefix("ret"))]
-                func.ReturnOp([self._cast_return_value(retval)])
+
+                from mlir.dialects import memref
+                memref.copy(self._cast_return_value(retval), state.function_block.arguments[-1])
+                func.ReturnOp([])
             case rg.RegionBegin(inports=ins):
                 portvalues = []
                 for i, k in enumerate(ins):

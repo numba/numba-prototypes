@@ -3401,60 +3401,70 @@ class MlirBackend(_ch06_MlirBackend):
         exec_engine=None,
         **execution_engine_params,
     ):
-        from mlir import execution_engine, runtime, ir
-        import ctypes
-        # Converts the MLIR module into a JIT-callable function.
-        # Use MLIR's own internal execution engine
-        if exec_engine is None:
-            engine = execution_engine.ExecutionEngine(
-                llmod, opt_level=3, **execution_engine_params
-            )
-            # Manually invoke an empty function to force compilation
-            engine.invoke('global_init')
-        else:
-            raise RuntimeError("unreachable")
-            engine = exec_engine
+        asm = llmod.operation.get_asm(enable_debug_info=True)
+        # Open a file in write mode
+        with open("output.mlir", "w") as file:
+            file.write(asm)
 
-        assert (
-            len(output_types) == 1
-        ), "Execution of functions with output arguments > 1 not supported"
-        [out_type] = output_types
+        import subprocess
+        subprocess.run(["mlir-translate", "--mlir-to-llvmir", "output.mlir", "-o", "output.ll"])
+        subprocess.run(["llc", "-filetype=obj", "--relocation-model=pic", "output.ll", "-o", "output.o"])
+        # TODO: The clib detection should be dynamic
+        subprocess.run(["gcc", "-shared", "-fPIC", "output.o", "-o", "output.so", "-L/home/kc611/miniconda3/envs/mlir21/lib/", "-lmlir_c_runner_utils"])
+        import ctypes
+        module = ctypes.CDLL('./output.so')
 
         # Build a wrapper function
         def jit_func(*args):
             import time
+            def as_memref_descriptor(arr, ty):
+                intptr_t = getattr(ctypes, f"c_int{8 * ctypes.sizeof(ctypes.c_void_p)}")
+                ty_ptr = ctypes.POINTER(ty)
 
-            for _ in range(n_repeats):
+                arg0 = ctypes.cast(arr.ctypes.data, ty_ptr)
+                arg1 = arg0
+                arg2 = intptr_t(0)
+
+                shapes_arg = [intptr_t(x) for x in arr.shape]
+                strides_arg = [intptr_t(x) for x in arr.strides]
+
+                return arg0, arg1, arg2, *shapes_arg, *strides_arg
+
+            res_val = np.zeros(output_types[0].shape, dtype=np.float64)
+
+            all_args = list(args) + [res_val]
+            all_arrs_as_descriptors = [
+                as_memref_descriptor(arr, ctypes.c_double) for arr in all_args
+            ]
+
+            func_argtypes = [
+                *[type(x) for arr in all_arrs_as_descriptors for x in arr]
+            ]
+
+            module.func.argtypes = func_argtypes
+
+            module.func.restype = ctypes.c_void_p
+
+            final_args = []
+            for x in all_arrs_as_descriptors:
+                final_args.extend(x)
+
+            for _ in range(1):
                 pstart = time.time_ns()
                 input_args = args
 
                 assert len(input_args) == len(input_types)
 
-                input_exec_ptrs = [
-                    self.get_exec_ptr(ty, val)[0]
-                    for ty, val in zip(input_types, input_args)
-                ]
-
-                with self.context:
-                    assert out_type.element_type == ir.F64Type.get()
-                res_val = runtime.make_nd_memref_descriptor(
-                    rank=out_type.rank, dtype=ctypes.c_double
-                )()
-                res_ptr = ctypes.pointer(res_val)
                 pend = time.time_ns()
-                # Call the JIT-compiled function via the execution engine.
                 jstart = time.time_ns()
-                engine.invoke(function_name, ctypes.byref(res_ptr), *input_exec_ptrs)
+                module.func(*final_args)
                 jend = time.time_ns()
 
-                # Convert the result back to a numpy array.
                 tstart = time.time_ns()
-                out = runtime.ranked_memref_to_numpy(res_ptr)
                 tend = time.time_ns()
                 print(f"MLIRGen: To Memref {(pend - pstart)/1000} microseconds, Exec {(jend-jstart)/1000} microseconds, To NumPy {(tend-tstart)/1000} microseconds")
 
-            engine.dump_to_object_file("mlir_outs/binary.out")
-            return out
+            return res_val
 
 
         return jit_func
@@ -3524,7 +3534,7 @@ def run_compiler(target_function, args):
                 | ruleset_more_constant_folding
                 | ruleset_more_typing
             ),
-            pipeline_report=report,
+            # pipeline_report=report,
             # pipeline_debug=True,
             # display_egraph=True,
             **compiler_config,
@@ -3598,8 +3608,7 @@ def softmax_full(x):
 
 def test_softmax_full():
     np.random.seed(0)
-    _run_array_unary_test(softmax_full, np.random.random((2, 4)))
-    # _run_array_unary_test(softmax_full, np.random.random((1, 2, 6, 4)))
+    _run_array_unary_test(softmax_full, np.random.random((2000, 4000)))
 
 
 def apply_rotary_emb_reshape(xq):
@@ -3871,7 +3880,6 @@ def test_attention_setitem_getitem_effect():
 
 def attention(
     x, # shape = (1, 5, 288)
-    start_pos, # 0
     mask, # shape = (5, 5)
     freqs_cos, # shape = (5, 24)
     freqs_sin, # shape = (5, 24)
@@ -3987,7 +3995,6 @@ def test_attention_full():
     # test compiler on llm use case
     _run_array_test(attention, (
         x, # shape = (1, 5, 288)
-        start_pos, # 0
         mask, # shape = (5, 5)
         freqs_cos, # shape = (5, 24)
         freqs_sin, # shape = (5, 24)
