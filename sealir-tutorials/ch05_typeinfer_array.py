@@ -482,6 +482,11 @@ if __name__ == "__main__":
     cres = jit_compiler(
         fn=example_1,
         argtypes=(array_1d_symbolic, Int64),
+        # Rule schedule combines array type inference rules:
+        # - Base rules with argument types
+        # - Array metadata and shape information
+        # - Array getitem operations
+        # First saturate array inference, then finalize
         rule_schedule=(
             base_ruleset
             | setup_argtypes(array_int64_1d.toType(), TypeInt64)

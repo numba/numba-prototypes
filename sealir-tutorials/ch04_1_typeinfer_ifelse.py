@@ -238,10 +238,9 @@ if __name__ == "__main__":
 # Type inference can fail, so we must provide a mechanism for reporting errors.
 
 # ### `ErrorMsg`
-# We'll define a `ErrorMsg` class in the egraph to capture all the error
-# message. The compilation will always start with `ErrorMsg.root()` in the
-# EGraph. When type inference encounters an error, That root node will be
-# merged with `ErroMsg.fail()` nodes.
+# We'll define a `ErrorMsg` class in the egraph to capture error messages.
+# Error messages are created using the `ErrorMessage()` function, which takes
+# a string message and creates an ErrorMsg node in the egraph.
 
 
 class ErrorMsg(Expr): ...
@@ -454,7 +453,7 @@ if __name__ == "__main__":
 # conversions of `Nb_Add_Int64` back into RVSDG.
 #
 # Observe in the egraph:
-# - `Typedouts`, `TypedIns`, `Type.simple("Int64")`
+# - `_AttrRegionOutputType`, `_AttrRegionInputType`, `Type.simple("Int64")`
 
 # ## Extend the rest of the compiler
 
@@ -523,7 +522,8 @@ def pipeline_egraph_extraction(
         "EGraph Extraction", default_expanded=True
     ) as report:
         try:
-            # This is the same as ch4.0
+            # Step 1 of 3-step extraction: Create extraction instance with cost model
+            # This follows the same pattern as ch4.0 but with enhanced error handling
             extraction = egraph_extraction(
                 egraph,
                 cost_model=cost_model,
@@ -540,7 +540,7 @@ def pipeline_egraph_extraction(
         # Process error message
         errors = []
         for k in grouped_by_type["ErrorMsg"]:
-            msg = extraction.extract_enode(k).extract_sexpr(
+            msg = extraction.extract_enode(k).convert(
                 rvsdg_expr,
                 converter_class=converter_class,
                 memo=memo,
@@ -554,10 +554,10 @@ def pipeline_egraph_extraction(
         if errors:
             raise CompilationError(*errors)
 
-        # Extract to SExpr
-        extresult = extraction.extract_graph_root()
+        # Steps 2 & 3 of extraction: Extract graph root and then s-expression
+        extresult = extraction.extract_graph_root()  # Step 2
         cost = extresult.cost
-        extracted = extresult.extract_sexpr(
+        extracted = extresult.convert(          # Step 3
             rvsdg_expr,
             converter_class=converter_class,
             memo=memo,
@@ -568,7 +568,7 @@ def pipeline_egraph_extraction(
 
         extracted_roots = defaultdict(list)
         for k in extraction.iter_graph_root():
-            node = extraction.extract_enode(k).extract_sexpr(
+            node = extraction.extract_enode(k).convert(
                 rvsdg_expr, converter_class, memo=memo
             )
             extracted_roots[extraction.node_types[k]].append(node)

@@ -85,7 +85,7 @@ from ch04_2_typeinfer_loops import (
 )
 from ch04_2_typeinfer_loops import base_ruleset as loop_ruleset
 from ch04_2_typeinfer_loops import (
-    finalize_ruleset,
+    finalize_ruleset,  # Added to pipeline for final type resolution
 )
 from utils import IN_NOTEBOOK, Report, display
 
@@ -609,6 +609,8 @@ if __name__ == "__main__":
     jit_func = jit_compiler(
         fn=example_1,
         argtypes=(Int64, Int64),
+        # Two-phase rule schedule: first saturate type inference, then finalize
+        # The finalize_ruleset ensures all type information is properly resolved
         rule_schedule=(
             if_else_ruleset | setup_argtypes(TypeInt64, TypeInt64)
         ).saturate()

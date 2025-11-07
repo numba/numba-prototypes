@@ -326,6 +326,8 @@ if __name__ == "__main__":
     cres = jit_compiler(
         fn=example_1,
         argtypes=(Int64, Int64),
+        # Rule schedule: combine rulesets and create saturation schedules
+        # First saturate the base rules and argument types, then finalize
         rule_schedule=(
             base_ruleset | setup_argtypes(TypeInt64, TypeInt64)
         ).saturate()

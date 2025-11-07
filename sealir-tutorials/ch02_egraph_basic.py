@@ -117,14 +117,22 @@ if __name__ == "__main__":
 # efficiency. While all variants are functionally identical,
 # we are primarily interested in identifying the "best" one,
 # where "best" depends on context--—such as execution speed, code size, or
-# energy efficiency. To address this, the `egraph_extraction()` function allows
-# users to define custom cost models, tailoring the selection process to
-# prioritize the variant that aligns with their specific optimization goals.
+# energy efficiency.
+#
+# The extraction process involves three steps:
+# 1. Create an extraction instance with `egraph_extraction()` using a cost model
+# 2. Extract the graph root to get extraction results
+# 3. Convert to s-expression using a converter class
+#
+# This 3-step approach allows users to define custom cost models, tailoring
+# the selection process to prioritize the variant that aligns with their
+# specific optimization goals.
 
 if __name__ == "__main__":
     help(egraph_extraction)
 
 # Here, we will use the default cost model, which is based on the node count.
+# The extraction follows the 3-step process described above.
 
 
 class EGraphExtractionOutput(TypedDict):
@@ -141,7 +149,7 @@ def pipeline_egraph_extraction(
     ) as report:
         extraction = egraph_extraction(egraph)
         extresult = extraction.extract_graph_root()
-        extracted = extresult.extract_sexpr(rvsdg_expr, EGraphToRVSDG)
+        extracted = extresult.convert(rvsdg_expr, EGraphToRVSDG)
         cost = extresult.cost
         report.append("Cost", cost)
         report.append("Extracted", rvsdg.format_rvsdg(extracted))

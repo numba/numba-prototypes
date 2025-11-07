@@ -72,6 +72,11 @@ from utils import IN_NOTEBOOK, Report, display
 # - `converter_class` is for customizing EGraph-to-RVSDG conversion as we will be
 #   introducing new RVSDG operations for typed operations.
 # - `cost_model` is for customizing the cost of the new operations.
+#
+# The extraction API has been updated to use the new 3-step process:
+# 1. Create extraction with egraph_extraction()
+# 2. Extract graph root to get extraction results
+# 3. Convert s-expression with converter class
 
 
 def pipeline_egraph_extraction(
@@ -84,13 +89,16 @@ def pipeline_egraph_extraction(
     with pipeline_report.nest(
         "EGraph Extraction", default_expanded=True
     ) as report:
+        # Step 1: Create extraction instance with custom cost model
         extraction = egraph_extraction(
             egraph,
             cost_model=cost_model,  # <-------------- new
         )
+        # Step 2: Extract the graph root
         extresult = extraction.extract_graph_root()
         cost = extresult.cost
-        extracted = extresult.extract_sexpr(
+        # Step 3: Extract s-expression with custom converter
+        extracted = extresult.convert(
             rvsdg_expr,
             converter_class=converter_class,  # <---- new
         )
@@ -137,6 +145,7 @@ def add_x_y(x, y):
 
 
 # We will start with the same ruleset as in chapter 3.
+# Note that we now use .saturate() to create a rule schedule.
 
 basic_ruleset = rvsdg_eqsat.ruleset_rvsdg_basic | ruleset_const_propagate
 

@@ -55,8 +55,9 @@ from ch02_egraph_basic import (
 from utils import IN_NOTEBOOK, Report, display
 
 # Next, we'll explore a new compiler pipeline designed with customizable
-# rulesets. To enable this flexibility, we've introduced a `ruleset` argument,
-# allowing you to tailor the pipeline's behavior to your specific needs.
+# rule schedules. To enable this flexibility, we've introduced a `rule_schedule`
+# argument, allowing you to tailor the pipeline's behavior to your specific needs.
+# A rule schedule defines how and when rules are applied during saturation.
 
 
 def egraph_saturation(
@@ -65,7 +66,7 @@ def egraph_saturation(
     rule_schedule: Schedule,
     pipeline_report=Report.Sink(),
 ) -> EGraphOutput:
-    # Apply the ruleset to the egraph
+    # Apply the rule schedule to the egraph for saturation
     egraph.run(rule_schedule)
     pipeline_report.append("EGraph Saturated", egraph)
     return {"egraph": egraph, "egraph_root": egraph_root}
@@ -149,7 +150,8 @@ if __name__ == "__main__":
         else:
             return b
 
-    # Add our const-propagation rule to the basic rvsdg ruleset
+    # Add our const-propagation rule to the basic rvsdg ruleset.
+    # We use .saturate() to create a schedule that runs the rules to saturation.
     my_ruleset = rvsdg_eqsat.ruleset_rvsdg_basic | ruleset_const_propagate
 
     report = Report("Test", default_expanded=True)
