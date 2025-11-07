@@ -44,6 +44,7 @@ from egglog import (
     function,
     i64,
     i64Like,
+    method,
     rewrite,
     rule,
     ruleset,
@@ -62,8 +63,6 @@ from sealir.eqsat.rvsdg_eqsat import (
 from ch04_1_typeinfer_ifelse import (
     Grammar,
     NbOp_Type,
-    TypedIns,
-    _wc,
 )
 from ch04_2_typeinfer_loops import Backend as _ch04_2_Backend
 from ch04_2_typeinfer_loops import (
@@ -78,6 +77,9 @@ from ch04_2_typeinfer_loops import (
     TypeInt64,
     TypeVar,
     base_ruleset,
+)
+from ch04_2_typeinfer_loops import finalize_ruleset as _ch04_2_finalize_ruleset
+from ch04_2_typeinfer_loops import (
     jit_compiler,
     setup_argtypes,
 )
@@ -124,6 +126,7 @@ class DataLayout(Expr):
 
 
 class ArrayDesc(Expr):
+    @method(cost=10000)
     def __init__(self, uid: StringLike): ...
 
     @property
@@ -323,6 +326,25 @@ def ruleset_typeinfer_array_getitem(
 
 
 @function
+def FlattenArrayType(ndim: i64, dtype: Type, dataLayout: DataLayout) -> Type: ...
+
+
+@ruleset
+def ruleset_finalize_arraydesc(
+    ad: ArrayDesc,
+    ndim: i64,
+    dtype: Type,
+    datalayout: DataLayout,
+):
+    yield rewrite(ad.toType(), subsume=True).to(
+        FlattenArrayType(ndim, dtype, datalayout),
+        ndim == ad.ndim,
+        dtype == ad.dtype,
+        datalayout == ad.dataLayout,
+    )
+
+
+@function
 def Nb_Array_1D_Getitem_Scalar(
     io: Term, ary: Term, index: Term, dtype: Type
 ) -> Term: ...
@@ -358,6 +380,26 @@ class ExtendEGraphToRVSDG(_ch04_2_ExtendEGraphToRVSDG):
                     )
                 )
         return super().handle_Term(op, children, grm)
+
+    def handle_Type(
+        self, key: str, op: str, children: dict | list, grm: Grammar
+    ):
+        match op, children:
+            case "FlattenArrayType", {
+                "ndim": ndim,
+                "dtype": dtype,
+                "dataLayout": dataLayout,
+            }:
+                return grm.write(
+                    NbOp_ArrayType(
+                        ndim=ndim,
+                        dtype=dtype,
+                        datalayout=dataLayout.name,
+                        shape=(-1,) * ndim,
+                    )
+                )
+            case _:
+                return super().handle_Type(key, op, children, grm)
 
 
 # ### Extend the LLVM Backend
@@ -425,6 +467,9 @@ array_int64_1d, array_infos = array_desc_rules(
     "array_int64_1d", shape=("n",), dtype=TypeInt64, layout="c"
 )
 
+
+finalize_ruleset = _ch04_2_finalize_ruleset | ruleset_finalize_arraydesc
+
 compiler_config = dict(
     converter_class=ExtendEGraphToRVSDG,
     backend=Backend(),
@@ -437,12 +482,13 @@ if __name__ == "__main__":
     cres = jit_compiler(
         fn=example_1,
         argtypes=(array_1d_symbolic, Int64),
-        ruleset=(
+        rule_schedule=(
             base_ruleset
             | setup_argtypes(array_int64_1d.toType(), TypeInt64)
             | ruleset(*array_infos)
             | ruleset_typeinfer_array_getitem
-        ),
+        ).saturate()
+        + finalize_ruleset.saturate(),
         **compiler_config,
     )
     jit_func = cres.jit_func
@@ -477,12 +523,13 @@ if __name__ == "__main__":
     cres = jit_compiler(
         fn=example_2,
         argtypes=(array_1d_symbolic, Int64),
-        ruleset=(
+        rule_schedule=(
             base_ruleset
             | setup_argtypes(array_int64_1d.toType(), TypeInt64)
             | ruleset(*array_infos)
             | ruleset_typeinfer_array_getitem
-        ),
+        ).saturate()
+        + finalize_ruleset.saturate(),
         **compiler_config,
     )
     jit_func = cres.jit_func
@@ -608,7 +655,7 @@ def ruleset_broadcasting(
         nd > y.ndim,
         nd_diff == nd - y.ndim,
     ).then(
-        subsume(bc),
+        # subsume(bc),
         union(z).with_(Broadcast(x, ArrayAddDim(y, nd_diff))),
     )
 

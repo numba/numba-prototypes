@@ -13,7 +13,7 @@ def test_ch04_0_autotest():
 def check(fn, ruleset):
     cres = pipeline_backend(
         fn=fn,
-        ruleset=ruleset,
+        rule_schedule=ruleset.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         cost_model=MyCostModel(),
         codegen_extension=codegen_extension,
@@ -27,7 +27,7 @@ def test_ch04_0_code_functioning():
     """
     jt = compiler_pipeline(
         fn=chained_additions,
-        ruleset=optimized_ruleset,
+        rule_schedule=optimized_ruleset.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),

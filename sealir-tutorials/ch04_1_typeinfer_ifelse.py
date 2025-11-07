@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import ctypes
+from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import partial
@@ -56,6 +57,7 @@ from egglog import (
     rule,
     ruleset,
     set_,
+    subsume,
     union,
     vars_,
 )
@@ -151,10 +153,6 @@ if __name__ == "__main__":
 # Let's define some rules that will establish what is disallowed:
 
 
-@function
-def failed_to_unify(ty: Type) -> Unit: ...
-
-
 @ruleset
 def ruleset_type_basic(
     ta: Type,
@@ -168,13 +166,6 @@ def ruleset_type_basic(
     # Simplify
     yield rewrite(ta | tb).to(tb | ta)
     yield birewrite((ta | tb) | tc).to(ta | (tb | tc))
-
-    # Identify errors
-    yield rule(
-        # If both sides are valid types and not equal, then fail
-        ty == ta | tb,
-        ne(ta).to(tb),  # ta != tb
-    ).then(failed_to_unify(ty))
 
 
 if __name__ == "__main__":
@@ -253,64 +244,13 @@ if __name__ == "__main__":
 # merged with `ErroMsg.fail()` nodes.
 
 
-class ErrorMsg(Expr):
-    @classmethod
-    def root(cls) -> ErrorMsg:
-        "The empty root"
-        ...
-
-    @classmethod
-    def fail(cls, msg: String) -> ErrorMsg:
-        "A node for failure message"
-        ...
-
-    @method(preserve=True)
-    def eval(self) -> tuple[str, tuple]:
-        """
-        This is for converting the information in the EGraph back to
-        Python. This will parse the EGraph node to extract the message string.
-        """
-        from egglog.builtins import ClassMethodRef, _extract_call
-
-        call = _extract_call(self)
-        if isinstance(call.callable, ClassMethodRef):
-            assert call.callable.class_name == "ErrorMsg"
-            args = [self.__with_expr__(x).eval() for x in call.args]
-            return call.callable.method_name, tuple(args)
-        raise TypeError
+class ErrorMsg(Expr): ...
 
 
-# Helpers to process the error message
-
-
-def get_error_message(err_info: tuple[str, tuple]) -> str:
-    "Helper to process the result of ErrorMsg.eval()"
-    match err_info:
-        case "fail", (msg,):
-            return msg
-        case _:
-            raise NotImplementedError
-
-
-# For example
-
-if __name__ == "__main__":
-    root = ErrorMsg.root()
-    eg = EGraph()
-    eg.register(
-        union(root).with_(ErrorMsg.fail("I failed")),
-        union(root).with_(ErrorMsg.fail("Failed again")),
-    )
-    if IN_NOTEBOOK:
-        eg.display(graphviz=True)
-    msgs = eg.extract_multiple(root, n=3)
-    print(msgs)
-    for msg in msgs:
-        print(msg.eval())
-        try:
-            print(get_error_message(msg.eval()))
-        except NotImplementedError:
-            print("no msg")
+@function
+def ErrorMessage(msg: StringLike) -> ErrorMsg:
+    "A node for failure message"
+    ...
 
 
 # ## Typing addition
@@ -380,7 +320,7 @@ def ruleset_type_infer_add():
 def setup_argtypes(*argtypes):
     def rule_gen(region):
         return [
-            set_(TypedIns(region).arg(i).getType()).to(ty)
+            set_(_AttrRegionInputType(region, i).getType()).to(ty)
             for i, ty in enumerate(argtypes, start=1)
         ]
 
@@ -412,16 +352,23 @@ def setup_argtypes(*argtypes):
 # Associate type variables to region inputs/outputs.
 
 
-class TypedIns(Expr):
-    def __init__(self, region: Region): ...
-
-    def arg(self, idx: i64Like) -> TypeVar: ...
+class Attribute(Expr): ...
 
 
-class TypedOuts(Expr):
-    def __init__(self, region: Region): ...
+@function
+def _AttrRegionInputType(region: Region, argidx: i64) -> TypeVar: ...
 
-    def at(self, idx: i64Like) -> TypeVar: ...
+
+@function
+def _AttrRegionOutputType(region: Region, argidx: i64) -> TypeVar: ...
+
+
+@function
+def RegionInputType(region: Region, argidx: i64, typ: Type) -> Attribute: ...
+
+
+@function
+def RegionOutputType(region: Region, argidx: i64, typ: Type) -> Attribute: ...
 
 
 @ruleset
@@ -435,7 +382,7 @@ def ruleset_region_types(
     # Propagate region types
     yield rule(
         # Inputs
-        typ == TypedIns(region).arg(idx),
+        typ == _AttrRegionInputType(region, idx),
         term == region.get(idx),
     ).then(
         union(TypeVar(term)).with_(typ),
@@ -444,9 +391,27 @@ def ruleset_region_types(
     yield rule(
         # Outputs
         term == Term.RegionEnd(region=region, ports=portlist),
-        pv := portlist.getValue(idx),
+        portlist.getValue(idx),
     ).then(
-        union(TypedOuts(region).at(idx)).with_(TypeVar(pv)),
+        union(_AttrRegionOutputType(region, idx)).with_(
+            TypeVar(portlist.getValue(idx))
+        )
+    )
+
+
+@ruleset
+def ruleset_annotate_types(ty: Type, region: Region, idx: i64):
+    yield rule(
+        ty == _AttrRegionInputType(region, idx).getType(),
+    ).then(
+        subsume(_AttrRegionInputType(region, idx)),
+        RegionInputType(region, idx, ty),
+    )
+    yield rule(
+        ty == _AttrRegionOutputType(region, idx).getType(),
+    ).then(
+        subsume(_AttrRegionOutputType(region, idx)),
+        RegionOutputType(region, idx, ty),
     )
 
 
@@ -458,13 +423,13 @@ if __name__ == "__main__":
         | ruleset_type_basic
         | ruleset_type_infer_add
         | setup_argtypes(TypeInt64, TypeInt64)
-    )
+    ).saturate() + ruleset_annotate_types
     report = Report("Compiler Pipeline", default_expanded=True)
     try:
         # this should raise a NotImplementedError because we haven't implemented
         # the conversions of `Nb_Add_Int64` back into RVSDG.
         cres = _ch03_compiler_pipeline(
-            fn=example_0, ruleset=rules, pipeline_report=report
+            fn=example_0, rule_schedule=rules, pipeline_report=report
         )
     except NotImplementedError as e:
         # Expect the error to be raised because we haven't implemented the
@@ -501,27 +466,38 @@ if __name__ == "__main__":
 
 
 class CompilationError(Exception):
-    pass
+    def __init__(self, *messages):
+        self.messages = messages
+
+    def __str__(self):
+        buf = [""]
+        for msg in self.messages:
+            buf.append("  - " + str(msg))
+        return "\n".join(buf)
 
 
-def egraph_saturation_with_error_checking(
+def egraph_saturation_with_debug(
     egraph: EGraph,
     egraph_root: GraphRoot,
-    ruleset: Ruleset,
+    rule_schedule: Ruleset,
     pipeline_debug: bool = False,
     pipeline_report=Report.Sink(),
+    display_egraph=False,
 ) -> EGraphOutput:
     with pipeline_report.nest("Egraph Saturation") as report:
         # Define graph root that points to the function
-
-        # Define the empty root node for the error messages
-        errors = ErrorMsg.root()
-        egraph.let("errors", errors)
         if pipeline_debug:
             report.append("[debug] initial egraph", egraph)
 
         # Run all the rules until saturation
-        egraph.run(ruleset.saturate())
+        runreport = egraph.run(rule_schedule)
+        report.append("saturation report", runreport.updated)
+
+        if display_egraph:
+            egraph.display()
+            # from sealir.model_explorer.core import prepare_egraph, visualize_egraph
+            # visualize_egraph(egraph, filepath="debug")
+            # prepare_egraph(egraph, filepath="debug")
 
         if pipeline_debug:
             report.append("[debug] saturated egraph", egraph)
@@ -529,20 +505,11 @@ def egraph_saturation_with_error_checking(
                 "[debug] egglog.extract", egraph.extract(egraph_root)
             )
 
-        # Use egglog's default extractor to get the error messages
-        errmsgs = map(
-            lambda x: x.eval(), egraph.extract_multiple(errors, n=10)
-        )
-        errmsgs_filtered = [
-            get_error_message((meth, args))
-            for meth, args in errmsgs
-            if meth != "root"
-        ]
-        if errmsgs_filtered:
-            # Raise CompilationError if there are compiler errors
-            raise CompilationError("\n".join(errmsgs_filtered))
-
         return dict(egraph=egraph, egraph_root=egraph_root)
+
+
+class EGraphExtractionOutputMore(EGraphExtractionOutput):
+    extracted_roots: list[SExpr]
 
 
 def pipeline_egraph_extraction(
@@ -551,30 +518,69 @@ def pipeline_egraph_extraction(
     converter_class,
     cost_model,
     pipeline_report=Report.Sink(),
-) -> EGraphExtractionOutput:
+) -> EGraphExtractionOutputMore:
     with pipeline_report.nest(
         "EGraph Extraction", default_expanded=True
     ) as report:
         try:
-            # This is the same as ch4.1
-            cost, extracted = egraph_extraction(
+            # This is the same as ch4.0
+            extraction = egraph_extraction(
                 egraph,
-                rvsdg_expr,
-                converter_class=converter_class,
                 cost_model=cost_model,
             )
         except ExtractionError as e:
             raise CompilationError("extraction failed") from e
 
-        report.append("Extracted RVSDG", format_rvsdg(extracted))
-        report.append("Extracted cost", cost)
+        # Look up by types
+        grouped_by_type = defaultdict(set)
+        for k, v in extraction.node_types.items():
+            grouped_by_type[v].add(k)
 
-    return dict(cost=cost, extracted=extracted)
+        memo = {}
+        # Process error message
+        errors = []
+        for k in grouped_by_type["ErrorMsg"]:
+            msg = extraction.extract_enode(k).extract_sexpr(
+                rvsdg_expr,
+                converter_class=converter_class,
+                memo=memo,
+            )
+            match msg.name, msg.children:
+                case "ErrorMessage", [str(msg)]:
+                    errors.append(msg)
+                case _:
+                    raise NotImplementedError(msg)
+
+        if errors:
+            raise CompilationError(*errors)
+
+        # Extract to SExpr
+        extresult = extraction.extract_graph_root()
+        cost = extresult.cost
+        extracted = extresult.extract_sexpr(
+            rvsdg_expr,
+            converter_class=converter_class,
+            memo=memo,
+        )
+        report.append("Extraction stats", extraction.stats)
+        report.append("Extracted cost", cost)
+        report.append(f"Extracted Func", format_rvsdg(extracted))
+
+        extracted_roots = defaultdict(list)
+        for k in extraction.iter_graph_root():
+            node = extraction.extract_enode(k).extract_sexpr(
+                rvsdg_expr, converter_class, memo=memo
+            )
+            extracted_roots[extraction.node_types[k]].append(node)
+
+    return dict(
+        cost=cost, extracted=extracted, extracted_roots=extracted_roots
+    )
 
 
 pipeline_middle_end = (
     _ch03_compiler_pipeline.trunc("egraph_saturation")
-    .extend(egraph_saturation_with_error_checking)
+    .extend(egraph_saturation_with_debug)
     .extend(pipeline_egraph_extraction)
 )
 
@@ -588,10 +594,16 @@ class BackendOutput(TypedDict):
 
 @pipeline_middle_end.extend
 def pipeline_backend(
-    extracted, argtypes, backend, pipeline_report=Report.Sink()
+    extracted,
+    argtypes,
+    extracted_roots,
+    backend,
+    pipeline_report=Report.Sink(),
 ) -> BackendOutput:
     with pipeline_report.nest("Backend") as report:
-        module = backend.lower(extracted, argtypes)
+        module = backend.lower(
+            extracted, argtypes, extracted_roots["Attribute"]
+        )
         report.append("Lowered module", module)
         return dict(module=module)
 
@@ -737,8 +749,12 @@ def ruleset_propagate_typeof_ifelse(
         ),
         then_region.get(idx),
     ).then(
-        union(TypeVar(operands[idx])).with_(TypedIns(then_region).arg(idx)),
-        union(TypeVar(operands[idx])).with_(TypedIns(else_region).arg(idx)),
+        union(TypeVar(operands[idx])).with_(
+            _AttrRegionInputType(then_region, idx)
+        ),
+        union(TypeVar(operands[idx])).with_(
+            _AttrRegionInputType(else_region, idx)
+        ),
     )
 
     @function
@@ -804,11 +820,13 @@ class NbOp_Type(NbOp_Base):
 
 
 class NbOp_InTypeAttr(NbOp_Base):
+    region: SExpr
     idx: int
     type: NbOp_Type
 
 
 class NbOp_OutTypeAttr(NbOp_Base):
+    region: SExpr
     idx: int
     type: NbOp_Type
 
@@ -861,38 +879,7 @@ class Grammar(grammar.Grammar):
 # Define attribute formating
 
 
-def my_attr_format(attrs: rg.Attrs) -> str:
-    ins = {}
-    outs = {}
-    others = []
-    for attr in attrs.attrs:
-        match attr:
-            case NbOp_InTypeAttr(idx=int(idx), type=NbOp_Type(name=str(name))):
-                ins[idx] = name
-            case NbOp_OutTypeAttr(
-                idx=int(idx), type=NbOp_Type(name=str(name))
-            ):
-                outs[idx] = name
-            case _:
-                others.append(attr)
-
-    def format(dct):
-        if len(dct):
-            hi = max(dct.keys())
-            out = ", ".join(dct.get(i, "_") for i in range(hi + 1))
-            return f"({out})"
-        else:
-            return "()"
-
-    outbuf = []
-    if ins or outs:
-        outbuf.append(format(ins) + "->" + format(outs))
-    for other in others:
-        outbuf.append(ase.pretty_str(other))
-    return ", ".join(outbuf)
-
-
-format_rvsdg = partial(rvsdg.format_rvsdg, format_attrs=my_attr_format)
+format_rvsdg = rvsdg.format_rvsdg
 
 
 # ### Extend EGraph to RVSDG
@@ -900,70 +887,24 @@ format_rvsdg = partial(rvsdg.format_rvsdg, format_attrs=my_attr_format)
 
 class ExtendEGraphToRVSDG(EGraphToRVSDG):
     grammar = Grammar
+    unknown_use_generic = True
 
-    def handle_region_attributes(self, key: str, grm: Grammar):
-
-        def search_equiv_calls(self_key: str):
-            nodes = self.gdct["nodes"]
-            ecl = nodes[self_key]["eclass"]
-            for k, v in nodes.items():
-                children = v["children"]
-                if children and nodes[children[0]]["eclass"] == ecl:
-                    yield k, v
-
-        def get_types(key_arg):
-            typs = []
-            for k, v in search_equiv_calls(key_arg):
-                for j in self.search_eclass_siblings(k):
-                    op = self.gdct["nodes"][j]["op"]
-                    if op.startswith("Type."):
-                        typ = self.dispatch(j, grm)
-                        typs.append(typ)
-            return typs
-
-        attrs = []
-        typedargs = list(self.search_calls(key, "TypedIns"))
-        if typedargs:
-            [typedarg] = typedargs
-            for key_arg in self.search_method_calls(typedarg, "arg"):
-                _k_self, k_idx = self.get_children(key_arg)
-                # get the idx in `.arg(idx)`
-                idx = self.dispatch(k_idx, grm)
-                typs = get_types(key_arg)
-
-                if len(typs) == 1:
-                    typ = typs[0]
-                    attrs.append(grm.write(NbOp_InTypeAttr(idx=idx, type=typ)))
-                else:
-                    resolved = list(map(ase.pretty_str, typs))
-                    assert len(typs) == 0, f"multiple types: {resolved}"
-
-        typedouts = list(self.search_calls(key, "TypedOuts"))
-        if typedouts:
-            [typedout] = typedouts
-            for key_at in self.search_method_calls(typedout, "at"):
-                _k_self, k_idx = self.get_children(key_at)
-                idx = self.dispatch(k_idx, grm)
-
-                typs = get_types(key_at)
-                if len(typs) == 1:
-                    typ = typs[0]
-                    attrs.append(
-                        grm.write(NbOp_OutTypeAttr(idx=idx, type=typ))
-                    )
-                else:
-                    assert len(typs) == 0, "multiple types"
-
-        return grm.write(rg.Attrs(tuple(attrs)))
+    def is_type_from_egraph(self, node) -> bool:
+        op = node["op"]
+        if op.startswith("Type."):
+            return True
+        return False
 
     def handle_Type(
         self, key: str, op: str, children: dict | list, grm: Grammar
     ):
-        assert op == "Type.simple"
-        match children:
-            case {"name": name}:
+        match op, children:
+            case "Type.simple", {"name": name}:
                 return grm.write(NbOp_Type(name))
-        raise NotImplementedError
+            case "· | ·", {"self": lhs, "other": rhs}:
+                raise NotImplementedError(f"cannot unify: {lhs} and {rhs}")
+            case _:
+                return NotImplemented
 
     def handle_Term(self, op: str, children: dict | list, grm: Grammar):
         match op, children:
@@ -987,6 +928,29 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
                 # Use parent's implementation for other terms.
                 return super().handle_Term(op, children, grm)
 
+    def handle_Attribute(
+        self, key: str, op: str, children: dict | list, grm: Grammar
+    ):
+        match op, children:
+            case "RegionInputType", {
+                "region": region,
+                "argidx": int(idx),
+                "typ": typ,
+            }:
+                return grm.write(
+                    NbOp_InTypeAttr(region=region, idx=idx, type=typ)
+                )
+            case "RegionOutputType", {
+                "region": region,
+                "argidx": int(idx),
+                "typ": typ,
+            }:
+                return grm.write(
+                    NbOp_OutTypeAttr(region=region, idx=idx, type=typ)
+                )
+            case _:
+                return NotImplemented
+
 
 # ### Define cost model
 # penalize Python operations (`Py_` prefix)
@@ -999,9 +963,11 @@ class MyCostModel(CostModel):
             return self.get_simple(1)
         elif op.startswith("Py_"):
             # Penalize Python operations
-            return self.get_simple(float("inf"))
+            return self.get_simple(float(1e20))
         elif op.startswith("Nb_"):
             return self.get_simple(cost)
+        elif op.endswith("getType") and ty == "Type":
+            return self.get_simple(1e20)
         # Fallthrough to parent's cost function
         return super().get_cost_function(nodename, op, ty, cost, children)
 
@@ -1017,40 +983,41 @@ def get_port_by_name(ports: Sequence[rg.Port], name: str):
     raise ValueError(f"{name!r} not found")
 
 
-class Attributes:
-    _typedins: dict[int, NbOp_InTypeAttr]
-    _typedouts: dict[int, NbOp_OutTypeAttr]
+class AttributeParser:
 
-    def __init__(self, attrs: rg.Attrs):
-
-        ins = {}
-        outs = {}
-        for attr in attrs.attrs:
-            match attr:
-                case NbOp_InTypeAttr(idx=idx):
-                    ins[idx] = attr
-                case NbOp_OutTypeAttr(idx=idx):
-                    outs[idx] = attr
+    def __init__(self, roots: Sequence[SExpr]):
+        region_inputs = {}
+        region_outputs = {}
+        for node in roots:
+            match node:
+                case NbOp_InTypeAttr(region=rb, idx=int(idx), type=typ):
+                    record = region_inputs.setdefault(rb, {})
+                    record[idx] = typ
+                case NbOp_OutTypeAttr(region=rb, idx=int(idx), type=typ):
+                    record = region_outputs.setdefault(rb, {})
+                    record[idx] = typ
                 case _:
-                    raise ValueError(attr)
+                    raise ValueError(node)
 
-        self._typedins = ins
-        self._typedouts = outs
+        self._typedins = region_inputs
+        self._typedouts = region_outputs
 
-    def get_output_attribute(self, idx: int) -> NbOp_OutTypeAttr | None:
-        return self._typedouts.get(idx)
+    def get_region_attr(self, rb: rg.RegionBegin) -> RegionAttribute:
+        return RegionAttribute(self._typedins[rb], self._typedouts[rb])
 
-    def get_output_type(self, idx: int) -> NbOp_Type | None:
-        at = self._typedouts.get(idx)
-        if at is not None:
-            return at.type
-        return None
 
-    def get_return_type(self, regionend: rg.RegionEnd):
-        i, p = get_port_by_name(regionend.ports, rvsdg.internal_prefix("ret"))
-        if attr := self.get_output_attribute(i):
-            return attr.type
-        raise CompilationError("Missing return type")
+class RegionAttribute:
+    def __init__(self, typedins, typedouts):
+        self._typedins = typedins
+        self._typedouts = typedouts
+
+    def get_return_type(self, func: rg.Func):
+        i, _ = get_port_by_name(func.body.ports, rvsdg.internal_prefix("ret"))
+        try:
+            out = self._typedouts[i]
+        except KeyError:
+            raise CompilationError("Missing return type") from None
+        return out
 
     def num_input_types(self):
         return len(self._typedins)
@@ -1060,7 +1027,10 @@ class Attributes:
 
     def input_types(self):
         for idx in range(1, self.num_input_types() + 1):
-            yield self._typedins[idx].type
+            yield self._typedins[idx]
+
+    def get_output_type(self, i):
+        return self._typedouts.get(i)
 
 
 # -
@@ -1082,7 +1052,7 @@ class Backend:
         self.initialize_llvm()
 
     def initialize_llvm(self):
-        llvm.initialize()
+        # llvm.initialize()
         llvm.initialize_native_target()
         llvm.initialize_native_asmprinter()
 
@@ -1119,12 +1089,15 @@ class Backend:
                     f"unsupported lower_cast: {fromty} -> {toty}"
                 )
 
-    def lower(self, root: rg.Func, argtypes):
+    def lower(self, root: rg.Func, argtypes, other_roots):
         mod = ir.Module()
         llargtypes = [*map(self.lower_type, argtypes)]
 
         fname = root.fname
-        retty = Attributes(root.body.begin.attrs).get_return_type(root.body)
+        self.attributes = AttributeParser(other_roots)
+        retty = self.attributes.get_region_attr(
+            root.body.begin
+        ).get_return_type(root)
         llrettype = self.lower_type(retty)
 
         fnty = ir.FunctionType(llrettype, llargtypes)
@@ -1373,7 +1346,10 @@ if __name__ == "__main__":
     jit_func = jit_compiler(
         fn=example_1,
         argtypes=(Int64, Int64),
-        ruleset=(base_ruleset | setup_argtypes(TypeInt64, TypeInt64)),
+        rule_schedule=(
+            base_ruleset | setup_argtypes(TypeInt64, TypeInt64)
+        ).saturate()
+        + ruleset_annotate_types.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         backend=Backend(),
         cost_model=MyCostModel(),
@@ -1431,11 +1407,12 @@ if __name__ == "__main__":
     cres = jit_compiler(
         fn=example_2,
         argtypes=(Int64, Int64),
-        ruleset=(
+        rule_schedule=(
             base_ruleset
             | setup_argtypes(TypeInt64, TypeInt64)
             | ruleset_type_infer_float  # < --- added for float()
-        ),
+        ).saturate()
+        + ruleset_annotate_types.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         backend=Backend(),
         cost_model=MyCostModel(),
@@ -1464,12 +1441,22 @@ def example_3(a, b):
 # Add rules to signal error
 
 
+@function
+def failed_to_unify(ty: Type) -> Unit: ...
+
+
 @ruleset
-def ruleset_failed_to_unify(ty: Type):
+def ruleset_prune_type_unify(ty: Type):
+    yield rewrite(ty | ty, subsume=True).to(ty)
+
+
+@ruleset
+def ruleset_failed_to_unify(ty: Type, tz: Type):
     yield rule(
-        failed_to_unify(ty),
+        ty | tz,
     ).then(
-        union(ErrorMsg.root()).with_(ErrorMsg.fail("fail to unify")),
+        failed_to_unify(ty | tz),
+        ErrorMessage("fail to unify"),
     )
 
 
@@ -1479,12 +1466,13 @@ if __name__ == "__main__":
         jit_compiler(
             fn=example_3,
             argtypes=(Int64, Int64),
-            ruleset=(
+            rule_schedule=(
                 base_ruleset
                 | setup_argtypes(TypeInt64, TypeInt64)
                 | ruleset_type_infer_float
-                | ruleset_failed_to_unify
-            ),
+            ).saturate()
+            + (ruleset_prune_type_unify.saturate())
+            + (ruleset_failed_to_unify | ruleset_annotate_types).saturate(),
             converter_class=ExtendEGraphToRVSDG,
             backend=Backend(),
             cost_model=MyCostModel(),
@@ -1528,10 +1516,8 @@ def ruleset_type_infer_failure_report(
         failed_to_unify(ty),
         name == then_ports[idx].name,
     ).then(
-        union(ErrorMsg.root()).with_(
-            ErrorMsg.fail(
-                join("Failed to unify if-else outgoing variables: ", name)
-            )
+        ErrorMessage(
+            join("Failed to unify if-else outgoing variables: ", name)
         ),
     )
 
@@ -1542,13 +1528,17 @@ if __name__ == "__main__":
         jit_compiler(
             fn=example_3,
             argtypes=(Int64, Int64),
-            ruleset=(
+            rule_schedule=(
                 base_ruleset
                 | setup_argtypes(TypeInt64, TypeInt64)
                 | ruleset_type_infer_float
-                | ruleset_failed_to_unify
+            ).saturate()
+            + (ruleset_prune_type_unify.saturate())
+            + (
+                ruleset_failed_to_unify
                 | ruleset_type_infer_failure_report
-            ),
+                | ruleset_annotate_types
+            ).saturate(),
             converter_class=ExtendEGraphToRVSDG,
             backend=Backend(),
             cost_model=MyCostModel(),

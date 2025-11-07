@@ -86,6 +86,7 @@ from ch04_1_typeinfer_ifelse import (
 from ch05_typeinfer_array import MyCostModel as ch06_CostModel
 from ch05_typeinfer_array import (
     base_ruleset,
+    finalize_ruleset,
 )
 from ch06_mlir_backend import LowerStates, jit_compiler, run_test
 from ch07_mlir_ufunc import Backend as UfuncBackend
@@ -476,9 +477,10 @@ if __name__ == "__main__":
     jit_func = jit_compiler(
         fn=gelu_tanh_forward,
         argtypes=(Float32,),
-        ruleset=(
+        rule_schedule=(
             base_ruleset | setup_argtypes(TypeFloat32) | additional_rules
-        ),
+        ).saturate()
+        + finalize_ruleset.saturate(),
         pipeline_report=report,
         **compiler_config,
     ).jit_func
@@ -562,12 +564,13 @@ if __name__ == "__main__":
     jit_func = jit_compiler(
         fn=gelu_tanh_forward,
         argtypes=(Float32,),
-        ruleset=(
+        rule_schedule=(
             base_ruleset
             | setup_argtypes(TypeFloat32)
             | additional_rules
             | optimize_rules
-        ),
+        ).saturate()
+        + finalize_ruleset.saturate(),
         pipeline_report=report,
         **compiler_config,
     ).jit_func

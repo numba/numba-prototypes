@@ -51,7 +51,7 @@ from ch03_egraph_program_rewrites import (
     run_test,
 )
 from ch04_1_typeinfer_ifelse import (
-    Attributes,
+    AttributeParser,
 )
 from ch04_1_typeinfer_ifelse import (
     ExtendEGraphToRVSDG as ConditionalExtendGraphtoRVSDG,
@@ -84,6 +84,9 @@ from ch04_2_typeinfer_loops import (
     NbOp_Not_Int64,
 )
 from ch04_2_typeinfer_loops import base_ruleset as loop_ruleset
+from ch04_2_typeinfer_loops import (
+    finalize_ruleset,
+)
 from utils import IN_NOTEBOOK, Report, display
 
 # ## MLIR Backend Implementation
@@ -91,7 +94,7 @@ from utils import IN_NOTEBOOK, Report, display
 # Define the core MLIR backend class that handles type lowering and
 # expression compilation.
 
-_DEBUG = False
+_DEBUG = True
 
 
 @dataclass(frozen=True)
@@ -128,26 +131,32 @@ class Backend:
                 return self.f32
         raise NotImplementedError(f"unknown type: {ty}")
 
-    def lower(self, root: rg.Func, argtypes):
+    def get_return_types(self, root: rg.Func):
+        return (
+            self.lower_type(
+                self.attributes.get_region_attr(
+                    root.body.begin
+                ).get_return_type(root)
+            ),
+        )
+
+    def lower(self, root: rg.Func, argtypes, extracted_roots):
         """Expression Lowering
 
         Lower RVSDG expressions to MLIR operations, handling control flow
         and data flow constructs.
         """
         context = self.context
-        self.loc = loc = ir.Location.unknown(context=context)
+        self.loc = loc = ir.Location.name(f"{self}.lower()", context=context)
         self.module = module = ir.Module.create(loc=loc)
+        self.attributes = AttributeParser(extracted_roots)
 
         # Get the module body pointer so we can insert content into the
         # module.
         self.module_body = module_body = ir.InsertionPoint(module.body)
         # Convert SealIR types to MLIR types.
         input_types = tuple([self.lower_type(x) for x in argtypes])
-        output_types = (
-            self.lower_type(
-                Attributes(root.body.begin.attrs).get_return_type(root.body)
-            ),
-        )
+        output_types = self.get_return_types(root)
 
         with context, loc, module_body:
             # Constuct a function that emits a callable C-interface.
@@ -210,11 +219,12 @@ class Backend:
 
         if _DEBUG:
             module.context.enable_multithreading(False)
+
+        pass_man = passmanager.PassManager(context=module.context)
         if _DEBUG and not IN_NOTEBOOK:
             # notebook may hang if ir_printing is enabled and and MLIR failed.
             pass_man.enable_ir_printing()
 
-        pass_man = passmanager.PassManager(context=module.context)
         pass_man.add("convert-linalg-to-loops")
         pass_man.add("convert-scf-to-cf")
         pass_man.add("finalize-memref-to-llvm")
@@ -228,6 +238,9 @@ class Backend:
         if _DEBUG:
             module.dump()
         return module
+
+    def _cast_return_value(self, val):
+        return val
 
     def lower_expr(self, expr: SExpr, state: LowerStates):
         """Expression Lowering Implementation
@@ -254,7 +267,7 @@ class Backend:
 
                 portnames = [p.name for p in body.ports]
                 retval = outs[portnames.index(internal_prefix("ret"))]
-                func.ReturnOp([retval])
+                func.ReturnOp([self._cast_return_value(retval)])
             case rg.RegionBegin(inports=ins):
                 portvalues = []
                 for i, k in enumerate(ins):
@@ -358,10 +371,10 @@ class Backend:
                 condval = yield cond
 
                 # process operands
-                rettys = Attributes(body.begin.attrs)
+                regionattrs = self.attributes.get_region_attr(body.begin)
                 result_tys = []
-                for i in range(0, rettys.num_output_types() + 1):
-                    out_ty = rettys.get_output_type(i)
+                for i in range(0, regionattrs.num_output_types() + 1):
+                    out_ty = regionattrs.get_output_type(i)
                     if out_ty is not None:
                         match out_ty.name:
                             case "Int64":
@@ -387,15 +400,15 @@ class Backend:
 
                 return if_op.results
             case rg.Loop(body=rg.RegionEnd() as body, operands=operands):
-                rettys = Attributes(body.begin.attrs)
+                regionattrs = self.attributes.get_region_attr(body.begin)
                 # process operands
                 ops = []
                 for op in operands:
                     ops.append((yield op))
 
                 result_tys = []
-                for i in range(1, rettys.num_output_types() + 1):
-                    out_ty = rettys.get_output_type(i)
+                for i in range(1, regionattrs.num_output_types() + 1):
+                    out_ty = regionattrs.get_output_type(i)
                     if out_ty is not None:
                         match out_ty.name:
                             case "Int64":
@@ -429,7 +442,7 @@ class Backend:
                 return while_op_res
 
             case _:
-                raise NotImplementedError(expr, type(expr))
+                raise NotImplementedError(expr, type(expr), ase.as_tuple(expr))
 
     # ## JIT Compilation
     #
@@ -442,20 +455,14 @@ class Backend:
         Convert the MLIR module into a JIT-callable function using the MLIR
         execution engine.
         """
-        attributes = Attributes(func_node.body.begin.attrs)
+        funcattr = self.attributes.get_region_attr(func_node.body.begin)
         # Convert SealIR types into MLIR types
         with self.loc:
             input_types = tuple(
-                [self.lower_type(x) for x in attributes.input_types()]
+                [self.lower_type(x) for x in funcattr.input_types()]
             )
 
-        output_types = (
-            self.lower_type(
-                Attributes(func_node.body.begin.attrs).get_return_type(
-                    func_node.body
-                )
-            ),
-        )
+        output_types = (self.lower_type(funcattr.get_return_type(func_node)),)
         return self.jit_compile_extra(llmod, input_types, output_types)
 
     def jit_compile_extra(
@@ -602,7 +609,10 @@ if __name__ == "__main__":
     jit_func = jit_compiler(
         fn=example_1,
         argtypes=(Int64, Int64),
-        ruleset=(if_else_ruleset | setup_argtypes(TypeInt64, TypeInt64)),
+        rule_schedule=(
+            if_else_ruleset | setup_argtypes(TypeInt64, TypeInt64)
+        ).saturate()
+        + finalize_ruleset.saturate(),
         pipeline_report=report,
         **compiler_config,
     ).jit_func
@@ -633,11 +643,12 @@ if __name__ == "__main__":
     jit_func = jit_compiler(
         fn=example_2,
         argtypes=(Int64, Int64),
-        ruleset=(
+        rule_schedule=(
             if_else_ruleset
             | setup_argtypes(TypeInt64, TypeInt64)
             | ruleset_type_infer_float  # < --- added for float()
-        ),
+        ).saturate()
+        + finalize_ruleset.saturate(),
         pipeline_report=report,
         **compiler_config,
     ).jit_func
@@ -668,7 +679,10 @@ if __name__ == "__main__":
     jit_func = jit_compiler(
         fn=example_3,
         argtypes=(Int64, Int64),
-        ruleset=(loop_ruleset | setup_argtypes(TypeInt64, TypeInt64)),
+        rule_schedule=(
+            (loop_ruleset | setup_argtypes(TypeInt64, TypeInt64)).saturate()
+            + finalize_ruleset.saturate()
+        ),
         pipeline_report=report,
         **compiler_config,
     ).jit_func
@@ -697,7 +711,10 @@ if __name__ == "__main__":
     jit_func = jit_compiler(
         fn=example_4,
         argtypes=(Int64, Int64),
-        ruleset=(loop_ruleset | setup_argtypes(TypeInt64, TypeInt64)),
+        rule_schedule=(
+            loop_ruleset | setup_argtypes(TypeInt64, TypeInt64)
+        ).saturate()
+        + finalize_ruleset.saturate(),
         pipeline_report=report,
         **compiler_config,
     ).jit_func

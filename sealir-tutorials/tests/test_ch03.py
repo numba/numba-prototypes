@@ -22,8 +22,8 @@ def test_ch03_ifelse_fold_internal():
         else:
             return b
 
-    def check(fn, ruleset):
-        cres = compiler_pipeline(fn=fn, ruleset=ruleset)
+    def check(fn, rule_schedule):
+        cres = compiler_pipeline(fn=fn, rule_schedule=rule_schedule)
         return [
             cur
             for ps, cur in ase.walk_descendants_depth_first_no_repeat(
@@ -41,18 +41,20 @@ def test_ch03_ifelse_fold_internal():
 
     ifelse_nodes = check(
         ifelse_fold,
-        ruleset=(rvsdg_eqsat.ruleset_rvsdg_basic | ruleset_const_propagate),
+        rule_schedule=(
+            rvsdg_eqsat.ruleset_rvsdg_basic | ruleset_const_propagate
+        ).saturate(),
     )
     # folding shouldn't occur
     assert len(ifelse_nodes) == 1
 
     ifelse_nodes = check(
         ifelse_fold,
-        ruleset=(
+        rule_schedule=(
             rvsdg_eqsat.ruleset_rvsdg_basic
             | ruleset_const_propagate
             | ruleset_const_fold_if_else
-        ),
+        ).saturate(),
     )
     # folding should occur
     assert len(ifelse_nodes) == 0
