@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from types import FunctionType
 import time
 
-from ch04_1_typeinfer_ifelse import Type, TypeFloat64, TypeVar, NbOp_Add_Int64, Nb_CastI64ToF64
+from ch04_1_typeinfer_ifelse import Type, TypeFloat64, TypeVar, NbOp_Add_Int64, Nb_CastI64ToF64, AttributeParser
 from ch05_typeinfer_array import ArrayDesc, Broadcast, Dim, ruleset_broadcasting
 from ch05_typeinfer_array import (
     ExtendEGraphToRVSDG as _ch05_ExtendEGraphToRVSDG,
@@ -28,6 +28,7 @@ from ch05_typeinfer_array import (
 )
 from ch05_typeinfer_array import compiler_config as _compiler_config
 from ch05_typeinfer_array import jit_compiler, setup_argtypes, DataLayout
+from ch04_2_typeinfer_loops import finalize_ruleset
 from ch09_whole_program_compiler_driver import CallGraphVisitor
 from egglog import (
     Bool,
@@ -2129,21 +2130,21 @@ def ruleset_explain_array_desc(ad: ArrayDesc, ndim: i64, dtype: Type, shape: Sha
     )
 
 
-class Annotate(Expr):
-    def __init__(self, term: Term, ty: Type): ...
+# class Annotate(Expr):
+#     def __init__(self, term: Term, ty: Type): ...
 
 
-class ArgFact(Expr):
-    def __init__(self, i: i64Like, ty: Type): ...
+# class ArgFact(Expr):
+#     def __init__(self, i: i64Like, ty: Type): ...
 
 
-@ruleset
-def ruleset_typevar_annotate(term: Term, tv: TypeVar, typ: Type):
-    yield rule(
-        typ == TypeVar(term).getType(),
-    ).then(
-        Annotate(term, typ)
-    )
+# @ruleset
+# def ruleset_typevar_annotate(term: Term, tv: TypeVar, typ: Type):
+#     yield rule(
+#         typ == TypeVar(term).getType(),
+#     ).then(
+#         Annotate(term, typ)
+#     )
 
 
 #######################################
@@ -2339,6 +2340,7 @@ class StubBackend:
                 intypes[idx] = TypeSpeller.apply(annos[0]._args[2])
         # print(intypes)
 
+
         # outtypes
         outtypes = {}
         for port in func.body.ports:
@@ -2514,35 +2516,32 @@ class MlirBackend(_ch06_MlirBackend):
         resty =  self.lower_type_return(self._retty)
         return memref.CastOp(resty, val)
 
-    def lower(self, root, argtypes):
+    def lower(self, root, argtypes, extracted_roots):
         self._retty = None # reset
-        [func] = [child for child in root._args
-                  if isinstance(child, rg.Func)]
+        assert isinstance(root, rg.Func)
+        func = root
 
-        # HACK
+        print(func._tape.dump())
         # Find arguments
-        argfacts = [child for child in root._args if isinstance(child, rg.Generic) and child.name=="ArgFact"]
+        self.attributes = AttributeParser(extracted_roots)
+        regionattrs = self.attributes.get_region_attr(root.body.begin)
 
-        # print(format_rvsdg(func))
-        fname = func.fname
         beginnode = func.body.begin
         intypes = {}
 
-        for argfact in argfacts:
-            [arg_idx, ty] = argfact.children
-            intypes[arg_idx] = TypeSpeller.apply(ty)
+        for i, ty in enumerate(regionattrs.input_types(), start=1):
+            intypes[i] = TypeSpeller.apply(ty)
 
-        # pprint(intypes)
         ninports = len(beginnode.inports)
         assert len(intypes) == ninports - 1  # one extra for the IO
-        self._argtys = tuple([intypes[i] for i in range(len(argfacts))])
+        self._argtys = tuple(v for _, v in sorted(intypes.items()))
 
         # outtypes
         outtypes = {}
-        for port in func.body.ports:
-            annos = list(ase.search_parents(port.value, lambda x: isinstance(x, rg.Generic) and x._args[0]=='Annotate'))
-            if annos:
-                outtypes[port.name] = TypeSpeller.apply(annos[0]._args[2])
+        for i, p in enumerate(root.body.ports):
+            if ty := regionattrs.get_output_type(i):
+                outtypes[p.name] = TypeSpeller.apply(ty)
+
         retty = outtypes['!ret']
         self._retty = retty  # TODO XXX ugly smelly code
 
@@ -2553,7 +2552,7 @@ class MlirBackend(_ch06_MlirBackend):
 
         argtypes = self._argtys
 
-        super().lower(func, argtypes)
+        super().lower(func, argtypes, extracted_roots)
 
         # print(self.module.dump())
         return self.module
@@ -3479,15 +3478,15 @@ def run_compiler(target_function, args):
             input_types.append(desc.toType())
             input_type_rules.extend(eg_facts)
 
-            # HACK
-            input_type_rules.append(rule(
-                desc.toType()
-            ).then(
-                ArgFact(i, desc.toType())
-            ))
+            # # HACK
+            # input_type_rules.append(rule(
+            #     desc.toType()
+            # ).then(
+            #     ArgFact(i, desc.toType())
+            # ))
         elif isinstance(a, int):
             input_types.append(TypeInt64)
-            input_type_rules.append(rule().then(ArgFact(i, TypeInt64)))
+            # input_type_rules.append(rule().then(ArgFact(i, TypeInt64)))
         else:
             raise TypeError(type(a))
 
@@ -3507,7 +3506,7 @@ def run_compiler(target_function, args):
         out = jit_compiler(
             fn=target_function,
             argtypes=tuple(input_types),
-            ruleset=(
+            rule_schedule=(
                 base_ruleset
                 | py_eqsat_rules()
                 | ruleset_broadcasting
@@ -3518,12 +3517,13 @@ def run_compiler(target_function, args):
                 | ruleset_extra_builtin_operations
                 | ruleset_ufunc_reduce_array_desc
                 | ruleset_explain_array_desc
-                | ruleset_typevar_annotate
+                # | ruleset_typevar_annotate
                 | ruleset_tuple
                 | ruleset_slice
                 | ruleset_more_constant_folding
                 | ruleset_more_typing
-            ),
+            ).saturate() + finalize_ruleset.saturate(),
+            # ).saturate(), #+ finalize_ruleset.saturate(),
             pipeline_report=report,
             # pipeline_debug=True,
             # display_egraph=True,
