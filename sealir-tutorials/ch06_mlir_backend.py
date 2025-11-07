@@ -102,7 +102,7 @@ class LowerStates(ase.TraverseState):
     constant_block: ir.Block
 
 
-function_name = "func"
+function_name = "attention"
 
 
 class Backend:
@@ -142,7 +142,10 @@ class Backend:
         and data flow constructs.
         """
         context = self.context
-        self.loc = loc =  ir.Location.file(__file__, line=11, col=1, context=context)
+        import os
+        source_dir = os.path.dirname(__file__)
+        source_name = "llm_midend.py"
+        self.loc = loc =  ir.Location.file(source_dir+'/'+source_name, line=0, col=1, context=context)
         self.module = module = ir.Module.create(loc=loc)
 
         # Get the module body pointer so we can insert content into the
@@ -153,8 +156,6 @@ class Backend:
         import os
 
         with context, loc, module_body:
-            source_dir = os.path.dirname(__file__)
-            source_name = os.path.basename(__file__)
 
             di_file_str = f'''#llvm.di_file<"{source_name}" in "{source_dir}">'''
             di_compile_unit_str = f'''#llvm.di_compile_unit<
@@ -172,7 +173,7 @@ class Backend:
                 id = distinct[1]<>,
                 compileUnit = {di_compile_unit_str},
                 scope = {di_file_str},
-                name = "namespace",
+                name = "randomfuncname",
                 file = {di_file_str},
                 line = 1,
                 type = {di_subprogram_type_str},
@@ -181,7 +182,7 @@ class Backend:
             di_subprogram = ir.Attribute.parse(di_subprogram_str)
 
             # Constuct a function that emits a callable C-interface.
-            file_loc = ir.Location.file(__file__, 120, 1)
+            file_loc = ir.Location.file(source_dir+'/'+source_name, 0, 1)
             fused_loc = ir.Location.fused([file_loc], metadata=di_subprogram)
             fun = func.FuncOp(function_name, (input_types, ()), loc=fused_loc)
             # fun = func.FuncOp(function_name, (input_types, ()))

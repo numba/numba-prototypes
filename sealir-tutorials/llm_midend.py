@@ -2387,6 +2387,13 @@ from ch06_mlir_backend import Backend as _ch06_MlirBackend, LowerStates
 
 _DEBUG = False
 
+import sys
+
+def read_parent_source_line() -> int:
+    caller_frame = sys._getframe(1)
+    return caller_frame.f_lineno
+
+
 class MlirBackend(_ch06_MlirBackend):
     def __init__(self):
         super().__init__()
@@ -2394,34 +2401,18 @@ class MlirBackend(_ch06_MlirBackend):
     def run_passes(self, module):
         from mlir import ir
         from mlir.passmanager import PassManager
-        from utils.mlir_utils import MLIRVerifier
 
         if _DEBUG:
             module.dump()
-        # pass_man = PassManager(context=module.context)
-        # module.context.emit_error_diagnostics = True
 
-        # if _DEBUG:
-        #     module.context.enable_multithreading(False)
-        # if _DEBUG:
-        #     # notebook may hang if ir_printing is enabled and and MLIR failed.
-        #     pass_man.enable_ir_printing()
+        pass_man = PassManager(context=module.context)
+        module.context.emit_error_diagnostics = True
 
-        # pass_man.add("canonicalize")
-
-        # pass_man.add("convert-linalg-to-loops")
-        # pass_man.add("expand-strided-metadata")
-        # pass_man.add("lower-affine")
-        # pass_man.add("convert-scf-to-cf")
-        # pass_man.add("finalize-memref-to-llvm")
-        # pass_man.add("convert-math-to-libm")
-        # pass_man.add("convert-func-to-llvm")
-        # pass_man.add("convert-index-to-llvm")
-        # pass_man.add("reconcile-unrealized-casts")
-        # pass_man.enable_verifier(True)
-        # pass_man.run(module.operation)
-
-        pm = MLIRVerifier(module)
+        if _DEBUG:
+            module.context.enable_multithreading(False)
+        if _DEBUG:
+            # notebook may hang if ir_printing is enabled and and MLIR failed.
+            pass_man.enable_ir_printing()
 
         passes = [
         # Phase 1: Clean up and canonicalize
@@ -2435,7 +2426,7 @@ class MlirBackend(_ch06_MlirBackend):
         "canonicalize",
 
         # Phase 3: Bufferization
-        "one-shot-bufferize='bufferize-function-boundaries'",
+        "one-shot-bufferize{bufferize-function-boundaries}",
         "canonicalize",
         "cse",
 
@@ -2446,22 +2437,22 @@ class MlirBackend(_ch06_MlirBackend):
         # Phase 5: Affine optimizations
         # "affine-loop-fusion='mode=greedy'",
         # "affine-scalrep",
-        "affine-loop-invariant-code-motion",
-        "affine-simplify-structures",
-        "affine-loop-coalescing",
-        "affine-loop-tile='tile-size=64'",
+        "func.func(affine-loop-invariant-code-motion)",
+        "func.func(affine-simplify-structures)",
+        "func.func(affine-loop-coalescing)",
+        "func.func(affine-loop-tile{tile-size=64})",
         # "affine-loop-unroll='unroll-factor=4 unroll-up-to-factor'",
         # "affine-super-vectorize='vectorize-reductions'",
-        "affine-parallelize='parallel-reductions=true'",
-        "affine-loop-normalize",
+        "func.func(affine-parallelize{parallel-reductions='true'})",
+        "func.func(affine-loop-normalize)",
 
         # Phase 6: Memory optimizations
         "normalize-memrefs",
-        "memref-expand",
-        # "fold-memref-alias-ops",
+        "fold-memref-alias-ops",
         "canonicalize",
 
         "expand-strided-metadata",
+        "memref-expand",
         "lower-affine",
 
 
@@ -2478,8 +2469,8 @@ class MlirBackend(_ch06_MlirBackend):
         #   --buffer-deallocation-simplification                   -   Optimizes `bufferization.dealloc` operation for more efficient codegen
         #   --buffer-hoisting                                      -   Optimizes placement of allocation operations by moving them into common dominators and out of nested regions
         #   --buffer-loop-hoisting
-        "promote-buffers-to-stack",
-        "mem2reg",
+        "func.func(promote-buffers-to-stack)",
+        "func.func(mem2reg)",
         # "buffer-deallocation",
 
 
@@ -2493,13 +2484,21 @@ class MlirBackend(_ch06_MlirBackend):
         "convert-openmp-to-llvm",
         "convert-math-to-libm",
         "convert-math-to-llvm",
+        "convert-arith-to-llvm",
         "convert-func-to-llvm",
         "reconcile-unrealized-casts"
         ]
 
-
-        output = pm.verify_passes(passes, output_dir='mlir_outs')
-        module = ir.Module.parse(output, context=module.context)
+        for i, pass_name in enumerate(passes):
+            pass_man = PassManager(context=module.context)
+            pass_man.add(pass_name)
+            pass_man.enable_verifier(True)
+            pass_man.run(module.operation)
+            asm = module.operation.get_asm(enable_debug_info=True)
+            # Open a file in write mode
+            pass_name = str(i) + pass_name
+            with open(f"passes/{pass_name}.mlir", "w") as file:
+                file.write(asm)
 
         # Output LLVM-dialect MLIR
         if _DEBUG:
@@ -2607,13 +2606,15 @@ class MlirBackend(_ch06_MlirBackend):
         if in_shapes == out_shape:
             return ary_val
 
-        array_val_tensor = bufferization.to_tensor(ir.RankedTensorType.get(in_shapes[0], element_type), ary_val, restrict=True)
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+            array_val_tensor = bufferization.to_tensor(ir.RankedTensorType.get(in_shapes[0], element_type), ary_val, restrict=True)
 
         shape_tensor = tensor.empty([len(out_shape)], index_type)
         memref_type_res = ir.RankedTensorType.get(out_shape, element_type)
         for idx, i in enumerate(out_shape):
             tensor.insert(arith.constant(index_type, i), shape_tensor, [arith.constant(index_type, idx)])
-        out = tensor.reshape(memref_type_res, array_val_tensor, shape=shape_tensor)
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+            out = tensor.reshape(memref_type_res, array_val_tensor, shape=shape_tensor)
 
         return bufferization.to_buffer(ir.MemRefType.get(out_shape, element_type), out)
 
@@ -2652,19 +2653,19 @@ class MlirBackend(_ch06_MlirBackend):
 
         # Create iterator types - one parallel iterator for each output dimension
         iterator_types = [ir.Attribute.parse("#linalg.iterator_type<parallel>") for _ in out_shape]
-
-        bc_op = linalg.GenericOp(
-            [bc_out.type],
-            inputs=[array_val_tensor],
-            outputs=[bc_out],
-            indexing_maps=[input_map, output_map],
-            iterator_types=ir.ArrayAttr.get(iterator_types),
-        )
-        body = bc_op.regions[0].blocks.append(
-            element_type, element_type
-        )
-        with ir.InsertionPoint(body):
-            linalg.YieldOp([body.arguments[0]])
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+            bc_op = linalg.GenericOp(
+                [bc_out.type],
+                inputs=[array_val_tensor],
+                outputs=[bc_out],
+                indexing_maps=[input_map, output_map],
+                iterator_types=ir.ArrayAttr.get(iterator_types),
+            )
+            body = bc_op.regions[0].blocks.append(
+                element_type, element_type
+            )
+            with ir.InsertionPoint(body):
+                linalg.YieldOp([body.arguments[0]])
 
         return bufferization.to_buffer(ir.MemRefType.get(out_shape, element_type), bc_op)
 
@@ -2685,8 +2686,8 @@ class MlirBackend(_ch06_MlirBackend):
         element_type = ir.F64Type.get()
 
         memref_type_out = ir.MemRefType.get(out_shape, element_type)
-
-        bc_out = tensor.empty(out_shape, element_type)
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+            bc_out = tensor.empty(out_shape, element_type)
 
         curr_offset = 0
         strides = [1] * (ndim + 1)
@@ -2698,17 +2699,17 @@ class MlirBackend(_ch06_MlirBackend):
 
             offsets = [0] * (ndim + 1)
             offsets[axis] = curr_offset
-
-            bc_out = tensor.insert_slice(
-                bufferization.to_tensor(ir.RankedTensorType.get(in_shapes[0], element_type), input_arg, restrict=True),
-                bc_out,
-                offsets=[],
-                sizes=[],
-                strides=[],
-                static_offsets=ir.DenseI64ArrayAttr.get(offsets),
-                static_sizes=ir.DenseI64ArrayAttr.get(out_shape_inner),
-                static_strides=ir.DenseI64ArrayAttr.get(strides)
-            )
+            with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+                bc_out = tensor.insert_slice(
+                    bufferization.to_tensor(ir.RankedTensorType.get(in_shapes[0], element_type), input_arg, restrict=True),
+                    bc_out,
+                    offsets=[],
+                    sizes=[],
+                    strides=[],
+                    static_offsets=ir.DenseI64ArrayAttr.get(offsets),
+                    static_sizes=ir.DenseI64ArrayAttr.get(out_shape_inner),
+                    static_strides=ir.DenseI64ArrayAttr.get(strides)
+                )
             curr_offset += 1
 
         return bufferization.to_buffer(memref_type_out, bc_out)
@@ -2791,19 +2792,20 @@ class MlirBackend(_ch06_MlirBackend):
 
         # Create iterator types - one parallel iterator for each output dimension
         iterator_types = [ir.Attribute.parse("#linalg.iterator_type<parallel>") for _ in out_shape]
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
 
-        bc_op = linalg.GenericOp(
-            [bc_out.type],
-            inputs=[ary_val],
-            outputs=[bc_out],
-            indexing_maps=[input_map, output_map],
-            iterator_types=ir.ArrayAttr.get(iterator_types),
-        )
-        body = bc_op.regions[0].blocks.append(
-            element_type, element_type
-        )
-        with ir.InsertionPoint(body):
-            linalg.YieldOp([body.arguments[0]])
+            bc_op = linalg.GenericOp(
+                [bc_out.type],
+                inputs=[ary_val],
+                outputs=[bc_out],
+                indexing_maps=[input_map, output_map],
+                iterator_types=ir.ArrayAttr.get(iterator_types),
+            )
+            body = bc_op.regions[0].blocks.append(
+                element_type, element_type
+            )
+            with ir.InsertionPoint(body):
+                linalg.YieldOp([body.arguments[0]])
 
         memref_type = ir.MemRefType.get(out_shape, element_type)
         return bufferization.to_buffer(memref_type, bc_op)
@@ -2855,20 +2857,20 @@ class MlirBackend(_ch06_MlirBackend):
         bc_out = linalg.fill(zero, outs=[bc_out])
         lhs_matrix = bufferization.to_tensor(ir.RankedTensorType.get(lhs_shape, element_type), lhs_matrix, restrict=True)
         rhs_matrix = bufferization.to_tensor(ir.RankedTensorType.get(rhs_shape, element_type), rhs_matrix, restrict=True)
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+            generic_op = linalg.GenericOp(
+                result_tensors=[result_tensor_type],
+                inputs=[lhs_matrix, rhs_matrix], outputs=[bc_out],
+                indexing_maps=indexing_maps,
+                iterator_types=iterator_types
+            )
 
-        generic_op = linalg.GenericOp(
-            result_tensors=[result_tensor_type],
-            inputs=[lhs_matrix, rhs_matrix], outputs=[bc_out],
-            indexing_maps=indexing_maps,
-            iterator_types=iterator_types
-        )
-
-        block = generic_op.regions[0].blocks.append(element_type, element_type, element_type)
-        with ir.InsertionPoint(block):
-            a_val, b_val, acc_val = block.arguments
-            mul = arith.mulf(a_val, b_val)
-            add = arith.addf(acc_val, mul)
-            linalg.yield_([add])
+            block = generic_op.regions[0].blocks.append(element_type, element_type, element_type)
+            with ir.InsertionPoint(block):
+                a_val, b_val, acc_val = block.arguments
+                mul = arith.mulf(a_val, b_val)
+                add = arith.addf(acc_val, mul)
+                linalg.yield_([add])
 
         return bufferization.to_buffer(memref_type_out, generic_op)
 
@@ -2885,17 +2887,19 @@ class MlirBackend(_ch06_MlirBackend):
             result_shape.insert(i, 1)
         dims = len(in_shape)
 
-        ary_val_tensor = bufferization.to_tensor(ir.RankedTensorType.get(in_shape, element_type), ary_val, restrict=True)
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+            ary_val_tensor = bufferization.to_tensor(ir.RankedTensorType.get(in_shape, element_type), ary_val, restrict=True)
 
         result_tensor_type = ir.RankedTensorType.get(result_shape, element_type)
-        result_tensor = tensor.expand_shape(result_tensor_type,
-            ary_val_tensor,
-            reassociation=self.build_mlir_reassociation(dims, axes),
-            output_shape=[], # [2, 3, 4]
-            static_output_shape=ir.DenseI64ArrayAttr.get(result_shape)
-        )
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+            result_tensor = tensor.expand_shape(result_tensor_type,
+                ary_val_tensor,
+                reassociation=self.build_mlir_reassociation(dims, axes),
+                output_shape=[], # [2, 3, 4]
+                static_output_shape=ir.DenseI64ArrayAttr.get(result_shape)
+            )
 
-        memref_type = ir.MemRefType.get(result_shape, element_type)
+            memref_type = ir.MemRefType.get(result_shape, element_type)
         return bufferization.to_buffer(memref_type, result_tensor)
 
     def _gen_array_getitem_shaped(self, input_memref, indices, in_shapes=(), out_shape=()):
@@ -2932,17 +2936,18 @@ class MlirBackend(_ch06_MlirBackend):
 
         for axis in modified_axes:
             out_shape_list.insert(axis, 1)
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
 
-        result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
-        result_tensor = tensor.extract_slice(result_tensor_type,
-            input_memref_tensor,
-            offsets=[],
-            sizes=[],
-            strides=[],
-            static_offsets=ir.DenseI64ArrayAttr.get(offsets),
-            static_sizes=ir.DenseI64ArrayAttr.get(out_shape_list),
-            static_strides=ir.DenseI64ArrayAttr.get(strides)
-        )
+            result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
+            result_tensor = tensor.extract_slice(result_tensor_type,
+                input_memref_tensor,
+                offsets=[],
+                sizes=[],
+                strides=[],
+                static_offsets=ir.DenseI64ArrayAttr.get(offsets),
+                static_sizes=ir.DenseI64ArrayAttr.get(out_shape_list),
+                static_strides=ir.DenseI64ArrayAttr.get(strides)
+            )
 
         memref_type = ir.MemRefType.get(out_shape, element_type)
         return bufferization.to_buffer(memref_type, result_tensor)
@@ -2993,19 +2998,20 @@ class MlirBackend(_ch06_MlirBackend):
 
         for i in range(dims-1,0,-1):
             out_strides[i-1] = out_strides[i] * in_shape[i]
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+            result_slice = tensor.insert_slice(
+                bufferization.to_tensor(ir.RankedTensorType.get(val_shape, element_type), value_memref, restrict=True),
+                bufferization.to_tensor(ir.RankedTensorType.get(in_shape, element_type), arr_memref, restrict=True),
+                offsets=[],
+                sizes=[],
+                strides=[],
+                static_offsets=ir.DenseI64ArrayAttr.get(offsets),
+                static_sizes=ir.DenseI64ArrayAttr.get(val_shape),
+                static_strides=ir.DenseI64ArrayAttr.get(strides)
+            )
 
-        result_slice = tensor.insert_slice(
-            bufferization.to_tensor(ir.RankedTensorType.get(val_shape, element_type), value_memref, restrict=True),
-            bufferization.to_tensor(ir.RankedTensorType.get(in_shape, element_type), arr_memref, restrict=True),
-            offsets=[],
-            sizes=[],
-            strides=[],
-            static_offsets=ir.DenseI64ArrayAttr.get(offsets),
-            static_sizes=ir.DenseI64ArrayAttr.get(val_shape),
-            static_strides=ir.DenseI64ArrayAttr.get(strides)
-        )
-
-        memref.copy(bufferization.to_buffer(ir.MemRefType.get(in_shape, element_type), result_slice), arr_memref)
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+            memref.copy(bufferization.to_buffer(ir.MemRefType.get(in_shape, element_type), result_slice), arr_memref)
 
     def _gen_binop_ufunc(self, lhs_val, rhs_val, op, in_shapes=(), out_shape=()):
         from mlir.dialects import arith, func, memref, linalg, bufferization, tensor
@@ -3040,19 +3046,20 @@ class MlirBackend(_ch06_MlirBackend):
 
                 # Create iterator types - one parallel iterator for each output dimension
                 iterator_types = [ir.Attribute.parse("#linalg.iterator_type<parallel>") for _ in out_shape]
+                with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
 
-                bc_op = linalg.GenericOp(
-                    [bc_out.type],
-                    inputs=[tensor_val],
-                    outputs=[bc_out],
-                    indexing_maps=[input_map, output_map],
-                    iterator_types=ir.ArrayAttr.get(iterator_types),
-                )
-                body = bc_op.regions[0].blocks.append(
-                    element_type, element_type
-                )
-                with ir.InsertionPoint(body):
-                    linalg.YieldOp([body.arguments[0]])
+                    bc_op = linalg.GenericOp(
+                        [bc_out.type],
+                        inputs=[tensor_val],
+                        outputs=[bc_out],
+                        indexing_maps=[input_map, output_map],
+                        iterator_types=ir.ArrayAttr.get(iterator_types),
+                    )
+                    body = bc_op.regions[0].blocks.append(
+                        element_type, element_type
+                    )
+                    with ir.InsertionPoint(body):
+                        linalg.YieldOp([body.arguments[0]])
 
                 return bc_op
 
@@ -3076,13 +3083,13 @@ class MlirBackend(_ch06_MlirBackend):
                 ],
                 iterator_types=ir.ArrayAttr.get([ir.Attribute.parse("#linalg.iterator_type<parallel>")]*nd),
             )
+            with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+                body = generic_op.regions[0].blocks.append(
+                    element_type, element_type, element_type
+                )
 
-            body = generic_op.regions[0].blocks.append(
-                element_type, element_type, element_type
-            )
-
-            with ir.InsertionPoint(body):
-                linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
+                with ir.InsertionPoint(body):
+                    linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
 
 
             memref_type = ir.MemRefType.get(out_shape, element_type)
@@ -3104,24 +3111,24 @@ class MlirBackend(_ch06_MlirBackend):
 
         result_tensor_type = ir.RankedTensorType.get(out_shape, element_type)
         result_tensor = tensor.empty(out_shape, element_type)
+        with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+            generic_op = linalg.GenericOp(
+                result_tensors=[result_tensor_type],
+                inputs=[operand_tensor],
+                outputs=[result_tensor],
+                indexing_maps=[
+                    ir.AffineMap.get_identity(nd),
+                    ir.AffineMap.get_identity(nd)
+                ],
+                iterator_types=ir.ArrayAttr.get([ir.Attribute.parse("#linalg.iterator_type<parallel>")]*nd),
+            )
 
-        generic_op = linalg.GenericOp(
-            result_tensors=[result_tensor_type],
-            inputs=[operand_tensor],
-            outputs=[result_tensor],
-            indexing_maps=[
-                ir.AffineMap.get_identity(nd),
-                ir.AffineMap.get_identity(nd)
-            ],
-            iterator_types=ir.ArrayAttr.get([ir.Attribute.parse("#linalg.iterator_type<parallel>")]*nd),
-        )
+            body = generic_op.regions[0].blocks.append(
+                element_type, element_type
+            )
 
-        body = generic_op.regions[0].blocks.append(
-            element_type, element_type
-        )
-
-        with ir.InsertionPoint(body):
-            linalg.YieldOp([op(body.arguments[0])])
+            with ir.InsertionPoint(body):
+                linalg.YieldOp([op(body.arguments[0])])
 
         memref_type = ir.MemRefType.get(out_shape, element_type)
         return bufferization.to_buffer(memref_type, generic_op.result_tensors)
@@ -3150,16 +3157,15 @@ class MlirBackend(_ch06_MlirBackend):
             # Necessary to fill zeros
             zero = arith.ConstantOp(element_type, initializer)
             result_reduced = linalg.fill(zero, outs=[result_reduced])
+            with ir.Location.file(__file__, read_parent_source_line() + 1, 1):
+                reduce_op = linalg.ReduceOp(
+                    result=[tensor_type], inputs=[opval_tensor], inits=[result_reduced], dimensions=[axis])
 
-            reduce_op = linalg.ReduceOp(
-                result=[tensor_type], inputs=[opval_tensor], inits=[result_reduced], dimensions=[axis])
-
-            body = reduce_op.regions[0].blocks.append(
-                element_type, element_type
-            )
-
-            with ir.InsertionPoint(body):
-                linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
+                body = reduce_op.regions[0].blocks.append(
+                    element_type, element_type
+                )
+                with ir.InsertionPoint(body):
+                    linalg.YieldOp([op(body.arguments[0], body.arguments[1])])
 
             # broadcast for keepdims
             bc_tensor = tensor.empty(out_shape, element_type)
@@ -3430,7 +3436,7 @@ class MlirBackend(_ch06_MlirBackend):
 
                 return arg0, arg1, arg2, *shapes_arg, *strides_arg
 
-            res_val = np.zeros(output_types[0].shape, dtype=np.float64)
+            res_val = np.zeros(output_types[0].shape)
 
             all_args = list(args) + [res_val]
             all_arrs_as_descriptors = [
@@ -3441,15 +3447,15 @@ class MlirBackend(_ch06_MlirBackend):
                 *[type(x) for arr in all_arrs_as_descriptors for x in arr]
             ]
 
-            module.func.argtypes = func_argtypes
+            module.attention.argtypes = func_argtypes
 
-            module.func.restype = ctypes.c_void_p
+            module.attention.restype = ctypes.c_void_p
 
             final_args = []
             for x in all_arrs_as_descriptors:
                 final_args.extend(x)
 
-            for _ in range(1):
+            for _ in range(1000):
                 pstart = time.time_ns()
                 input_args = args
 
@@ -3457,7 +3463,7 @@ class MlirBackend(_ch06_MlirBackend):
 
                 pend = time.time_ns()
                 jstart = time.time_ns()
-                module.func(*final_args)
+                module.attention(*final_args)
                 jend = time.time_ns()
 
                 tstart = time.time_ns()
@@ -4490,4 +4496,4 @@ def main():
     np.testing.assert_allclose(res, desired)
 
 if __name__ == "__main__":
-    test_attention_matmul()
+    test_attention_full()
