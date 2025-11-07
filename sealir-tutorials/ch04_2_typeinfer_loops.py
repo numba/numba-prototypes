@@ -68,14 +68,15 @@ from ch04_1_typeinfer_ifelse import (
     SExpr,
     Type,
     TypeBool,
-    TypedIns,
     TypeInt64,
     TypeVar,
+    _AttrRegionInputType,
     _wc,
 )
 from ch04_1_typeinfer_ifelse import base_ruleset as _ch4_1_base_ruleset
 from ch04_1_typeinfer_ifelse import (
     jit_compiler,
+    ruleset_annotate_types,
     ruleset_failed_to_unify,
     ruleset_type_infer_failure_report,
     ruleset_type_infer_float,
@@ -116,7 +117,7 @@ def ruleset_propagate_typeof_loops(
         region.get(idx),
     ).then(
         # propagate loop inputs
-        union(TypeVar(operands[idx])).with_(TypedIns(region).arg(idx)),
+        union(TypeVar(operands[idx])).with_(_AttrRegionInputType(region, idx)),
     )
 
     yield rule(
@@ -289,11 +290,15 @@ class Backend(_ch04_1_Backend):
 base_ruleset = (
     _ch4_1_base_ruleset
     | ruleset_type_infer_float
-    | ruleset_failed_to_unify
-    | ruleset_type_infer_failure_report
     | ruleset_type_infer_undef
     | ruleset_type_infer_not
     | ruleset_propagate_typeof_loops
+)
+
+finalize_ruleset = (
+    ruleset_annotate_types
+    | ruleset_failed_to_unify
+    | ruleset_type_infer_failure_report
 )
 
 # ## Example 1: Simple While Loop
@@ -321,7 +326,10 @@ if __name__ == "__main__":
     cres = jit_compiler(
         fn=example_1,
         argtypes=(Int64, Int64),
-        ruleset=base_ruleset | setup_argtypes(TypeInt64, TypeInt64),
+        rule_schedule=(
+            base_ruleset | setup_argtypes(TypeInt64, TypeInt64)
+        ).saturate()
+        + (finalize_ruleset).saturate(),
         **compiler_config,
     )
     jit_func = cres.jit_func
@@ -348,7 +356,10 @@ if __name__ == "__main__":
     cres = jit_compiler(
         fn=example_2,
         argtypes=(Int64, Int64),
-        ruleset=base_ruleset | setup_argtypes(TypeInt64, TypeInt64),
+        rule_schedule=(
+            base_ruleset | setup_argtypes(TypeInt64, TypeInt64)
+        ).saturate()
+        + (finalize_ruleset).saturate(),
         **compiler_config,
     )
     jit_func = cres.jit_func

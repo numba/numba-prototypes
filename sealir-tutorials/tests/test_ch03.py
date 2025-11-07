@@ -41,7 +41,9 @@ def test_ch03_ifelse_fold_internal():
 
     ifelse_nodes = check(
         ifelse_fold,
-        rule_schedule=(rvsdg_eqsat.ruleset_rvsdg_basic | ruleset_const_propagate).saturate(),
+        rule_schedule=(
+            rvsdg_eqsat.ruleset_rvsdg_basic | ruleset_const_propagate
+        ).saturate(),
     )
     # folding shouldn't occur
     assert len(ifelse_nodes) == 1

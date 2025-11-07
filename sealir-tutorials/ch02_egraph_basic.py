@@ -42,7 +42,11 @@ from egglog import EGraph
 from sealir import rvsdg
 from sealir.eqsat.rvsdg_convert import egraph_conversion
 from sealir.eqsat.rvsdg_eqsat import GraphRoot
-from sealir.eqsat.rvsdg_extract import egraph_extraction, EGraphToRVSDG, CostModel
+from sealir.eqsat.rvsdg_extract import (
+    CostModel,
+    EGraphToRVSDG,
+    egraph_extraction,
+)
 
 # We'll be extending from chapter 1.
 from ch01_basic_compiler import (

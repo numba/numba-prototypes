@@ -57,9 +57,9 @@ from egglog import (
     rule,
     ruleset,
     set_,
+    subsume,
     union,
     vars_,
-    subsume,
 )
 from llvmlite import binding as llvm
 from llvmlite import ir
@@ -244,15 +244,13 @@ if __name__ == "__main__":
 # merged with `ErroMsg.fail()` nodes.
 
 
-class ErrorMsg(Expr):
-    ...
+class ErrorMsg(Expr): ...
 
 
 @function
 def ErrorMessage(msg: StringLike) -> ErrorMsg:
     "A node for failure message"
     ...
-
 
 
 # ## Typing addition
@@ -353,16 +351,16 @@ def setup_argtypes(*argtypes):
 
 # Associate type variables to region inputs/outputs.
 
+
 class Attribute(Expr): ...
 
+
 @function
-def _AttrRegionInputType(region: Region, argidx: i64) -> TypeVar:
-    ...
+def _AttrRegionInputType(region: Region, argidx: i64) -> TypeVar: ...
 
 
 @function
-def _AttrRegionOutputType(region: Region, argidx: i64) -> TypeVar:
-    ...
+def _AttrRegionOutputType(region: Region, argidx: i64) -> TypeVar: ...
 
 
 @function
@@ -395,16 +393,14 @@ def ruleset_region_types(
         term == Term.RegionEnd(region=region, ports=portlist),
         portlist.getValue(idx),
     ).then(
-        union(_AttrRegionOutputType(region, idx)).with_(TypeVar(portlist.getValue(idx)))
+        union(_AttrRegionOutputType(region, idx)).with_(
+            TypeVar(portlist.getValue(idx))
+        )
     )
 
 
 @ruleset
-def ruleset_annotate_types(
-    ty: Type,
-    region: Region,
-    idx: i64
-):
+def ruleset_annotate_types(ty: Type, region: Region, idx: i64):
     yield rule(
         ty == _AttrRegionInputType(region, idx).getType(),
     ).then(
@@ -417,6 +413,7 @@ def ruleset_annotate_types(
         subsume(_AttrRegionOutputType(region, idx)),
         RegionOutputType(region, idx, ty),
     )
+
 
 if __name__ == "__main__":
     display(_ch03_compiler_pipeline.visualize())
@@ -473,10 +470,10 @@ class CompilationError(Exception):
         self.messages = messages
 
     def __str__(self):
-        buf = ['']
+        buf = [""]
         for msg in self.messages:
             buf.append("  - " + str(msg))
-        return '\n'.join(buf)
+        return "\n".join(buf)
 
 
 def egraph_saturation_with_debug(
@@ -534,7 +531,6 @@ def pipeline_egraph_extraction(
         except ExtractionError as e:
             raise CompilationError("extraction failed") from e
 
-
         # Look up by types
         grouped_by_type = defaultdict(set)
         for k, v in extraction.node_types.items():
@@ -543,7 +539,7 @@ def pipeline_egraph_extraction(
         memo = {}
         # Process error message
         errors = []
-        for k in grouped_by_type['ErrorMsg']:
+        for k in grouped_by_type["ErrorMsg"]:
             msg = extraction.extract_enode(k).extract_sexpr(
                 rvsdg_expr,
                 converter_class=converter_class,
@@ -572,11 +568,14 @@ def pipeline_egraph_extraction(
 
         extracted_roots = defaultdict(list)
         for k in extraction.iter_graph_root():
-            node = extraction.extract_enode(k).extract_sexpr(rvsdg_expr, converter_class, memo=memo)
+            node = extraction.extract_enode(k).extract_sexpr(
+                rvsdg_expr, converter_class, memo=memo
+            )
             extracted_roots[extraction.node_types[k]].append(node)
 
-    return dict(cost=cost, extracted=extracted,
-                extracted_roots=extracted_roots)
+    return dict(
+        cost=cost, extracted=extracted, extracted_roots=extracted_roots
+    )
 
 
 pipeline_middle_end = (
@@ -595,11 +594,16 @@ class BackendOutput(TypedDict):
 
 @pipeline_middle_end.extend
 def pipeline_backend(
-    extracted, argtypes, extracted_roots,
-    backend, pipeline_report=Report.Sink(),
+    extracted,
+    argtypes,
+    extracted_roots,
+    backend,
+    pipeline_report=Report.Sink(),
 ) -> BackendOutput:
     with pipeline_report.nest("Backend") as report:
-        module = backend.lower(extracted, argtypes, extracted_roots["Attribute"])
+        module = backend.lower(
+            extracted, argtypes, extracted_roots["Attribute"]
+        )
         report.append("Lowered module", module)
         return dict(module=module)
 
@@ -745,8 +749,12 @@ def ruleset_propagate_typeof_ifelse(
         ),
         then_region.get(idx),
     ).then(
-        union(TypeVar(operands[idx])).with_(_AttrRegionInputType(then_region, idx)),
-        union(TypeVar(operands[idx])).with_(_AttrRegionInputType(else_region, idx)),
+        union(TypeVar(operands[idx])).with_(
+            _AttrRegionInputType(then_region, idx)
+        ),
+        union(TypeVar(operands[idx])).with_(
+            _AttrRegionInputType(else_region, idx)
+        ),
     )
 
     @function
@@ -896,7 +904,7 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
             case "· | ·", {"self": lhs, "other": rhs}:
                 raise NotImplementedError(f"cannot unify: {lhs} and {rhs}")
             case _:
-                raise NotImplementedError(key, op, children)
+                return NotImplemented
 
     def handle_Term(self, op: str, children: dict | list, grm: Grammar):
         match op, children:
@@ -920,14 +928,28 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
                 # Use parent's implementation for other terms.
                 return super().handle_Term(op, children, grm)
 
-    def handle_Attribute(self, key: str, op: str, children: dict | list, grm: Grammar):
+    def handle_Attribute(
+        self, key: str, op: str, children: dict | list, grm: Grammar
+    ):
         match op, children:
-            case "RegionInputType", {"region": region, "argidx": int(idx), "typ": typ}:
-                return grm.write(NbOp_InTypeAttr(region=region, idx=idx, type=typ))
-            case "RegionOutputType", {"region": region, "argidx": int(idx), "typ": typ}:
-                return grm.write(NbOp_OutTypeAttr(region=region, idx=idx, type=typ))
+            case "RegionInputType", {
+                "region": region,
+                "argidx": int(idx),
+                "typ": typ,
+            }:
+                return grm.write(
+                    NbOp_InTypeAttr(region=region, idx=idx, type=typ)
+                )
+            case "RegionOutputType", {
+                "region": region,
+                "argidx": int(idx),
+                "typ": typ,
+            }:
+                return grm.write(
+                    NbOp_OutTypeAttr(region=region, idx=idx, type=typ)
+                )
             case _:
-                raise NotImplementedError(key, op)
+                return NotImplemented
 
 
 # ### Define cost model
@@ -941,9 +963,11 @@ class MyCostModel(CostModel):
             return self.get_simple(1)
         elif op.startswith("Py_"):
             # Penalize Python operations
-            return self.get_simple(float("1e20"))
+            return self.get_simple(float(1e20))
         elif op.startswith("Nb_"):
             return self.get_simple(cost)
+        elif op.endswith("getType") and ty == "Type":
+            return self.get_simple(1e20)
         # Fallthrough to parent's cost function
         return super().get_cost_function(nodename, op, ty, cost, children)
 
@@ -959,7 +983,7 @@ def get_port_by_name(ports: Sequence[rg.Port], name: str):
     raise ValueError(f"{name!r} not found")
 
 
-class Attributes:
+class AttributeParser:
 
     def __init__(self, roots: Sequence[SExpr]):
         region_inputs = {}
@@ -978,19 +1002,19 @@ class Attributes:
         self._typedins = region_inputs
         self._typedouts = region_outputs
 
-    def get_output_attribute(self, idx: int) -> NbOp_OutTypeAttr | None:
-        return self._typedouts.get(idx)
+    def get_region_attr(self, rb: rg.RegionBegin) -> RegionAttribute:
+        return RegionAttribute(self._typedins[rb], self._typedouts[rb])
 
-    def get_output_type(self, idx: int) -> NbOp_Type | None:
-        at = self._typedouts.get(idx)
-        if at is not None:
-            return at.type
-        return None
+
+class RegionAttribute:
+    def __init__(self, typedins, typedouts):
+        self._typedins = typedins
+        self._typedouts = typedouts
 
     def get_return_type(self, func: rg.Func):
         i, _ = get_port_by_name(func.body.ports, rvsdg.internal_prefix("ret"))
         try:
-            out = self._typedouts[func.body.begin][i]
+            out = self._typedouts[i]
         except KeyError:
             raise CompilationError("Missing return type") from None
         return out
@@ -1003,7 +1027,10 @@ class Attributes:
 
     def input_types(self):
         for idx in range(1, self.num_input_types() + 1):
-            yield self._typedins[idx].type
+            yield self._typedins[idx]
+
+    def get_output_type(self, i):
+        return self._typedouts.get(i)
 
 
 # -
@@ -1067,8 +1094,10 @@ class Backend:
         llargtypes = [*map(self.lower_type, argtypes)]
 
         fname = root.fname
-        # root._tape.render_dot(source_node=root).view()
-        retty = Attributes(other_roots).get_return_type(root)
+        self.attributes = AttributeParser(other_roots)
+        retty = self.attributes.get_region_attr(
+            root.body.begin
+        ).get_return_type(root)
         llrettype = self.lower_type(retty)
 
         fnty = ir.FunctionType(llrettype, llargtypes)
@@ -1317,7 +1346,10 @@ if __name__ == "__main__":
     jit_func = jit_compiler(
         fn=example_1,
         argtypes=(Int64, Int64),
-        rule_schedule=(base_ruleset | setup_argtypes(TypeInt64, TypeInt64)).saturate() + ruleset_annotate_types.saturate(),
+        rule_schedule=(
+            base_ruleset | setup_argtypes(TypeInt64, TypeInt64)
+        ).saturate()
+        + ruleset_annotate_types.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         backend=Backend(),
         cost_model=MyCostModel(),
@@ -1379,7 +1411,8 @@ if __name__ == "__main__":
             base_ruleset
             | setup_argtypes(TypeInt64, TypeInt64)
             | ruleset_type_infer_float  # < --- added for float()
-        ).saturate() + ruleset_annotate_types.saturate(),
+        ).saturate()
+        + ruleset_annotate_types.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         backend=Backend(),
         cost_model=MyCostModel(),
@@ -1407,10 +1440,9 @@ def example_3(a, b):
 
 # Add rules to signal error
 
-@function
-def failed_to_unify(ty: Type) -> Unit:
-    ...
 
+@function
+def failed_to_unify(ty: Type) -> Unit: ...
 
 
 @ruleset
@@ -1438,12 +1470,9 @@ if __name__ == "__main__":
                 base_ruleset
                 | setup_argtypes(TypeInt64, TypeInt64)
                 | ruleset_type_infer_float
-            ).saturate() + (
-                ruleset_prune_type_unify.saturate()
-            ) + (
-                ruleset_failed_to_unify
-                | ruleset_annotate_types
-            ).saturate(),
+            ).saturate()
+            + (ruleset_prune_type_unify.saturate())
+            + (ruleset_failed_to_unify | ruleset_annotate_types).saturate(),
             converter_class=ExtendEGraphToRVSDG,
             backend=Backend(),
             cost_model=MyCostModel(),
@@ -1503,9 +1532,9 @@ if __name__ == "__main__":
                 base_ruleset
                 | setup_argtypes(TypeInt64, TypeInt64)
                 | ruleset_type_infer_float
-            ).saturate() + (
-                ruleset_prune_type_unify.saturate()
-            ) + (
+            ).saturate()
+            + (ruleset_prune_type_unify.saturate())
+            + (
                 ruleset_failed_to_unify
                 | ruleset_type_infer_failure_report
                 | ruleset_annotate_types

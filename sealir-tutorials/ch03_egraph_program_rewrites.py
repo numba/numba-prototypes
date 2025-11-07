@@ -30,7 +30,16 @@
 
 from __future__ import annotations
 
-from egglog import EGraph, Schedule, Unit, function, i64, rewrite, rule, ruleset
+from egglog import (
+    EGraph,
+    Schedule,
+    Unit,
+    function,
+    i64,
+    rewrite,
+    rule,
+    ruleset,
+)
 from sealir import rvsdg
 from sealir.eqsat import rvsdg_eqsat
 from sealir.eqsat.rvsdg_eqsat import GraphRoot, Term, TermList
@@ -145,8 +154,9 @@ if __name__ == "__main__":
 
     report = Report("Test", default_expanded=True)
     jt = compiler_pipeline(
-        fn=ifelse_fold, pipeline_report=report,
-        rule_schedule=my_ruleset.saturate()
+        fn=ifelse_fold,
+        pipeline_report=report,
+        rule_schedule=my_ruleset.saturate(),
     ).jit_func
     report.display()
     run_test(ifelse_fold, jt, (12, 34))
@@ -198,8 +208,9 @@ if __name__ == "__main__":
 
     report = Report("Test", default_expanded=True)
     jt = compiler_pipeline(
-        fn=ifelse_fold, pipeline_report=report,
-        rule_schedule=my_ruleset.saturate()
+        fn=ifelse_fold,
+        pipeline_report=report,
+        rule_schedule=my_ruleset.saturate(),
     ).jit_func
     report.display()
     run_test(ifelse_fold, jt, (12, 34))

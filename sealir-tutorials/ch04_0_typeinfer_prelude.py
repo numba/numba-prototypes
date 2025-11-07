@@ -44,11 +44,11 @@ from sealir.eqsat.rvsdg_eqsat import GraphRoot, PortList, Region, Term
 from sealir.eqsat.rvsdg_extract import (
     CostModel,
     EGraphToRVSDG,
-    egraph_extraction,
     Extraction,
+    egraph_extraction,
 )
-from sealir.rvsdg import grammar as rg
 from sealir.llvm_pyapi_backend import SSAValue
+from sealir.rvsdg import grammar as rg
 
 from ch02_egraph_basic import (
     BackendOutput,
@@ -65,7 +65,6 @@ from ch03_egraph_program_rewrites import (
     run_test,
 )
 from utils import IN_NOTEBOOK, Report, display
-
 
 # First, we need some modifications to the compiler-pipeline.
 # The middle-end is augmented with the following:
@@ -88,7 +87,6 @@ def pipeline_egraph_extraction(
         extraction = egraph_extraction(
             egraph,
             cost_model=cost_model,  # <-------------- new
-
         )
         extresult = extraction.extract_graph_root()
         cost = extresult.cost
@@ -309,7 +307,9 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
                 # Use parent's implementation for other terms.
                 return super().handle_Term(op, children, grm)
 
-    def handle_Type(self, key: str, op: str, children: dict | list, grm: Grammar):
+    def handle_Type(
+        self, key: str, op: str, children: dict | list, grm: Grammar
+    ):
 
         match op, children:
             case "Type", {"name": str(typename)}:
@@ -319,6 +319,7 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
                     )
 
         raise NotImplementedError("handle_Type", op, children)
+
 
 # The LLVM code-generation also needs an extension:
 
