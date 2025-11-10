@@ -49,7 +49,7 @@ from ch05_typeinfer_array import (
     base_ruleset,
 )
 from ch06_mlir_backend import Backend as _Backend
-from ch06_mlir_backend import ConditionalExtendGraphtoRVSDG, NbOp_Type
+from ch06_mlir_backend import NbOp_Type, finalize_ruleset
 from utils.report import Report
 
 # ## Type Declarations
@@ -224,10 +224,11 @@ def ufunc_vectorize(input_type, ndim, compiler_config, extra_ruleset=None):
         if extra_ruleset is not None:
             ruleset |= extra_ruleset
         # Compile the inner function and get the IR as a module.
+        # Use explicit .saturate() calls for the rule schedule
         cres = ufunc_compiler(
             fn=inner_func,
             argtypes=(input_type,) * num_inputs,
-            ruleset=ruleset,
+            rule_schedule=ruleset.saturate() + finalize_ruleset.saturate(),
             ndim=ndim,
             **compiler_config,
         )

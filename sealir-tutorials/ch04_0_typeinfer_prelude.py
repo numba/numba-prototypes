@@ -44,9 +44,11 @@ from sealir.eqsat.rvsdg_eqsat import GraphRoot, PortList, Region, Term
 from sealir.eqsat.rvsdg_extract import (
     CostModel,
     EGraphToRVSDG,
+    Extraction,
     egraph_extraction,
 )
 from sealir.llvm_pyapi_backend import SSAValue
+from sealir.rvsdg import grammar as rg
 
 from ch02_egraph_basic import (
     BackendOutput,
@@ -70,6 +72,11 @@ from utils import IN_NOTEBOOK, Report, display
 # - `converter_class` is for customizing EGraph-to-RVSDG conversion as we will be
 #   introducing new RVSDG operations for typed operations.
 # - `cost_model` is for customizing the cost of the new operations.
+#
+# The extraction API has been updated to use the new 3-step process:
+# 1. Create extraction with egraph_extraction()
+# 2. Extract graph root to get extraction results
+# 3. Convert s-expression with converter class
 
 
 def pipeline_egraph_extraction(
@@ -82,11 +89,18 @@ def pipeline_egraph_extraction(
     with pipeline_report.nest(
         "EGraph Extraction", default_expanded=True
     ) as report:
-        cost, extracted = egraph_extraction(
+        # Step 1: Create extraction instance with custom cost model
+        extraction = egraph_extraction(
             egraph,
+            cost_model=cost_model,  # <-------------- new
+        )
+        # Step 2: Extract the graph root
+        extresult = extraction.extract_graph_root()
+        cost = extresult.cost
+        # Step 3: Extract s-expression with custom converter
+        extracted = extresult.convert(
             rvsdg_expr,
             converter_class=converter_class,  # <---- new
-            cost_model=cost_model,  # <-------------- new
         )
         report.append("Cost", cost)
         report.append("Extracted", rvsdg.format_rvsdg(extracted))
@@ -131,6 +145,7 @@ def add_x_y(x, y):
 
 
 # We will start with the same ruleset as in chapter 3.
+# Note that we now use .saturate() to create a rule schedule.
 
 basic_ruleset = rvsdg_eqsat.ruleset_rvsdg_basic | ruleset_const_propagate
 
@@ -143,7 +158,7 @@ if __name__ == "__main__":
     report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
         fn=add_x_y,
-        ruleset=basic_ruleset,
+        rule_schedule=basic_ruleset.saturate(),
         converter_class=EGraphToRVSDG,
         codegen_extension=None,
         cost_model=None,
@@ -301,6 +316,19 @@ class ExtendEGraphToRVSDG(EGraphToRVSDG):
                 # Use parent's implementation for other terms.
                 return super().handle_Term(op, children, grm)
 
+    def handle_Type(
+        self, key: str, op: str, children: dict | list, grm: Grammar
+    ):
+
+        match op, children:
+            case "Type", {"name": str(typename)}:
+                if typename == "Int64":
+                    return grm.write(
+                        rg.Generic(name="Type", children=tuple([typename]))
+                    )
+
+        raise NotImplementedError("handle_Type", op, children)
+
 
 # The LLVM code-generation also needs an extension:
 
@@ -352,7 +380,7 @@ if __name__ == "__main__":
     report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
         fn=add_x_y,
-        ruleset=typeinfer_ruleset,
+        rule_schedule=typeinfer_ruleset.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),
@@ -387,7 +415,7 @@ if __name__ == "__main__":
     report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
         fn=chained_additions,
-        ruleset=typeinfer_ruleset,
+        rule_schedule=typeinfer_ruleset.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),
@@ -427,7 +455,7 @@ if __name__ == "__main__":
     report = Report("Compiler Pipeline", default_expanded=True)
     jt = compiler_pipeline(
         fn=chained_additions,
-        ruleset=optimized_ruleset,
+        rule_schedule=optimized_ruleset.saturate(),
         converter_class=ExtendEGraphToRVSDG,
         codegen_extension=codegen_extension,
         cost_model=MyCostModel(),

@@ -12,9 +12,10 @@ def test_demo01_baseline():
     cres = jit_compiler(
         fn=gelu_tanh_forward,
         argtypes=(Float32,),
-        ruleset=(
+        rule_schedule=(
             base_ruleset | setup_argtypes(TypeFloat32) | additional_rules
-        ),
+        ).saturate()
+        + finalize_ruleset.saturate(),
         **compiler_config
     )
     llvm_module = cres.module
@@ -27,12 +28,13 @@ def test_demo01_optimized():
     cres = jit_compiler(
         fn=gelu_tanh_forward,
         argtypes=(Float32,),
-        ruleset=(
+        rule_schedule=(
             base_ruleset
             | setup_argtypes(TypeFloat32)
             | additional_rules
             | optimize_rules
-        ),
+        ).saturate()
+        + finalize_ruleset.saturate(),
         **compiler_config
     )
     llvm_module = cres.module
