@@ -141,7 +141,7 @@ def pipeline_egraph_extraction(
     ) as report:
         extraction = egraph_extraction(egraph)
         extresult = extraction.extract_graph_root()
-        extracted = extresult.extract_sexpr(rvsdg_expr, EGraphToRVSDG)
+        extracted = extresult.convert(rvsdg_expr, EGraphToRVSDG)
         cost = extresult.cost
         report.append("Cost", cost)
         report.append("Extracted", rvsdg.format_rvsdg(extracted))

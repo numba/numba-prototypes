@@ -90,7 +90,7 @@ def pipeline_egraph_extraction(
         )
         extresult = extraction.extract_graph_root()
         cost = extresult.cost
-        extracted = extresult.extract_sexpr(
+        extracted = extresult.convert(
             rvsdg_expr,
             converter_class=converter_class,  # <---- new
         )

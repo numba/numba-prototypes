@@ -540,7 +540,7 @@ def pipeline_egraph_extraction(
         # Process error message
         errors = []
         for k in grouped_by_type["ErrorMsg"]:
-            msg = extraction.extract_enode(k).extract_sexpr(
+            msg = extraction.extract_enode(k).convert(
                 rvsdg_expr,
                 converter_class=converter_class,
                 memo=memo,
@@ -557,7 +557,7 @@ def pipeline_egraph_extraction(
         # Extract to SExpr
         extresult = extraction.extract_graph_root()
         cost = extresult.cost
-        extracted = extresult.extract_sexpr(
+        extracted = extresult.convert(
             rvsdg_expr,
             converter_class=converter_class,
             memo=memo,
@@ -568,7 +568,7 @@ def pipeline_egraph_extraction(
 
         extracted_roots = defaultdict(list)
         for k in extraction.iter_graph_root():
-            node = extraction.extract_enode(k).extract_sexpr(
+            node = extraction.extract_enode(k).convert(
                 rvsdg_expr, converter_class, memo=memo
             )
             extracted_roots[extraction.node_types[k]].append(node)
