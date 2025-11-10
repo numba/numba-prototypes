@@ -231,6 +231,8 @@ class Backend:
         pass_man.add("convert-math-to-libm")
         pass_man.add("convert-func-to-llvm")
         pass_man.add("convert-index-to-llvm")
+        pass_man.add("convert-arith-to-llvm")
+        pass_man.add("convert-cf-to-llvm")
         pass_man.add("reconcile-unrealized-casts")
         pass_man.enable_verifier(True)
         pass_man.run(module.operation)
