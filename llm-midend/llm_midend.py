@@ -2432,9 +2432,83 @@ def read_parent_source_line() -> int:
     caller_frame = sys._getframe(1)
     return caller_frame.f_lineno
 
+class TimeRecorder:
+    def __init__(self):
+        self.records = {}
+        self.record_func = None
+    
+    def add_record(self, record):
+        curr_records = self.records.get(self.record_func, [])
+        curr_records.append(record)
+        self.records[self.record_func] = curr_records
+    
+    def pprint(self):
+        import tabulate
+        # Example data you want to show
+        data = []
+        for record_name, records in self.records.items():
+            np_exec_time = []
+            mlir_exec_time = []
+            mlir_conv_time = []
+            for record in records:
+                if isinstance(record, NumPyExecRecord):
+                    np_exec_time.append(record.elapsed_time)
+                elif isinstance(record, MlirExecRecord):
+                    mlir_exec_time.append(record.elapsed_time)
+                elif isinstance(record, MlirArgConvRecord):
+                    mlir_conv_time.append(record.elapsed_time)
+                else:
+                    raise TypeError("Record type not identified")
+
+            data.append([
+                record_name,
+                np.average(np_exec_time)/1000,
+                np.average(mlir_exec_time)/1000,
+                np.average(mlir_exec_time) / np.average(np_exec_time),
+                np.average(mlir_conv_time)/1000
+            ])
+
+        table = tabulate.tabulate(
+            data,
+            headers=["Test Name", "NumPy Exec Time (Avg.) us", "MLIR Exec Time (Avg.) us", "Factor", "Mlir Arg Conversion Time us"],
+            tablefmt="fancy_grid"
+        )
+
+        return table
+
+
+
+global_time_recorder = TimeRecorder()
+
+class Record:
+    def __init__(self, label: str):
+        self.label = label
+
+    def __enter__(self):
+        self.start_time = time.time_ns()
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        end_time = time.time_ns()
+        elapsed_time = end_time - self.start_time
+        self.elapsed_time = elapsed_time
+        print(f"[{self.label}] Elapsed time - {elapsed_time/1000} microseconds")
+        if global_time_recorder.record_func:
+            global_time_recorder.add_record(self)
+
+class NumPyExecRecord(Record):
+    def __init__(self):
+        super().__init__("NumPy Execution: ")
+
+class MlirExecRecord(Record):
+    def __init__(self):
+        super().__init__("MLIR Execution: ")
+
+class MlirArgConvRecord(Record):
+    def __init__(self):
+        super().__init__("MLIR Argument Conversion: ")
 
 class MlirBackend(_MlirBackend):
-    tmp_dir: str | None = None
+    tmp_dir: str = "tmp"
 
     def __init__(self):
         super().__init__()
@@ -3745,8 +3819,6 @@ class MlirBackend(_MlirBackend):
 
         # Build a wrapper function
         def jit_func(*args):
-            import time
-
             def as_memref_descriptor(arr, ty):
                 intptr_t = getattr(ctypes, f"c_int{8 * ctypes.sizeof(ctypes.c_void_p)}")
                 ty_ptr = ctypes.POINTER(ty)
@@ -3760,39 +3832,26 @@ class MlirBackend(_MlirBackend):
 
                 return arg0, arg1, arg2, *shapes_arg, *strides_arg
 
-            res_val = np.zeros(output_types[0].shape)
+            with MlirArgConvRecord():
+                res_val = np.zeros(output_types[0].shape)
+                all_args = list(args) + [res_val]
+                all_arrs_as_descriptors = [
+                    as_memref_descriptor(arr, ctypes.c_double) for arr in all_args
+                ]
+                func_argtypes = [*[type(x) for arr in all_arrs_as_descriptors for x in arr]]
+                module.attention.argtypes = func_argtypes
+                module.attention.restype = ctypes.c_void_p
 
-            all_args = list(args) + [res_val]
-            all_arrs_as_descriptors = [
-                as_memref_descriptor(arr, ctypes.c_double) for arr in all_args
-            ]
+                final_args = []
+                for x in all_arrs_as_descriptors:
+                    final_args.extend(x)
 
-            func_argtypes = [*[type(x) for arr in all_arrs_as_descriptors for x in arr]]
-
-            module.attention.argtypes = func_argtypes
-
-            module.attention.restype = ctypes.c_void_p
-
-            final_args = []
-            for x in all_arrs_as_descriptors:
-                final_args.extend(x)
-
-            for _ in range(10):
-                pstart = time.time_ns()
                 input_args = args
-
                 assert len(input_args) == len(input_types)
 
-                pend = time.time_ns()
-                jstart = time.time_ns()
-                module.attention(*final_args)
-                jend = time.time_ns()
-
-                tstart = time.time_ns()
-                tend = time.time_ns()
-                print(
-                    f"MLIRGen: To Memref {(pend - pstart)/1000} microseconds, Exec {(jend-jstart)/1000} microseconds, To NumPy {(tend-tstart)/1000} microseconds"
-                )
+            for _ in range(10):
+                with MlirExecRecord():
+                    module.attention(*final_args)
 
             return res_val
 

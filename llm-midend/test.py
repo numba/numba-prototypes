@@ -25,6 +25,8 @@ from llm_midend import (
     ruleset_slice,
     ruleset_more_constant_folding,
     ruleset_more_typing,
+    global_time_recorder,
+    NumPyExecRecord
 )
 
 from mlir_backend import jit_compiler, setup_argtypes
@@ -662,14 +664,10 @@ def _run_array_unary_test(target_function, inary):
 
 
 def _run_array_test(target_function, args):
-    import time
-
+    global_time_recorder.record_func = target_function.__name__
     for _ in range(n_repeats):
-        start = time.time_ns()
-        desired = target_function(*args)
-        end = time.time_ns()
-        print("\nNumPy: Exec {:.3f} microseconds".format((end - start) / 1000))
-
+        with NumPyExecRecord():
+            desired = target_function(*args)
     try:
         cres = run_compiler(target_function, args)
     except TodoException:
@@ -798,7 +796,7 @@ def _run_array_test(target_function, args):
 def _run_internal_tests(test_func_str, gen_fn_args, in_shapes, out_shape):
     from mlir.dialects import func
     from mlir import ir
-
+    global_time_recorder.record_func = test_func_str
     test_backend = MlirBackend()
     context = test_backend.context
     loc = ir.Location.name(f"{test_backend}.lower()", context=context)
@@ -847,10 +845,8 @@ def _run_internal_tests(test_func_str, gen_fn_args, in_shapes, out_shape):
 def bench_np(np_func):
 
     def wrapper(*args):
-        start = time.time_ns()
-        res = np_func(*args)
-        end = time.time_ns()
-        print("\nNumPy: Exec {:.3f} microseconds".format((end - start) / 1000))
+        with NumPyExecRecord():
+            res = np_func(*args)
 
         return res
 
