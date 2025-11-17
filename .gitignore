@@ -4,3 +4,4 @@
 .*__pycache__
 pages/**
 .ipynb_checkpoints
+llm-midend/tmp
