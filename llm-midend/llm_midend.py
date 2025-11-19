@@ -2532,7 +2532,6 @@ class MlirBackend(_MlirBackend):
         passes = [
             # Phase 1: Clean up and canonicalize
             "canonicalize",
-            "cse",
             "symbol-dce",
             # Phase 2: Linalg optimizations
             "linalg-fold-unit-extent-dims",
@@ -2541,7 +2540,6 @@ class MlirBackend(_MlirBackend):
             # Phase 3: Bufferization
             "one-shot-bufferize{bufferize-function-boundaries}",
             "canonicalize",
-            "cse",
             # Phase 4: Convert to loops
             "linalg-generalize-named-ops",
             "convert-linalg-to-affine-loops",
@@ -2570,7 +2568,6 @@ class MlirBackend(_MlirBackend):
             "scf-for-loop-specialization",
             # "for-loop-invariant-code-motion",
             "canonicalize",
-            "cse",
             #     --buffer-deallocation                                  -   Adds all required dealloc operations for all allocations in the input program
             #   --buffer-deallocation-simplification                   -   Optimizes `bufferization.dealloc` operation for more efficient codegen
             #   --buffer-hoisting                                      -   Optimizes placement of allocation operations by moving them into common dominators and out of nested regions
@@ -3786,34 +3783,54 @@ class MlirBackend(_MlirBackend):
             file.write(asm)
 
         import subprocess
-
-        subprocess.run(
-            ["mlir-translate", "--mlir-to-llvmir", os.path.join(self.tmp_dir, self.curr_dir_name, "output.mlir"), "-o", os.path.join(self.tmp_dir, self.curr_dir_name, "output.ll")]
-        )
-        subprocess.run(
-            [
-                "llc",
-                "-filetype=obj",
-                "--relocation-model=pic",
-                os.path.join(self.tmp_dir, self.curr_dir_name, "output.ll"),
-                "-o",
-                os.path.join(self.tmp_dir, self.curr_dir_name, "output.o"),
-            ]
-        )
-        # TODO: The clib detection should be dynamic
-        subprocess.run(
-            [
-                "gcc",
-                "-shared",
-                "-fPIC",
-                os.path.join(self.tmp_dir, self.curr_dir_name, "output.o"),
-                "-o",
-                os.path.join(self.tmp_dir, self.curr_dir_name, "output.so"),
-                "-L/home/kc611/miniconda3/envs/mlir21/lib/",
-                "-lmlir_c_runner_utils",
-            ]
-        )
         import ctypes
+
+        try:
+            subprocess.check_call(
+                ["mlir-translate", "--mlir-to-llvmir", os.path.join(self.tmp_dir, self.curr_dir_name, "output.mlir"), "-o", os.path.join(self.tmp_dir, self.curr_dir_name, "output.ll")]
+            )
+        except subprocess.CalledProcessError as e:
+            print("Error during mlir-translate:")
+            print(e)
+            raise
+    
+        try:
+            subprocess.check_call(
+                [
+                    "llc",
+                    "-filetype=obj",
+                    "--relocation-model=pic",
+                    os.path.join(self.tmp_dir, self.curr_dir_name, "output.ll"),
+                "-o",
+                os.path.join(self.tmp_dir, self.curr_dir_name, "output.o"),
+            ]
+        )
+        except subprocess.CalledProcessError as e:
+            print("Error during llc:")
+            print(e)
+            raise
+
+        try:
+            mlir_clib_path = ctypes.util.find_library("mlir_c_runner_utils")
+            if mlir_clib_path is None:
+                raise RuntimeError("Could not find mlir_c_runner_utils library")
+            
+            subprocess.check_call(
+                [
+                    "gcc",
+                    "-shared",
+                    "-fPIC",
+                    os.path.join(self.tmp_dir, self.curr_dir_name, "output.o"),
+                    "-o",
+                    os.path.join(self.tmp_dir, self.curr_dir_name, "output.so"),
+                    f"-L{os.path.dirname(mlir_clib_path)}",
+                    "-lmlir_c_runner_utils",
+                ]
+            )
+        except subprocess.CalledProcessError as e:
+            print("Error during gcc:")
+            print(e)
+            raise
 
         module = ctypes.CDLL(os.path.join(self.tmp_dir, self.curr_dir_name, "output.so"))
 
@@ -3839,8 +3856,11 @@ class MlirBackend(_MlirBackend):
                     as_memref_descriptor(arr, ctypes.c_double) for arr in all_args
                 ]
                 func_argtypes = [*[type(x) for arr in all_arrs_as_descriptors for x in arr]]
-                module.attention.argtypes = func_argtypes
-                module.attention.restype = ctypes.c_void_p
+
+                module_func = getattr(module, function_name)
+
+                module_func.argtypes = func_argtypes
+                module_func.restype = ctypes.c_void_p
 
                 final_args = []
                 for x in all_arrs_as_descriptors:
@@ -3851,7 +3871,7 @@ class MlirBackend(_MlirBackend):
 
             for _ in range(10):
                 with MlirExecRecord():
-                    module.attention(*final_args)
+                    module_func(*final_args)
 
             return res_val
 

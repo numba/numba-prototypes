@@ -72,7 +72,7 @@ class LowerStates(ase.TraverseState):
     constant_block: ir.Block
 
 
-function_name = "attention"
+function_name = "func"
 
 
 class Backend:
